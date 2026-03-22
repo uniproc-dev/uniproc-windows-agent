@@ -1,21 +1,28 @@
 #![allow(unsafe_op_in_unsafe_fn)]
+#![allow(non_snake_case, non_camel_case_types)]
 
-mod etw;
+mod collector;
+pub mod etw;
 mod logger;
+mod monitor;
+mod node;
+mod providers;
 mod service;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tracing::info;
 
-const SERVICE_NAME: &str = "EtwProcessMonitor";
-const SERVICE_DISPLAY: &str = "ETW Process Monitor";
-const SERVICE_DESC: &str = "Monitors process creation/termination via ETW";
-const ETW_SESSION_NAME: &str = "EtwProcessMonitorSession";
+const SERVICE_NAME: &str = "UniprocProcessMonitor";
+const SERVICE_DISPLAY: &str = "Uniproc Process Monitor";
+const SERVICE_DESC: &str = "Provides system monitoring (processes, disk I/O, network, CPU) \
+                               and exposes control primitives for process and Windows management \
+                               on behalf of the Uniproc application";
 
 #[derive(Parser)]
 #[command(
-    name = "etw_monitor",
-    about = "ETW-based process monitor / Windows service",
+    name = "uniproc_monitor",
+    about = "Uniproc System Monitor Service",
     version
 )]
 struct Cli {
@@ -29,7 +36,7 @@ enum Command {
     Install,
     /// Uninstall the Windows service
     Uninstall,
-    /// Run directly in the console (for development/debugging)
+    /// Run directly in the console
     Run,
 }
 
@@ -40,18 +47,18 @@ fn main() -> Result<()> {
         Some(Command::Install) => {
             service::install(SERVICE_NAME, SERVICE_DISPLAY, SERVICE_DESC)
                 .context("Failed to install service")?;
-            println!("[+] Service installed successfully.");
+            info!("[+] Service installed successfully.");
         }
         Some(Command::Uninstall) => {
             service::uninstall(SERVICE_NAME).context("Failed to uninstall service")?;
-            println!("[+] Service uninstalled successfully.");
+            info!("[+] Service uninstalled successfully.");
         }
         Some(Command::Run) => {
             logger::init_console();
-            service::run_direct(ETW_SESSION_NAME)?;
+            service::run_direct()?;
         }
         None => {
-            service::run_as_service(SERVICE_NAME, ETW_SESSION_NAME)?;
+            service::run_as_service(SERVICE_NAME)?;
         }
     }
 
