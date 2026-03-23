@@ -1,17 +1,12 @@
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::sync::Arc;
-
 use anyhow::Result;
-use binrw::BinRead;
 use parking_lot::Mutex;
-use tracing::warn;
-use windows::Win32::System::Diagnostics::Etw::*;
 
 use crate::collector::provider::{ProcessMap, Provider};
 use crate::collector::state::{DiskEvent, DiskEventType, StateChange};
 use crate::etw::kernel_session::KernelSessionRouter;
-use crate::etw::vars::KERNEL_DISK_PROVIDER;
+use crate::etw::vars::{DISK_IO_TASK_GUID};
 use crate::providers::utils::to_user_data;
 
 struct PendingIrp {
@@ -40,7 +35,7 @@ impl Provider for KernelDiskProvider {
         let pending: Arc<Mutex<HashMap<u64, PendingIrp>>> = Arc::new(Mutex::new(HashMap::new()));
 
         kernel.register(move |record| {
-            if record.EventHeader.ProviderId != KERNEL_DISK_PROVIDER {
+            if record.EventHeader.ProviderId != DISK_IO_TASK_GUID {
                 return;
             }
             let opcode = record.EventHeader.EventDescriptor.Opcode;

@@ -14,10 +14,10 @@ impl Default for ProcessStatsCollector {
         let settings = CollectorSettings::default();
         Self::new(
             vec![
-                Box::new(cpu::CpuPollerProvider::new(settings.cpu_interval_ms.clone())),
+                Box::new(cpu::CpuPollerProvider::new(settings.interval_ms.clone())),
                 Box::new(bootstrap::BootstrapProvider::new()),
                 Box::new(disk::KernelDiskProvider::new()),
-                Box::new(memory::MemoryPollerProvider::new(settings.memory_interval_ms.clone())),
+                Box::new(memory::MemoryPollerProvider::new(settings.interval_ms.clone())),
                 Box::new(network::KernelNetworkProvider::new()),
                 Box::new(process::KernelProcessProvider::new()),
             ],

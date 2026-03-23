@@ -36,16 +36,8 @@ macro_rules! guid {
         )
     }};
 }
-/// Microsoft-Windows-Kernel-Process  (modern, manifest-based)
+
 pub const KERNEL_PROCESS_PROVIDER: GUID = guid!("22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716");
-
-/// NT Kernel Logger — Disk I/O  (classic GUID, DiskIo_TypeGroup*)
-pub const KERNEL_DISK_PROVIDER: GUID = guid!("3D6FA8D1-FE05-11D0-9DDA-00C04FD7BA7C");
-
-/// NT Kernel Logger — Network  (classic GUID, TcpIp_TypeGroup* / UdpIp_TypeGroup*)
-pub const KERNEL_NETWORK_PROVIDER: GUID = guid!("9A280AC0-C8E0-11D1-84E2-00C04FB998A2");
-
-pub const KERNEL_PROCESS_PROVIDER_CLASSIC: GUID = guid!("3D6FA8D0-FE05-11D0-9DDA-00C04FD7BA7C");
 
 //https://github.com/microsoft/perfview/blob/main/src/TraceEvent/Parsers/KernelTraceEventParser.cs#L3014
 pub const EVENT_TRACE_TASK_GUID: GUID = guid!("68fdd900-4a3e-11d1-84f4-0000f80464e3");
@@ -68,11 +60,11 @@ pub const VIRTUAL_ALLOC_TASK_GUID: GUID = guid!("3d6fa8d3-fe05-11d0-9dda-00c04fd
 pub const OBJECT_TASK_GUID: GUID = guid!("89497f50-effe-4440-8cf2-ce6b1cdcaca7");
 pub const LBR_TASK_GUID: GUID = guid!("99134383-5248-43fc-834b-529454e75df3");
 
-// Classic opcode constants not exported by the windows crate
+
 pub const EVENT_TRACE_TYPE_DISK_READ: u8 = 10;
 pub const EVENT_TRACE_TYPE_DISK_WRITE: u8 = 11;
 
-// TcpIp opcodes
+
 pub const TCPIP_SEND: u8 = 10;
 pub const TCPIP_RECEIVE: u8 = 11;
 pub const TCPIP_CONNECT: u8 = 12;

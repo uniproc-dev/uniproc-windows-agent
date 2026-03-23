@@ -4,29 +4,44 @@ use ogurpchik::high::node::Node;
 use ogurpchik::high::service_handler::ServiceHandler;
 use ogurpchik::transport::stream::adapters::uds::UdsTransport;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use uniproc_protocol::{
     ArchivedWindowsRequest, WindowsCodec, WindowsMachineStats, WindowsReport, WindowsResponse,
     services,
 };
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
+use crate::collector::settings::CollectorSettings;
 use crate::collector::state::ProcessEntry;
 use crate::monitor::SharedCollector;
+use crate::commands;
 
 #[derive(Clone)]
 pub struct WindowsHandler {
     collector: SharedCollector,
+    settings: CollectorSettings,
 }
 
 impl ServiceHandler<WindowsCodec> for WindowsHandler {
     async fn on_request<'a>(&self, req: &ArchivedWindowsRequest) -> Result<WindowsResponse> {
         match req {
             ArchivedWindowsRequest::GetReport => {
-                let collector = Arc::clone(&self.collector);
-                let report = build_report(&collector.lock().unwrap().processes());
+                let report = build_report(&self.collector.lock().unwrap().processes());
                 Ok(WindowsResponse::Report(report))
             }
             ArchivedWindowsRequest::Ping => Ok(WindowsResponse::Pong),
+            ArchivedWindowsRequest::SetConfig(cfg) => {
+                if cfg.memory_interval_ms > 0 {
+                    self.settings.set_interval(Duration::from_millis(cfg.memory_interval_ms.into()));
+                }
+                if cfg.cpu_interval_ms > 0 {
+                    self.settings.set_interval(Duration::from_millis(cfg.cpu_interval_ms.into()));
+                }
+                Ok(WindowsResponse::ConfigApplied)
+            }
+            ArchivedWindowsRequest::ProcessCommand(cmd) => {
+                Ok(WindowsResponse::CommandResult(commands::execute(cmd)))
+            }
         }
     }
 }
@@ -97,11 +112,13 @@ fn build_report(processes: &[ProcessEntry]) -> WindowsReport {
 }
 
 pub async fn run(collector: SharedCollector) -> Result<()> {
+    let settings = collector.lock().unwrap().settings();
+
     let _guard = Node::new()?
         .scope(Scope::Internal)?
         .serve::<WindowsCodec, _, _>(
             UdsTransport::temp("uniproc-windows"),
-            WindowsHandler { collector },
+            WindowsHandler { collector, settings },
         )
         .publish(services::WINDOWS_AGENT)
         .start()

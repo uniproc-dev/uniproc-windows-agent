@@ -8,6 +8,7 @@ mod monitor;
 mod node;
 mod providers;
 mod service;
+mod commands;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

@@ -22,6 +22,7 @@ const EVENT_ID_PROCESS_START: u16 = 1;
 const EVENT_ID_PROCESS_STOP: u16 = 2;
 const EVENT_ID_THREAD_START: u16 = 3;
 const EVENT_ID_THREAD_STOP: u16 = 4;
+
 pub struct KernelProcessProvider {
     queue: Arc<Mutex<Vec<StateChange>>>,
     session: Mutex<Option<EtwSession>>,
@@ -45,7 +46,7 @@ impl Provider for KernelProcessProvider {
         let session = EtwSession::start(SESSION_NAME, 0, SessionMode::Normal)?;
         session.enable(&KERNEL_PROCESS_PROVIDER)?;
 
-        let queue = Arc::clone(&self.queue);
+        let queue = self.queue.clone();
         let consumer = TraceConsumer::open(SESSION_NAME, move |record| {
             if record.EventHeader.ProviderId != PROCESS_TASK_GUID {
                 return;
@@ -98,7 +99,7 @@ impl Provider for KernelProcessProvider {
         })?;
 
         self.running.store(true, Ordering::SeqCst);
-        consumer.spawn_pump(Arc::clone(&self.running));
+        consumer.spawn_pump(self.running.clone());
 
         *self.session.lock() = Some(session);
         *self.consumer.lock() = Some(consumer);
