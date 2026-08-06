@@ -1,6 +1,8 @@
 pub mod events;
 pub mod process;
 
+use std::collections::HashSet;
+
 use crate::state::events::{DiskEventType, MachineSnapshot, NetworkEventType, StateChange};
 use crate::state::process::{ProcessEntry, ProcessTable};
 
@@ -20,6 +22,8 @@ pub struct SystemState {
     processes: ProcessTable,
     machine: Option<MachineSnapshot>,
     machine_totals: MachineTotals,
+    service_pids: HashSet<u32>,
+    window_pids: HashSet<u32>,
 }
 
 impl SystemState {
@@ -28,12 +32,20 @@ impl SystemState {
             processes: ProcessTable::new(),
             machine: None,
             machine_totals: MachineTotals::default(),
+            service_pids: HashSet::new(),
+            window_pids: HashSet::new(),
         }
     }
 
     pub fn apply(&mut self, change: StateChange) {
         match &change {
             StateChange::Machine(snap) => self.machine = Some(snap.clone()),
+            StateChange::ServicePidsSnapshot(pids) => {
+                self.service_pids = pids.iter().copied().collect();
+            }
+            StateChange::VisibleWindowPidsSnapshot(pids) => {
+                self.window_pids = pids.iter().copied().collect();
+            }
             StateChange::Disk(e) => match e.event_type {
                 DiskEventType::Read => {
                     self.machine_totals.disk_read_bytes += e.transfer_size;
@@ -63,8 +75,22 @@ impl SystemState {
         &self.machine_totals
     }
 
-    pub fn snapshot(&self) -> Vec<ProcessEntry> {
-        self.processes.snapshot().into_iter().cloned().collect()
+    pub fn len(&self) -> usize {
+        self.processes.len()
+    }
+
+    /// By-reference view for report building: no per-request cloning of the
+    /// whole table. Dynamic flags are resolved per entry by the caller.
+    pub fn entries(&self) -> impl Iterator<Item = &ProcessEntry> {
+        self.processes.entries()
+    }
+
+    pub fn is_service(&self, pid: u32) -> bool {
+        self.service_pids.contains(&pid)
+    }
+
+    pub fn has_visible_window(&self, pid: u32) -> bool {
+        self.window_pids.contains(&pid)
     }
 }
 

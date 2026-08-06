@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use windows::Win32::System::Services::{
     CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx,
-    SC_HANDLE, SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_CONTROL_CONTINUE,
-    SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_STOP, SERVICE_PAUSE_CONTINUE, SERVICE_QUERY_STATUS,
-    SERVICE_START, SERVICE_STATUS_CURRENT_STATE, SERVICE_STATUS_PROCESS, SERVICE_STOP,
-    SERVICE_STOPPED, StartServiceW,
+    SC_HANDLE, SC_MANAGER_CONNECT, SC_MANAGER_ENUMERATE_SERVICE, SC_STATUS_PROCESS_INFO,
+    SERVICE_CONTROL_CONTINUE, SERVICE_CONTROL_PAUSE, SERVICE_CONTROL_STOP, SERVICE_PAUSE_CONTINUE,
+    SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STATUS_CURRENT_STATE, SERVICE_STATUS_PROCESS,
+    SERVICE_STOP, SERVICE_STOPPED, StartServiceW,
 };
 use windows::core::PCWSTR;
 
@@ -26,7 +26,7 @@ pub fn win32_code(e: &windows::core::Error) -> u32 {
 }
 
 #[derive(Clone, Copy)]
-pub struct ScHandle(SC_HANDLE);
+pub struct ScHandle(pub SC_HANDLE);
 
 // SAFETY: SCM handles are not thread-affine; the Service Control Manager
 // serializes access on its side.
@@ -36,8 +36,10 @@ pub struct ScManager(ScHandle);
 
 impl ScManager {
     pub fn open() -> Result<Self, u32> {
-        let handle =
-            unsafe { OpenSCManagerW(None, None, SC_MANAGER_CONNECT) }.map_err(|e| win32_code(&e))?;
+        let handle = unsafe {
+            OpenSCManagerW(None, None, SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE)
+        }
+        .map_err(|e| win32_code(&e))?;
         Ok(Self(ScHandle(handle)))
     }
 

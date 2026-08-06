@@ -82,13 +82,36 @@ fn set_status(
 pub fn run_direct() -> Result<()> {
     info!("Starting monitoring (press Ctrl+C to stop).");
     monitor::run(|| {
+        // thread::park may wake spuriously, so gate on a flag, not on the park.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_handler = stop.clone();
         let main_thread = std::thread::current();
         ctrlc::set_handler(move || {
             info!("Ctrl+C received, stopping…");
+            stop_handler.store(true, std::sync::atomic::Ordering::SeqCst);
             main_thread.unpark();
         })
         .ok();
-        std::thread::park();
+        // Dev-only profiling knob: graceful self-stop after N seconds.
+        let deadline = std::env::var("UNIPROC_STOP_AFTER_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|secs| std::time::Instant::now() + Duration::from_secs(secs));
+        loop {
+            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            match deadline {
+                Some(d) => {
+                    let now = std::time::Instant::now();
+                    if now >= d {
+                        break;
+                    }
+                    std::thread::park_timeout(d - now);
+                }
+                None => std::thread::park(),
+            }
+        }
     })
 }
 

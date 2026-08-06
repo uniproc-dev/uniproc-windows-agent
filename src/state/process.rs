@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::state::events::{
-    DiskEventType, MemorySnapshot, NetworkEventType, ProcessStarted, StateChange,
+    DiskEventType, MemorySnapshot, NetworkEventType, ProcessStarted, ProcessSignature, StateChange,
 };
 
 #[derive(Default, Debug, Clone)]
@@ -31,9 +31,14 @@ pub struct ProcessEntry {
     pub parent_pid: u32,
     pub session_id: u32,
     pub image_name: String,
+    pub image_path: String,
     pub command_line: Vec<String>,
     pub package_name: String,
     pub package_relative_app_id: String,
+
+    pub signature: ProcessSignature,
+    pub is_kernel_process: bool,
+    pub is_windows_process: bool,
 
     pub memory: Option<MemorySnapshot>,
     pub cpu: CpuStats,
@@ -48,9 +53,13 @@ impl From<&ProcessStarted> for ProcessEntry {
             parent_pid: e.parent_pid,
             session_id: e.session_id,
             image_name: e.image_name.clone(),
+            image_path: String::new(),
             command_line: e.command_line.clone(),
             package_name: e.package_full_name.clone(),
             package_relative_app_id: e.package_relative_app_id.clone(),
+            signature: ProcessSignature::Unknown,
+            is_kernel_process: e.is_kernel_process,
+            is_windows_process: e.is_kernel_process,
             memory: None,
             cpu: CpuStats::default(),
             disk: DiskStats::default(),
@@ -66,9 +75,13 @@ impl From<ProcessStarted> for ProcessEntry {
             parent_pid: e.parent_pid,
             session_id: e.session_id,
             image_name: e.image_name,
+            image_path: String::new(),
             command_line: e.command_line,
             package_name: e.package_full_name,
             package_relative_app_id: e.package_relative_app_id,
+            signature: ProcessSignature::Unknown,
+            is_kernel_process: e.is_kernel_process,
+            is_windows_process: e.is_kernel_process,
             memory: None,
             cpu: CpuStats::default(),
             disk: DiskStats::default(),
@@ -95,11 +108,18 @@ impl ProcessTable {
             StateChange::ProcessStarted(e) | StateChange::ProcessRundown(e) => {
                 self.processes.insert(e.pid, ProcessEntry::from(e));
             }
-            StateChange::ProcessCommandLine { pid, command_line } => {
-                if let Some(entry) = self.processes.get_mut(&pid) {
-                    entry.command_line = command_line;
+            StateChange::ProcessEnriched(e) => {
+                if let Some(entry) = self.processes.get_mut(&e.pid) {
+                    if !e.command_line.is_empty() {
+                        entry.command_line = e.command_line;
+                    }
+                    entry.image_path = e.image_path;
+                    entry.signature = e.signature;
+                    entry.is_kernel_process = e.is_kernel_process;
+                    entry.is_windows_process = e.is_windows_process;
                 }
             }
+            StateChange::ServicePidsSnapshot(_) | StateChange::VisibleWindowPidsSnapshot(_) => {}
             StateChange::ProcessStopped(pid) => {
                 self.processes.remove(&pid);
             }
@@ -161,8 +181,12 @@ impl ProcessTable {
         self.processes.get(&pid)
     }
 
-    pub fn snapshot(&self) -> Vec<&ProcessEntry> {
-        self.processes.values().collect()
+    pub fn len(&self) -> usize {
+        self.processes.len()
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = &ProcessEntry> {
+        self.processes.values()
     }
 }
 

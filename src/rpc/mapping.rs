@@ -1,13 +1,22 @@
-use uniproc_protocol::windows_capnp::{machine_stats, report};
+use uniproc_protocol::windows_capnp::{SignatureStatus, machine_stats, report};
 
 use crate::state::SystemState;
+use crate::state::events::ProcessSignature;
+
+fn signature_status(s: ProcessSignature) -> SignatureStatus {
+    match s {
+        ProcessSignature::Unknown => SignatureStatus::Unknown,
+        ProcessSignature::Unsigned => SignatureStatus::Unsigned,
+        ProcessSignature::Microsoft => SignatureStatus::Microsoft,
+        ProcessSignature::ThirdParty => SignatureStatus::ThirdParty,
+    }
+}
 
 pub fn build_report(state: &SystemState, mut out: report::Builder) {
     build_machine_stats(state, out.reborrow().init_machine());
 
-    let processes = state.snapshot();
-    let mut list = out.reborrow().init_processes(processes.len() as u32);
-    for (i, e) in processes.iter().enumerate() {
+    let mut list = out.reborrow().init_processes(state.len() as u32);
+    for (i, e) in state.entries().enumerate() {
         let mut p = list.reborrow().get(i as u32);
         p.set_pid(e.pid);
         p.set_parent_pid(e.parent_pid);
@@ -36,6 +45,13 @@ pub fn build_report(state: &SystemState, mut out: report::Builder) {
 
         p.set_net_rx_bytes(e.network.recv_bytes);
         p.set_net_tx_bytes(e.network.sent_bytes);
+
+        p.set_is_service(state.is_service(e.pid));
+        p.set_has_visible_window(state.has_visible_window(e.pid));
+        p.set_is_kernel_process(e.is_kernel_process);
+        p.set_is_windows_process(e.is_windows_process);
+        p.set_signature(signature_status(e.signature));
+        p.set_image_path(&e.image_path);
     }
 }
 

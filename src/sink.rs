@@ -5,9 +5,11 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::state::events::StateChange;
 
-/// Channel capacity. Sized for the bootstrap rundown (~300 processes with
-/// all threads in one burst) with headroom.
-pub const DEFAULT_CAPACITY: usize = 65_536;
+/// Channel capacity. Sized for the bootstrap rundown (~400 processes with
+/// ~8k threads in one burst) with 2x headroom; a full channel degrades to
+/// counted drops instead of growth. 65k slots cost 8 MB resident for no
+/// benefit, so keep it tight.
+pub const DEFAULT_CAPACITY: usize = 16_384;
 
 #[derive(Clone)]
 pub struct Sink {

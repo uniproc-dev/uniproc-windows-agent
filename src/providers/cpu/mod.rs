@@ -46,31 +46,36 @@ impl Provider for CpuPollerProvider {
 
         std::thread::Builder::new()
             .name("cpu-poller".into())
-            .spawn(move || loop {
-                let ms = interval_ms.load(Ordering::Relaxed);
-                std::thread::sleep(Duration::from_millis(ms));
-
-                let elapsed_ns = {
-                    let mut t = last_tick.lock();
-                    let e = t.elapsed().as_nanos() as u64;
-                    *t = Instant::now();
-                    e
-                };
-
-                if elapsed_ns == 0 {
-                    continue;
-                }
-
-                let pids: Vec<u32> = live_pids.iter().map(|e| *e.key()).collect();
-                let mut prev = prev.lock();
+            .spawn(move || {
+                let mut pids: Vec<u32> = Vec::new();
                 let mut changes = Vec::new();
+                loop {
+                    let ms = interval_ms.load(Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(ms));
 
-                for pid in pids {
-                    let cpu = unsafe { sample(pid, &mut prev, elapsed_ns, num_cores) };
-                    changes.push(StateChange::CpuUsage { pid, percent: cpu });
+                    let elapsed_ns = {
+                        let mut t = last_tick.lock();
+                        let e = t.elapsed().as_nanos() as u64;
+                        *t = Instant::now();
+                        e
+                    };
+
+                    if elapsed_ns == 0 {
+                        continue;
+                    }
+
+                    pids.clear();
+                    pids.extend(live_pids.iter().map(|e| *e.key()));
+                    let mut prev = prev.lock();
+                    changes.clear();
+
+                    for &pid in &pids {
+                        let cpu = unsafe { sample(pid, &mut prev, elapsed_ns, num_cores) };
+                        changes.push(StateChange::CpuUsage { pid, percent: cpu });
+                    }
+
+                    sink.emit_all(changes.drain(..));
                 }
-
-                sink.emit_all(changes);
             })
             .expect("failed to spawn cpu-poller");
 

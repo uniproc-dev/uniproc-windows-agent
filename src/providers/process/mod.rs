@@ -4,20 +4,24 @@ mod vars;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use parking_lot::Mutex;
 
+use crate::commands::services::ScManager;
 use crate::etw::router::KernelRouterBuilder;
 use crate::etw::signatures::utils::parse;
 use crate::providers::process::events::{ProcessStartV4Header, ProcessStopData, ThreadTypeGroup1};
 use crate::providers::process::vars::*;
 use crate::providers::provider::{LivePids, Provider};
-use crate::providers::utils::{parse_cmd_line, query_command_line};
+use crate::providers::utils::{
+    check_signature, enum_service_pids, enum_visible_window_pids, is_windows_process,
+    parse_cmd_line, query_command_line, query_image_path,
+};
 use crate::sink::Sink;
-use crate::state::events::{ProcessStarted, StateChange};
+use crate::state::events::{ProcessEnriched, ProcessSignature, ProcessStarted, StateChange};
 
 pub use vars::KERNEL_PROCESS_PROVIDER;
 
@@ -35,7 +39,11 @@ pub struct KernelProcessProvider {
 
 impl KernelProcessProvider {
     pub fn new() -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        Self::with_queue(crossbeam_channel::unbounded())
+    }
+
+    /// Shared enrichment queue: bootstrap also feeds pids into it.
+    pub fn with_queue((tx, rx): (Sender<u32>, Receiver<u32>)) -> Self {
         Self {
             tx,
             rx: Mutex::new(Some(rx)),
@@ -48,6 +56,52 @@ impl KernelProcessProvider {
 impl Default for KernelProcessProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Everything enrich() derives from the image path alone — cached per path:
+/// one encode_wide + WinVerifyTrust per unique exe instead of per process.
+#[derive(Clone, Copy)]
+struct PathVerdict {
+    signature: ProcessSignature,
+    is_windows_process: bool,
+}
+
+fn enrich(
+    pid: u32,
+    verdict_cache: &mut std::collections::HashMap<String, PathVerdict>,
+) -> ProcessEnriched {
+    // Per-process by nature (different instances of one exe differ), not cached.
+    let command_line = unsafe { query_command_line(pid) }
+        .map(|s| unsafe { parse_cmd_line(&s) })
+        .unwrap_or_default();
+
+    let image_path = unsafe { query_image_path(pid) }.unwrap_or_default();
+    let is_kernel_process = image_path.is_empty() || !std::path::Path::new(&image_path).exists();
+
+    // A file replaced while its process is alive keeps the stale verdict — fine.
+    let verdict = if is_kernel_process {
+        PathVerdict {
+            signature: ProcessSignature::Unknown,
+            is_windows_process: true,
+        }
+    } else {
+        *verdict_cache.entry(image_path.clone()).or_insert_with(|| {
+            let signature = check_signature(&image_path);
+            PathVerdict {
+                signature,
+                is_windows_process: is_windows_process(false, signature),
+            }
+        })
+    };
+
+    ProcessEnriched {
+        pid,
+        command_line,
+        image_path,
+        signature: verdict.signature,
+        is_kernel_process,
+        is_windows_process: verdict.is_windows_process,
     }
 }
 
@@ -71,6 +125,7 @@ impl Provider for KernelProcessProvider {
                             package_full_name: hdr.package_full_name.to_string(),
                             package_relative_app_id: hdr.package_relative_app_id.to_string(),
                             command_line: Vec::new(),
+                            is_kernel_process: false,
                         })
                     }
                     EVENT_ID_PROCESS_STOP => {
@@ -103,21 +158,37 @@ impl Provider for KernelProcessProvider {
         let running = self.running.clone();
 
         let handle = std::thread::Builder::new()
-            .name("process-cmdline".into())
+            .name("process-enrich".into())
             .spawn(move || {
+                let scm = ScManager::open().ok();
+                let mut last_inventory = Instant::now() - INVENTORY_INTERVAL;
+                let mut verdict_cache = std::collections::HashMap::new();
+                let mut services_buf = Vec::new();
+
                 // Timeout, not channel-disconnect: the router-held Sender
                 // clone only drops when KernelRouter drops, which happens
                 // *after* Supervisor::stop() has already called this stop().
                 while running.load(Ordering::Relaxed) {
                     match rx.recv_timeout(Duration::from_millis(200)) {
-                        Ok(pid) => {
-                            let command_line = unsafe { query_command_line(pid) }
-                                .map(|s| unsafe { parse_cmd_line(&s) })
-                                .unwrap_or_default();
-                            sink.emit(StateChange::ProcessCommandLine { pid, command_line });
-                        }
-                        Err(RecvTimeoutError::Timeout) => continue,
+                        Ok(pid) => sink.emit(StateChange::ProcessEnriched(enrich(
+                            pid,
+                            &mut verdict_cache,
+                        ))),
+                        Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => break,
+                    }
+
+                    if last_inventory.elapsed() >= INVENTORY_INTERVAL {
+                        last_inventory = Instant::now();
+                        if let Some(scm) = &scm {
+                            sink.emit(StateChange::ServicePidsSnapshot(enum_service_pids(
+                                scm.handle(),
+                                &mut services_buf,
+                            )));
+                        }
+                        sink.emit(StateChange::VisibleWindowPidsSnapshot(
+                            enum_visible_window_pids(),
+                        ));
                     }
                 }
             })?;

@@ -40,14 +40,32 @@ async fn run(service: String) -> Result<(), Box<dyn std::error::Error>> {
     let reply = client.get_report_request().send().promise.await?;
     let report = reply.get()?.get_report()?;
     let machine = report.get_machine()?;
+    let processes = report.get_processes()?;
     println!(
         "getReport: {} processes, cpu {:.1}%, mem used {} kb, net rx {} tx {}",
-        report.get_processes()?.len(),
+        processes.len(),
         machine.get_cpu_percent(),
         machine.get_used_physical_kb(),
         machine.get_net_rx_bytes(),
         machine.get_net_tx_bytes(),
     );
+
+    for p in processes
+        .iter()
+        .filter(|p| p.get_is_service() || p.get_has_visible_window() || p.get_is_kernel_process())
+        .take(8)
+    {
+        println!(
+            "    pid={:<6} {:<28} svc={} window={} kernel={} windows={} sig={:?}",
+            p.get_pid(),
+            p.get_name()?.to_str()?,
+            p.get_is_service(),
+            p.get_has_visible_window(),
+            p.get_is_kernel_process(),
+            p.get_is_windows_process(),
+            p.get_signature()?,
+        );
+    }
 
     // Process commands on our own child process.
     let mut child = std::process::Command::new("ping")

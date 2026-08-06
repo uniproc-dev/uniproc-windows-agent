@@ -10,7 +10,7 @@ use windows::Win32::System::Power::{
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::GetSystemTimes;
 
-use crate::providers::machine::vars::{PDH_COLLECT_DELAY, PDH_PROCESSOR_PERFORMANCE};
+use crate::providers::machine::vars::PDH_PROCESSOR_PERFORMANCE;
 use crate::state::events::MachineSnapshot;
 
 #[derive(Clone, Copy)]
@@ -66,46 +66,69 @@ fn sample_cpu_percent(prev: &mut Option<CpuTimes>) -> f32 {
     percent
 }
 
-fn sample_processor_performance_percent() -> Option<f64> {
-    let mut query = PDH_HQUERY::default();
-    if unsafe { PdhOpenQueryW(None, 0, &mut query) } != 0 {
-        return None;
-    }
-
-    let mut counter = PDH_HCOUNTER::default();
-    let add_result = unsafe { PdhAddEnglishCounterW(query, PDH_PROCESSOR_PERFORMANCE, 0, &mut counter) };
-    if add_result != 0 {
-        let _ = unsafe { PdhCloseQuery(query) };
-        return None;
-    }
-
-    let _ = unsafe { PdhCollectQueryData(query) };
-    // Two PDH collects need a delay between them; fine on the poller thread.
-    std::thread::sleep(PDH_COLLECT_DELAY);
-    if unsafe { PdhCollectQueryData(query) } != 0 {
-        let _ = unsafe { PdhCloseQuery(query) };
-        return None;
-    }
-
-    let mut value = PDH_FMT_COUNTERVALUE::default();
-    let format_result =
-        unsafe { PdhGetFormattedCounterValue(counter, PDH_FMT_DOUBLE, None, &mut value) };
-    let _ = unsafe { PdhCloseQuery(query) };
-    if format_result != 0 {
-        return None;
-    }
-    if value.CStatus != PDH_CSTATUS_VALID_DATA {
-        return None;
-    }
-
-    Some(unsafe { value.Anonymous.doubleValue }.max(0.0))
+/// Persistent PDH query: opened once per poller thread instead of
+/// open/close on every sample. With a persistent query the rate is measured
+/// between consecutive collects (~one poll interval apart), so no extra
+/// sleep is needed between them.
+pub struct PdhProcessorPerformance {
+    query: PDH_HQUERY,
+    counter: PDH_HCOUNTER,
 }
 
-fn sample_cpu_frequency_mhz() -> (u64, u64) {
+impl PdhProcessorPerformance {
+    pub fn open() -> Option<Self> {
+        unsafe {
+            let mut query = PDH_HQUERY::default();
+            if PdhOpenQueryW(None, 0, &mut query) != 0 {
+                return None;
+            }
+
+            let mut counter = PDH_HCOUNTER::default();
+            if PdhAddEnglishCounterW(query, PDH_PROCESSOR_PERFORMANCE, 0, &mut counter) != 0 {
+                let _ = PdhCloseQuery(query);
+                return None;
+            }
+
+            // Prime the rate counter; the first formatted value is garbage.
+            let _ = PdhCollectQueryData(query);
+            Some(Self { query, counter })
+        }
+    }
+
+    pub fn sample(&mut self) -> Option<f64> {
+        unsafe {
+            if PdhCollectQueryData(self.query) != 0 {
+                return None;
+            }
+
+            let mut value = PDH_FMT_COUNTERVALUE::default();
+            if PdhGetFormattedCounterValue(self.counter, PDH_FMT_DOUBLE, None, &mut value) != 0 {
+                return None;
+            }
+            if value.CStatus != PDH_CSTATUS_VALID_DATA {
+                return None;
+            }
+
+            Some(value.Anonymous.doubleValue.max(0.0))
+        }
+    }
+}
+
+impl Drop for PdhProcessorPerformance {
+    fn drop(&mut self) {
+        let _ = unsafe { PdhCloseQuery(self.query) };
+    }
+}
+
+fn sample_cpu_frequency_mhz(
+    pdh: Option<&mut PdhProcessorPerformance>,
+    info: &mut Vec<PROCESSOR_POWER_INFORMATION>,
+) -> (u64, u64) {
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let mut info = vec![PROCESSOR_POWER_INFORMATION::default(); cpu_count];
+    info.clear();
+    info.resize(cpu_count, PROCESSOR_POWER_INFORMATION::default());
 
     let status = unsafe {
         CallNtPowerInformation(
@@ -123,21 +146,26 @@ fn sample_cpu_frequency_mhz() -> (u64, u64) {
 
     let max_mhz = info.iter().map(|v| v.MaxMhz as u64).max().unwrap_or(0);
     let current_avg_mhz = info.iter().map(|v| v.CurrentMhz as u64).sum::<u64>() / info.len() as u64;
-    let current_mhz = sample_processor_performance_percent()
+    let current_mhz = pdh
+        .and_then(PdhProcessorPerformance::sample)
         .map(|percent| ((max_mhz as f64) * (percent / 100.0)).round() as u64)
         .unwrap_or(current_avg_mhz);
 
     (max_mhz, current_mhz)
 }
 
-pub fn sample_machine(prev_cpu_times: &mut Option<CpuTimes>) -> MachineSnapshot {
+pub fn sample_machine(
+    prev_cpu_times: &mut Option<CpuTimes>,
+    pdh: Option<&mut PdhProcessorPerformance>,
+    info: &mut Vec<PROCESSOR_POWER_INFORMATION>,
+) -> MachineSnapshot {
     let mut snap = MachineSnapshot {
         cpu_percent: sample_cpu_percent(prev_cpu_times),
         timestamp_ms: now_ms(),
         ..Default::default()
     };
 
-    let (cpu_max_mhz, cpu_current_mhz) = sample_cpu_frequency_mhz();
+    let (cpu_max_mhz, cpu_current_mhz) = sample_cpu_frequency_mhz(pdh, info);
     snap.cpu_max_mhz = cpu_max_mhz;
     snap.cpu_current_mhz = cpu_current_mhz;
 
