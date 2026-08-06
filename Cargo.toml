@@ -5,13 +5,22 @@ edition = "2024"
 
 [dependencies]
 windows-service = "0.8.0"
-windows = { version = "0.62.2", features = ["Win32_System_Diagnostics_Etw", "Win32_System_Threading", "Win32_Foundation", "Win32_System_EventLog", "Win32_Security", "Win32_System_Registry", "Win32_System_Services", "Win32_System_Time", "Wdk", "Wdk_System", "Wdk_Foundation", "Wdk_System_Threading", "Wdk_System_SystemInformation", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel"] }
+windows = { version = "0.62.2", features = [
+    "Win32_System_Diagnostics_Etw", "Win32_System_Threading", "Win32_Foundation",
+    "Win32_System_EventLog", "Win32_Security", "Win32_System_Registry",
+    "Win32_System_Services", "Win32_System_Time", "Win32_System_SystemInformation",
+    "Win32_System_Power", "Win32_System_Performance", "Wdk", "Wdk_System",
+    "Wdk_Foundation", "Wdk_System_Threading", "Wdk_System_SystemInformation",
+    "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_Storage_Packaging",
+    "Win32_Storage_Packaging_Appx", "Win32_UI", "Win32_UI_Shell"] }
 ntapi = "0.4.3"
 fxhash = "0.2.1"
 
-ogurpchik = { git = "https://github.com/Tam1SH/oguRPChik", branch = "master", features = ["rkyv-codec", "uds"] }
-uniproc-protocol = { git = "https://github.com/Tam1SH/uniproc-protocol", branch = "master" }
-
+ogurpchik = { path = "../oguRPChik" }
+uniproc-protocol = { path = "../uniproc-protocol" }
+capnp = "0.27"
+capnp-rpc = "0.27"
+dhat = "0.3.3"
 clap = { version = "4", features = ["derive"] }
 
 tracing = "0.1"
@@ -29,8 +38,5 @@ serde_json = "1"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 
-lazy_static = "1.5.0"
 dashmap = "6.1.0"
-futures = "0.3.32"
 compio = "0.18.0"
-sysinfo = "0.38.4"

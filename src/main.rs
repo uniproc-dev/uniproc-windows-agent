@@ -1,14 +1,17 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(non_snake_case, non_camel_case_types)]
 
-mod collector;
+mod commands;
 pub mod etw;
 mod logger;
 mod monitor;
-mod node;
 mod providers;
+mod rpc;
 mod service;
-mod commands;
+mod settings;
+mod sink;
+mod state;
+mod supervisor;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -41,7 +44,14 @@ enum Command {
     Run,
 }
 
+#[cfg(debug_assertions)]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 fn main() -> Result<()> {
+    #[cfg(debug_assertions)]
+    let _profiler = dhat::Profiler::new_heap();
+
     let cli = Cli::parse();
 
     match cli.command {

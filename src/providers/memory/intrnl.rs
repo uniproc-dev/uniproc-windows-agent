@@ -2,18 +2,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::collector::provider::ProcessMap;
-use crate::collector::state::MemorySnapshot;
+use crate::providers::memory::vars::{PROCESS_VM_COUNTERS, PROCESS_VM_COUNTERS2, STATUS_SUCCESS};
+use crate::providers::provider::LivePids;
+use crate::state::events::MemorySnapshot;
 use anyhow::{Result, bail};
 use ntapi::ntpsapi::NtQueryInformationProcess;
 use tracing::debug;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
-const STATUS_SUCCESS: i32 = 0x0000_0000_u32 as i32;
-
-const PROCESS_VM_COUNTERS: u32 = 3;
-const PROCESS_VM_COUNTERS2: u32 = 65;
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -137,7 +133,7 @@ impl MemoryPoller {
         }
     }
 
-    pub fn start<F>(&self, processes: ProcessMap, on_snapshot: F)
+    pub fn start<F>(&self, live_pids: LivePids, on_snapshot: F)
     where
         F: Fn(MemorySnapshot) + Send + 'static,
     {
@@ -152,7 +148,7 @@ impl MemoryPoller {
             .name("memory-poller".into())
             .spawn(move || unsafe {
                 while running.load(Ordering::Relaxed) {
-                    for entry in processes.iter() {
+                    for entry in live_pids.iter() {
                         let pid = *entry.key();
                         match query_process_memory(pid) {
                             Ok(snap) => on_snapshot(snap),

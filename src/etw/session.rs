@@ -52,7 +52,7 @@ impl Drop for EtwSession {
         let props_size = size_of::<EVENT_TRACE_PROPERTIES>() + w.len() * 2 + 512;
         let mut buf = vec![0u8; props_size];
         let props = unsafe { build_props(&mut buf, None, 0, SessionMode::Normal) };
-        unsafe { StopTraceW(self.handle, name_ptr, props) };
+        let _ = unsafe { StopTraceW(self.handle, name_ptr, props) };
         info!("ETW session '{}' stopped", self.name);
     }
 }
@@ -84,7 +84,7 @@ fn start_raw(
         );
     } else if status == ERROR_ALREADY_EXISTS {
         warn!("Session '{displayed}' already exists, restarting...");
-        unsafe { StopTraceW(handle, pcwstr, props) };
+        let _ = unsafe { StopTraceW(handle, pcwstr, props) };
         let status2 = unsafe { StartTraceW(&mut handle, pcwstr, props) };
         if status2 != ERROR_SUCCESS {
             bail!("StartTraceW after restart '{displayed}': {status2:?}");
@@ -117,10 +117,10 @@ unsafe fn build_props(
     if mode == SessionMode::SystemLogger {
         props.LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE;
     }
-    props.BufferSize = 1024;      
-    props.MinimumBuffers = 64;
-    props.MaximumBuffers = 128;
-    props.FlushTimer = 1;
+    props.BufferSize = crate::etw::vars::BUFFER_SIZE_KB;
+    props.MinimumBuffers = crate::etw::vars::MINIMUM_BUFFERS;
+    props.MaximumBuffers = crate::etw::vars::MAXIMUM_BUFFERS;
+    props.FlushTimer = crate::etw::vars::FLUSH_TIMER_SEC;
     props.EnableFlags = EVENT_TRACE_FLAG(flags);
     props
 }
