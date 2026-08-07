@@ -1229,6 +1229,7 @@ dependencies = [
 [[package]]
 name = "ogurpchik"
 version = "0.4.0"
+source = "git+https://github.com/uniproc-dev/oguRPChik?branch=master#4b144e5378219ebdd7f3ba181c13500a92f741e7"
 dependencies = [
  "base64",
  "binrw",
@@ -1914,6 +1915,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 [[package]]
 name = "uniproc-protocol"
 version = "0.2.0"
+source = "git+https://github.com/uniproc-dev/uniproc-protocol?branch=master#497f410b58e604ca6e06719ea2f1debd8ae1b6e1"
 dependencies = [
  "capnp",
  "capnp-rpc",
