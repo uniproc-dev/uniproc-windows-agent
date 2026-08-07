@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancels a stale run when new commits land on the same branch/PR - avoids
+# burning CI minutes on a build for a diff that's already been superseded.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    # Windows-only: the agent is Win32 top to bottom (ETW, SCM services,
+    # WinTrust signature checks), it does not build anywhere else.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # `uniproc-protocol`'s build.rs runs `capnpc`, which shells out to the
+      # `capnp` compiler binary. It is not on the runner image, so install it
+      # before any cargo invocation.
+      # Version pinned deliberately: an unpinned `choco install` follows
+      # whatever is newest, so a green build could turn red without a single
+      # commit having changed.
+      - name: Install Cap'n Proto
+        run: choco install capnproto --version=1.3.0 --no-progress -y
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      # Tests that need admin rights and a live ETW session are `#[ignore]`d
+      # and stay skipped here.
+      - name: Test
+        run: cargo test --workspace
