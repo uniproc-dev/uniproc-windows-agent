@@ -18,7 +18,7 @@ jobs:
     # WinTrust signature checks), it does not build anywhere else.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
