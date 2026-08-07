@@ -19,8 +19,8 @@ windows = { version = "0.62.2", features = [
 ntapi = "0.4.3"
 fxhash = "0.2.1"
 
-ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", branch = "master" }
-uniproc-protocol = { git = "https://github.com/uniproc-dev/uniproc-protocol", branch = "master" }
+ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", tag = "v0.4.0" }
+uniproc-protocol = { git = "https://github.com/uniproc-dev/uniproc-protocol", tag = "v0.2.0" }
 capnp = "0.27"
 capnp-rpc = "0.27"
 dhat = "0.3.3"
