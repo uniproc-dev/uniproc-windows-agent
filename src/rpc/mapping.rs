@@ -52,6 +52,7 @@ pub fn build_report(state: &SystemState, mut out: report::Builder) {
         p.set_is_windows_process(e.is_windows_process);
         p.set_signature(signature_status(e.signature));
         p.set_image_path(&e.image_path);
+        p.set_display_name(&e.display_name);
     }
 }
 

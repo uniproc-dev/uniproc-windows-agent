@@ -32,6 +32,9 @@ pub struct ProcessEntry {
     pub session_id: u32,
     pub image_name: String,
     pub image_path: String,
+    /// Resolved by the enrichment pass; empty until then, and empty for
+    /// anything whose name could not be resolved at all.
+    pub display_name: String,
     pub command_line: Vec<String>,
     pub package_name: String,
     pub package_relative_app_id: String,
@@ -54,6 +57,7 @@ impl From<&ProcessStarted> for ProcessEntry {
             session_id: e.session_id,
             image_name: e.image_name.clone(),
             image_path: String::new(),
+            display_name: String::new(),
             command_line: e.command_line.clone(),
             package_name: e.package_full_name.clone(),
             package_relative_app_id: e.package_relative_app_id.clone(),
@@ -76,6 +80,7 @@ impl From<ProcessStarted> for ProcessEntry {
             session_id: e.session_id,
             image_name: e.image_name,
             image_path: String::new(),
+            display_name: String::new(),
             command_line: e.command_line,
             package_name: e.package_full_name,
             package_relative_app_id: e.package_relative_app_id,
@@ -114,6 +119,7 @@ impl ProcessTable {
                         entry.command_line = e.command_line;
                     }
                     entry.image_path = e.image_path;
+                    entry.display_name = e.display_name;
                     entry.signature = e.signature;
                     entry.is_kernel_process = e.is_kernel_process;
                     entry.is_windows_process = e.is_windows_process;

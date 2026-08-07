@@ -28,6 +28,9 @@ pub struct ProcessEnriched {
     pub pid: u32,
     pub command_line: Vec<String>,
     pub image_path: String,
+    /// Human-facing name (FileDescription / manifest / shell). Empty when
+    /// none of the sources answered - `image_name` stays the fallback.
+    pub display_name: String,
     pub signature: ProcessSignature,
     pub is_kernel_process: bool,
     pub is_windows_process: bool,

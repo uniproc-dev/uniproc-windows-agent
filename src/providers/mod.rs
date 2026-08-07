@@ -3,6 +3,7 @@ use crate::supervisor::Supervisor;
 
 pub mod bootstrap;
 pub mod cpu;
+pub mod display_name;
 pub mod disk;
 pub mod machine;
 pub mod memory;

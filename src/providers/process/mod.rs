@@ -16,9 +16,10 @@ use crate::etw::signatures::utils::parse;
 use crate::providers::process::events::{ProcessStartV4Header, ProcessStopData, ThreadTypeGroup1};
 use crate::providers::process::vars::*;
 use crate::providers::provider::{LivePids, Provider};
+use crate::providers::display_name;
 use crate::providers::utils::{
     check_signature, enum_service_pids, enum_visible_window_pids, is_windows_process,
-    parse_cmd_line, query_command_line, query_image_path,
+    get_process_package_info, parse_cmd_line, query_command_line, query_image_path,
 };
 use crate::sink::Sink;
 use crate::state::events::{ProcessEnriched, ProcessSignature, ProcessStarted, StateChange};
@@ -61,10 +62,15 @@ impl Default for KernelProcessProvider {
 
 /// Everything enrich() derives from the image path alone — cached per path:
 /// one encode_wide + WinVerifyTrust per unique exe instead of per process.
-#[derive(Clone, Copy)]
+///
+/// `display_name` joins the same cache for the same reason: resolving it
+/// parses the binary's version resource, which is far too expensive to redo
+/// for every instance of a browser's twenty renderer processes.
+#[derive(Clone)]
 struct PathVerdict {
     signature: ProcessSignature,
     is_windows_process: bool,
+    display_name: String,
 }
 
 fn enrich(
@@ -77,32 +83,67 @@ fn enrich(
         .unwrap_or_default();
 
     let image_path = unsafe { query_image_path(pid) }.unwrap_or_default();
+    // Only needed to resolve a packaged app's manifest name; classic
+    // binaries have none and fall through to the version resource.
+    let package_full_name = unsafe { get_process_package_info(pid) }
+        .map(|(full_name, _)| full_name)
+        .unwrap_or_default();
     let is_kernel_process = image_path.is_empty() || !std::path::Path::new(&image_path).exists();
 
     // A file replaced while its process is alive keeps the stale verdict — fine.
     let verdict = if is_kernel_process {
+        // No file to inspect: no signature, no version resource. These are
+        // Windows' own pseudo-processes by definition.
         PathVerdict {
             signature: ProcessSignature::Unknown,
             is_windows_process: true,
+            display_name: String::new(),
         }
     } else {
-        *verdict_cache.entry(image_path.clone()).or_insert_with(|| {
-            let signature = check_signature(&image_path);
-            PathVerdict {
-                signature,
-                is_windows_process: is_windows_process(false, signature),
-            }
-        })
+        verdict_cache
+            .entry(image_path.clone())
+            .or_insert_with(|| {
+                let signature = check_signature(&image_path);
+                PathVerdict {
+                    signature,
+                    is_windows_process: is_windows_process(false, signature),
+                    // Packaged apps are keyed by path here too. That is a
+                    // deliberate simplification: one package's executable is
+                    // one path, so the manifest lookup would produce the same
+                    // answer for every process sharing it.
+                    display_name: display_name::resolve(&image_path, &package_full_name)
+                        .unwrap_or_default(),
+                }
+            })
+            .clone()
     };
 
     ProcessEnriched {
         pid,
         command_line,
         image_path,
+        display_name: verdict.display_name,
         signature: verdict.signature,
         is_kernel_process,
         is_windows_process: verdict.is_windows_process,
     }
+}
+
+/// ETW reports the image as a full NT path (`\Device\HarddiskVolume3\...\
+/// foo.exe`), while the bootstrap snapshot reports a bare file name. Left
+/// alone, the two sources give the same process different names depending on
+/// whether it started before or after the agent did. Everything downstream
+/// wants the file name, so normalise here, at the edge.
+///
+/// Deliberately not translated into a DOS path: nothing needs the directory,
+/// and mapping device names to drive letters would mean a `QueryDosDevice`
+/// table that can go stale under a mount change.
+fn image_file_name(image_name: &str) -> String {
+    image_name
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(image_name)
+        .to_string()
 }
 
 impl Provider for KernelProcessProvider {
@@ -121,7 +162,7 @@ impl Provider for KernelProcessProvider {
                             pid: hdr.process_id,
                             parent_pid: hdr.parent_process_id,
                             session_id: hdr.session_id,
-                            image_name: hdr.image_name.to_string(),
+                            image_name: image_file_name(&hdr.image_name.to_string()),
                             package_full_name: hdr.package_full_name.to_string(),
                             package_relative_app_id: hdr.package_relative_app_id.to_string(),
                             command_line: Vec::new(),

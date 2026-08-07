@@ -12,6 +12,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Power", "Win32_System_Performance", "Wdk", "Wdk_System",
     "Wdk_Foundation", "Wdk_System_Threading", "Wdk_System_SystemInformation",
     "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_Storage_Packaging",
+    "Win32_Storage_FileSystem",
     "Win32_Storage_Packaging_Appx", "Win32_UI", "Win32_UI_Shell",
     "Win32_Security_WinTrust", "Win32_Security_Cryptography",
     "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip",
@@ -20,7 +21,7 @@ ntapi = "0.4.3"
 fxhash = "0.2.1"
 
 ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", tag = "v0.4.0" }
-uniproc-protocol = { git = "https://github.com/uniproc-dev/uniproc-protocol", tag = "v0.2.0" }
+uniproc-protocol = { git = "https://github.com/uniproc-dev/uniproc-protocol", tag = "v0.3.0" }
 capnp = "0.27"
 capnp-rpc = "0.27"
 dhat = "0.3.3"
