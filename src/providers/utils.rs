@@ -2,12 +2,21 @@ use ntapi::ntrtl::RTL_USER_PROCESS_PARAMETERS;
 use ntapi::winapi::um::winbase::LocalFree;
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, TRUST_E_NOSIGNATURE, TRUST_E_SUBJECT_FORM_UNKNOWN};
+use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, HWND, LPARAM, TRUST_E_NOSIGNATURE, TRUST_E_SUBJECT_FORM_UNKNOWN};
+use windows::Win32::Security::Cryptography::Catalog::{
+    CATALOG_INFO, CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
+    CryptCATAdminEnumCatalogFromHash, CryptCATAdminReleaseCatalogContext,
+    CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext,
+};
 use windows::Win32::Security::Cryptography::{CertGetNameStringW, CERT_NAME_SIMPLE_DISPLAY_TYPE};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, OPEN_EXISTING,
+};
 use windows::Win32::Security::WinTrust::{
     WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL,
     WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_SAFER_FLAG, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
-    WTD_UI_NONE, WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
+    WTD_UI_NONE, WINTRUST_CATALOG_INFO, WTD_CHOICE_CATALOG, WTHelperGetProvSignerFromChain,
+    WTHelperProvDataFromStateData, WinVerifyTrust,
 };
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Services::{
@@ -188,6 +197,180 @@ fn with_wide<R>(s: &str, f: impl FnOnce(PCWSTR) -> R) -> R {
     })
 }
 
+
+/// Looks the file up in the system's signature catalogs and verifies the
+/// catalog that claims it.
+///
+/// `None` means no catalog vouches for the file, so the caller's "unsigned"
+/// verdict stands; `Some` carries whatever the catalog's signer turned out
+/// to be.
+fn catalog_signature(path: &str) -> Option<ProcessSignature> {
+    let file = open_for_read(path)?;
+    let admin = CatalogAdmin::acquire()?;
+    let mut hash = admin.file_hash(file.0)?;
+
+    // A catalog names its members by the hash as uppercase hex, and
+    // WinVerifyTrust matches on that name.
+    let mut tag = String::with_capacity(hash.len() * 2);
+    for byte in &hash {
+        use std::fmt::Write as _;
+        let _ = write!(tag, "{byte:02X}");
+    }
+
+    let catalog = admin.find_catalog(&hash)?;
+    let info = catalog.info()?;
+
+    let catalog_path: Vec<u16> = info
+        .wszCatalogFile
+        .iter()
+        .take_while(|c| **c != 0)
+        .copied()
+        .chain(Some(0))
+        .collect();
+    let tag_w: Vec<u16> = tag.encode_utf16().chain(Some(0)).collect();
+    let member_path: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+
+    unsafe {
+        let mut catalog_info = WINTRUST_CATALOG_INFO {
+            cbStruct: std::mem::size_of::<WINTRUST_CATALOG_INFO>() as u32,
+            pcwszCatalogFilePath: PCWSTR(catalog_path.as_ptr()),
+            pcwszMemberTag: PCWSTR(tag_w.as_ptr()),
+            pcwszMemberFilePath: PCWSTR(member_path.as_ptr()),
+            hMemberFile: file.0,
+            pbCalculatedFileHash: hash.as_mut_ptr(),
+            cbCalculatedFileHash: hash.len() as u32,
+            hCatAdmin: admin.0,
+            ..Default::default()
+        };
+
+        let mut data = WINTRUST_DATA {
+            cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+            dwUIChoice: WTD_UI_NONE,
+            fdwRevocationChecks: WTD_REVOKE_NONE,
+            dwUnionChoice: WTD_CHOICE_CATALOG,
+            dwStateAction: WTD_STATEACTION_VERIFY,
+            dwProvFlags: WTD_SAFER_FLAG | WTD_CACHE_ONLY_URL_RETRIEVAL,
+            ..Default::default()
+        };
+        data.Anonymous.pCatalog = &mut catalog_info;
+
+        let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        let status = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
+
+        let verdict = (status == 0).then(|| match signer_subject(data.hWVTStateData) {
+            Some(subject) if subject.contains("Microsoft") => ProcessSignature::Microsoft,
+            Some(_) => ProcessSignature::ThirdParty,
+            None => ProcessSignature::Unknown,
+        });
+
+        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        let _ = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
+        verdict
+    }
+}
+
+/// A read handle, closed on drop.
+struct OwnedFile(HANDLE);
+
+impl Drop for OwnedFile {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+fn open_for_read(path: &str) -> Option<OwnedFile> {
+    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            GENERIC_READ.0,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+        .ok()
+        .map(OwnedFile)
+    }
+}
+
+/// The catalog admin context, released on drop.
+struct CatalogAdmin(isize);
+
+impl Drop for CatalogAdmin {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CryptCATAdminReleaseContext(self.0, 0);
+        }
+    }
+}
+
+impl CatalogAdmin {
+    fn acquire() -> Option<Self> {
+        let mut handle = 0isize;
+        unsafe {
+            CryptCATAdminAcquireContext2(&mut handle, None, windows::core::w!("SHA256"), None, None)
+                .ok()?;
+        }
+        Some(Self(handle))
+    }
+
+    /// The file's hash, in whatever algorithm the context was acquired with.
+    fn file_hash(&self, file: HANDLE) -> Option<Vec<u8>> {
+        let mut len = 0u32;
+        unsafe {
+            // First call only sizes the buffer, and fails by design.
+            let _ = CryptCATAdminCalcHashFromFileHandle2(self.0, file, &mut len, None, None);
+            if len == 0 {
+                return None;
+            }
+            let mut hash = vec![0u8; len as usize];
+            CryptCATAdminCalcHashFromFileHandle2(self.0, file, &mut len, Some(hash.as_mut_ptr()), None)
+                .ok()?;
+            hash.truncate(len as usize);
+            Some(hash)
+        }
+    }
+
+    /// The first catalog listing this hash as a member, if any.
+    fn find_catalog(&self, hash: &[u8]) -> Option<CatalogContext<'_>> {
+        unsafe {
+            let context = CryptCATAdminEnumCatalogFromHash(self.0, hash, None, None);
+            (context != 0).then_some(CatalogContext {
+                admin: self,
+                context,
+            })
+        }
+    }
+}
+
+struct CatalogContext<'a> {
+    admin: &'a CatalogAdmin,
+    context: isize,
+}
+
+impl Drop for CatalogContext<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CryptCATAdminReleaseCatalogContext(self.admin.0, self.context, 0);
+        }
+    }
+}
+
+impl CatalogContext<'_> {
+    fn info(&self) -> Option<CATALOG_INFO> {
+        let mut info = CATALOG_INFO {
+            cbStruct: std::mem::size_of::<CATALOG_INFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { CryptCATCatalogInfoFromContext(self.context, &mut info, 0).ok()? };
+        Some(info)
+    }
+}
+
 pub fn check_signature(path: &str) -> ProcessSignature {
     with_wide(path, |path_w| unsafe {
         let mut file_info = WINTRUST_FILE_INFO {
@@ -216,7 +399,11 @@ pub fn check_signature(path: &str) -> ProcessSignature {
                 None => ProcessSignature::Unknown,
             }
         } else if status == TRUST_E_NOSIGNATURE.0 || status == TRUST_E_SUBJECT_FORM_UNKNOWN.0 {
-            ProcessSignature::Unsigned
+            // No *embedded* signature is not the same as unsigned: most of
+            // Windows' own binaries (dwm.exe, winlogon.exe, wslservice.exe)
+            // are signed by catalog instead, and treating them as unsigned
+            // filed half the operating system under third-party software.
+            catalog_signature(path).unwrap_or(ProcessSignature::Unsigned)
         } else {
             ProcessSignature::Unknown
         };
@@ -338,4 +525,29 @@ pub fn enum_visible_window_pids() -> Vec<u32> {
         );
     }
     pids.into_iter().collect()
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::{check_signature, ProcessSignature};
+
+    /// dwm.exe is catalog-signed, not embedded-signed. Before catalog
+    /// lookup existed this returned `Unsigned`, which filed the window
+    /// manager - and most of the rest of Windows - under third-party
+    /// software.
+    #[test]
+    fn catalog_signed_system_binaries_are_recognised_as_microsoft() {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| String::from(r"C:\Windows"));
+        for name in ["dwm.exe", "winlogon.exe", "svchost.exe"] {
+            let path = format!(r"{system_root}\System32\{name}");
+            if !std::path::Path::new(&path).exists() {
+                continue;
+            }
+            assert_eq!(
+                check_signature(&path),
+                ProcessSignature::Microsoft,
+                "{name} should verify through the system catalogs"
+            );
+        }
+    }
 }
