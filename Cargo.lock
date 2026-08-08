@@ -1914,8 +1914,8 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "uniproc-protocol"
-version = "0.3.0"
-source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.3.0#9c59e32167f92c406d9c515a284ebb5b62958947"
+version = "0.4.0"
+source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.4.0#2b4ce330f888ada1ee38c06177b3df6ef02c0c37"
 dependencies = [
  "capnp",
  "capnp-rpc",

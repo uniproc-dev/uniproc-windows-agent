@@ -37,6 +37,7 @@ pub fn build_report(state: &SystemState, mut out: report::Builder) {
         p.set_working_set_kb(mem.map(|m| m.working_set_bytes / 1024).unwrap_or(0));
         p.set_private_bytes_kb(mem.map(|m| m.private_bytes / 1024).unwrap_or(0));
         p.set_peak_working_set_kb(mem.map(|m| m.peak_working_set_bytes / 1024).unwrap_or(0));
+        p.set_private_working_set_kb(mem.map(|m| m.private_working_set_bytes / 1024).unwrap_or(0));
 
         p.set_disk_read_bytes(e.disk.read_bytes);
         p.set_disk_write_bytes(e.disk.write_bytes);

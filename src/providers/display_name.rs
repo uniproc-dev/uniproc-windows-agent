@@ -52,6 +52,47 @@ pub fn resolve(image_path: &str, package_full_name: &str) -> Option<String> {
     file_description(image_path).or_else(|| shell_display_name(image_path))
 }
 
+/// The publisher of a packaged app, as the OS recorded it at install time
+/// (`CN=Microsoft Corporation, O=Microsoft Corporation, ...`).
+///
+/// Trustworthy without us verifying anything: Windows refuses to install a
+/// package whose signature does not check out, so the publisher on a package
+/// that *is* installed has already been through that check. This is the only
+/// signer information a packaged binary has - the files inside an MSIX carry
+/// no signature of their own, the package as a whole does.
+pub fn package_publisher(package_full_name: &str) -> Option<String> {
+    let full_name = HSTRING::from(package_full_name);
+    let mut buffer_size = 0u32;
+
+    unsafe {
+        let _ = PackageIdFromFullName(
+            PCWSTR(full_name.as_ptr()),
+            PACKAGE_INFORMATION_BASIC,
+            &mut buffer_size,
+            None,
+        );
+    }
+    if buffer_size == 0 {
+        return None;
+    }
+
+    let mut buffer = vec![0u8; buffer_size as usize];
+    unsafe {
+        PackageIdFromFullName(
+            PCWSTR(full_name.as_ptr()),
+            PACKAGE_INFORMATION_BASIC,
+            &mut buffer_size,
+            Some(buffer.as_mut_ptr()),
+        )
+        .ok()
+        .ok()?;
+
+        let pkg_id = buffer.as_ptr() as *const PACKAGE_ID;
+        let publisher: PWSTR = addr_of!((*pkg_id).publisher).read_unaligned();
+        publisher.to_string().ok().filter(|p| !p.is_empty())
+    }
+}
+
 /// The `AppName` resource a packaged app declares in its manifest.
 fn package_display_name(package_full_name: &str) -> Option<String> {
     let full_name = HSTRING::from(package_full_name);

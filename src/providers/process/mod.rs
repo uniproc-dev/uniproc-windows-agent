@@ -103,7 +103,7 @@ fn enrich(
         verdict_cache
             .entry(image_path.clone())
             .or_insert_with(|| {
-                let signature = check_signature(&image_path);
+                let signature = signature_of(&image_path, &package_full_name);
                 PathVerdict {
                     signature,
                     is_windows_process: is_windows_process(false, signature),
@@ -126,6 +126,25 @@ fn enrich(
         signature: verdict.signature,
         is_kernel_process,
         is_windows_process: verdict.is_windows_process,
+    }
+}
+
+/// The signature verdict for one image.
+///
+/// Files inside an MSIX package carry no signature of their own - the
+/// package is signed as a whole - so per-file verification honestly reports
+/// them unsigned. For those, the package publisher is the signer, and it is
+/// one the OS already validated at install time.
+fn signature_of(image_path: &str, package_full_name: &str) -> ProcessSignature {
+    let signature = check_signature(image_path);
+    if signature != ProcessSignature::Unsigned || package_full_name.is_empty() {
+        return signature;
+    }
+
+    match display_name::package_publisher(package_full_name) {
+        Some(publisher) if publisher.contains("Microsoft") => ProcessSignature::Microsoft,
+        Some(_) => ProcessSignature::ThirdParty,
+        None => signature,
     }
 }
 
