@@ -531,6 +531,27 @@ pub fn enum_visible_window_pids() -> Vec<u32> {
 mod signature_tests {
     use super::{check_signature, ProcessSignature};
 
+    /// Walks a few hundred real binaries through the same path the agent
+    /// uses. Cheap crash repro: the catalog APIs are hand-written FFI, and a
+    /// mistake there shows up as an access violation on some particular file
+    /// rather than on the three we spot-check above.
+    #[test]
+    fn signature_check_survives_every_binary_in_system32() {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| String::from(r"C:\Windows"));
+        let dir = std::path::PathBuf::from(&system_root).join("System32");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("System32 must be readable").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("exe") {
+                continue;
+            }
+            let Some(path) = path.to_str() else { continue };
+            let _ = check_signature(path);
+            checked += 1;
+        }
+        assert!(checked > 50, "expected to have checked a lot of binaries, got {checked}");
+    }
+
     /// dwm.exe is catalog-signed, not embedded-signed. Before catalog
     /// lookup existed this returned `Unsigned`, which filed the window
     /// manager - and most of the rest of Windows - under third-party

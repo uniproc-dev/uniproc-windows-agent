@@ -26,7 +26,7 @@ use windows::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
 };
 use windows::Win32::Storage::Packaging::Appx::{
-    PACKAGE_ID, PACKAGE_INFORMATION_BASIC, PackageIdFromFullName,
+    PACKAGE_ID, PACKAGE_INFORMATION_BASIC, PACKAGE_INFORMATION_FULL, PackageIdFromFullName,
 };
 use windows::Win32::UI::Shell::{
     SHFILEINFOW, SHGFI_DISPLAYNAME, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHLoadIndirectString,
@@ -64,10 +64,13 @@ pub fn package_publisher(package_full_name: &str) -> Option<String> {
     let full_name = HSTRING::from(package_full_name);
     let mut buffer_size = 0u32;
 
+    // FULL, not BASIC: the basic id carries the publisher *hash*
+    // (`8wekyb3d8bbwe`), and leaves the `publisher` field - the certificate
+    // subject we actually want - as a null pointer.
     unsafe {
         let _ = PackageIdFromFullName(
             PCWSTR(full_name.as_ptr()),
-            PACKAGE_INFORMATION_BASIC,
+            PACKAGE_INFORMATION_FULL,
             &mut buffer_size,
             None,
         );
@@ -80,7 +83,7 @@ pub fn package_publisher(package_full_name: &str) -> Option<String> {
     unsafe {
         PackageIdFromFullName(
             PCWSTR(full_name.as_ptr()),
-            PACKAGE_INFORMATION_BASIC,
+            PACKAGE_INFORMATION_FULL,
             &mut buffer_size,
             Some(buffer.as_mut_ptr()),
         )
@@ -89,6 +92,12 @@ pub fn package_publisher(package_full_name: &str) -> Option<String> {
 
         let pkg_id = buffer.as_ptr() as *const PACKAGE_ID;
         let publisher: PWSTR = addr_of!((*pkg_id).publisher).read_unaligned();
+        // A field the API chose not to fill is a null pointer, and
+        // `PWSTR::to_string` dereferences without checking - that read is an
+        // access violation, not a `None`.
+        if publisher.is_null() {
+            return None;
+        }
         publisher.to_string().ok().filter(|p| !p.is_empty())
     }
 }
@@ -126,6 +135,9 @@ fn package_display_name(package_full_name: &str) -> Option<String> {
         // PACKAGE_ID is written into `buffer` with no alignment guarantee.
         let pkg_id = buffer.as_ptr() as *const PACKAGE_ID;
         let name: PWSTR = addr_of!((*pkg_id).name).read_unaligned();
+        if name.is_null() {
+            return None;
+        }
         name.to_string().ok()?
     };
 
@@ -235,4 +247,52 @@ fn shell_display_name(image_path: &str) -> Option<String> {
         .to_string();
 
     (!name.is_empty()).then_some(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{package_publisher, resolve};
+
+    /// The packaged path reads a `PACKAGE_ID` out of a byte buffer with
+    /// pointer arithmetic, so it gets exercised against every package
+    /// actually installed here rather than a hand-picked one.
+    #[test]
+    fn packaged_apps_resolve_without_crashing() {
+        let root = std::env::var("ProgramFiles").unwrap_or_else(|_| String::from(r"C:\Program Files"));
+        let apps = std::path::PathBuf::from(root).join("WindowsApps");
+        let Ok(entries) = std::fs::read_dir(&apps) else {
+            // Unreadable without elevation - nothing to assert, and saying so
+            // beats a test that silently checks nothing.
+            eprintln!("skipped: {} is not readable", apps.display());
+            return;
+        };
+
+        let mut checked = 0usize;
+        for entry in entries.flatten().take(200) {
+            let Some(full_name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let _ = package_publisher(&full_name);
+            let _ = resolve("", &full_name);
+            checked += 1;
+        }
+        eprintln!("checked {checked} packages");
+    }
+
+    /// Every argument being empty or nonsense must be an answer, not a crash.
+    #[test]
+    fn nonsense_input_is_answered_not_crashed() {
+        assert_eq!(package_publisher(""), None);
+        assert_eq!(package_publisher("not-a-package"), None);
+        assert_eq!(resolve("", ""), None);
+
+        // A path that does not exist still gets a shell name: SHGetFileInfo
+        // is asked with USEFILEATTRIBUTES, so it answers from the name alone
+        // without touching the disk. Deliberate - it keeps the call cheap and
+        // still names a process whose image has since been deleted.
+        assert_eq!(
+            resolve(r"C:\does\not\exist.exe", ""),
+            Some(String::from("exist.exe"))
+        );
+    }
 }
