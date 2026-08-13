@@ -18,7 +18,7 @@ use crate::providers::process::vars::*;
 use crate::providers::provider::{LivePids, Provider};
 use crate::providers::display_name;
 use crate::providers::utils::{
-    check_signature, enum_service_pids, is_windows_process,
+    check_signature, enum_services, is_windows_process, query_service_config,
     get_process_package_info, parse_cmd_line, query_command_line, query_image_path,
 };
 use crate::sink::Sink;
@@ -224,6 +224,8 @@ impl Provider for KernelProcessProvider {
                 let mut last_inventory = Instant::now() - INVENTORY_INTERVAL;
                 let mut verdict_cache = std::collections::HashMap::new();
                 let mut services_buf = Vec::new();
+                let mut config_cache: std::collections::HashMap<String, _> =
+                    std::collections::HashMap::new();
 
                 // Timeout, not channel-disconnect: the router-held Sender
                 // clone only drops when KernelRouter drops, which happens
@@ -241,10 +243,19 @@ impl Provider for KernelProcessProvider {
                     if last_inventory.elapsed() >= INVENTORY_INTERVAL {
                         last_inventory = Instant::now();
                         if let Some(scm) = &scm {
-                            sink.emit(StateChange::ServicePidsSnapshot(enum_service_pids(
-                                scm.handle(),
-                                &mut services_buf,
-                            )));
+                            let mut services = enum_services(scm.handle(), &mut services_buf);
+                            for svc in &mut services {
+                                let config = config_cache
+                                    .entry(svc.name.clone())
+                                    .or_insert_with(|| query_service_config(scm.handle(), &svc.name));
+                                svc.load_group = config.load_group.clone();
+                                svc.description = config.description.clone();
+                                svc.image_path = config.image_path.clone();
+                            }
+                            config_cache.retain(|name, _| {
+                                services.iter().any(|s| &s.name == name)
+                            });
+                            sink.emit(StateChange::ServicesSnapshot(services));
                         }
                     }
                 }

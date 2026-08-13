@@ -10,7 +10,7 @@ pub mod memory;
 pub mod network;
 pub mod process;
 pub mod provider;
-mod utils;
+pub mod utils;
 
 impl Default for Supervisor {
     fn default() -> Supervisor {

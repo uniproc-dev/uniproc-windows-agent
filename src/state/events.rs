@@ -122,7 +122,7 @@ pub enum StateChange {
     ThreadStopped { tid: u32 },
     /// Whole-set snapshots from the periodic inventory; they replace the
     /// previous sets instead of diffing per process.
-    ServicePidsSnapshot(Vec<u32>),
+    ServicesSnapshot(Vec<crate::providers::utils::ServiceInfo>),
     Memory(MemorySnapshot),
     Machine(MachineSnapshot),
     Disk(DiskEvent),

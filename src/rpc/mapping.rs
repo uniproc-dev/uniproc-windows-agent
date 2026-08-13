@@ -1,5 +1,8 @@
-use uniproc_protocol::windows_capnp::{SignatureStatus, machine_stats, report};
+use uniproc_protocol::windows_capnp::{
+    ServiceState as WireServiceState, SignatureStatus, machine_stats, report,
+};
 
+use crate::providers::utils::ServiceState;
 use crate::state::SystemState;
 use crate::state::events::ProcessSignature;
 
@@ -12,8 +15,22 @@ fn signature_status(s: ProcessSignature) -> SignatureStatus {
     }
 }
 
+fn service_state(s: ServiceState) -> WireServiceState {
+    match s {
+        ServiceState::Unknown => WireServiceState::Unknown,
+        ServiceState::Stopped => WireServiceState::Stopped,
+        ServiceState::StartPending => WireServiceState::StartPending,
+        ServiceState::StopPending => WireServiceState::StopPending,
+        ServiceState::Running => WireServiceState::Running,
+        ServiceState::ContinuePending => WireServiceState::ContinuePending,
+        ServiceState::PausePending => WireServiceState::PausePending,
+        ServiceState::Paused => WireServiceState::Paused,
+    }
+}
+
 pub fn build_report(state: &SystemState, mut out: report::Builder) {
     build_machine_stats(state, out.reborrow().init_machine());
+    build_services(state, &mut out);
 
     let mut list = out.reborrow().init_processes(state.len() as u32);
     for (i, e) in state.entries().enumerate() {
@@ -53,6 +70,21 @@ pub fn build_report(state: &SystemState, mut out: report::Builder) {
         p.set_signature(signature_status(e.signature));
         p.set_image_path(&e.image_path);
         p.set_display_name(&e.display_name);
+    }
+}
+
+fn build_services(state: &SystemState, out: &mut report::Builder) {
+    let services = state.services();
+    let mut list = out.reborrow().init_services(services.len() as u32);
+    for (i, svc) in services.iter().enumerate() {
+        let mut s = list.reborrow().get(i as u32);
+        s.set_name(&svc.name);
+        s.set_display_name(&svc.display_name);
+        s.set_pid(svc.pid);
+        s.set_state(service_state(svc.state));
+        s.set_load_group(&svc.load_group);
+        s.set_description(&svc.description);
+        s.set_image_path(&svc.image_path);
     }
 }
 

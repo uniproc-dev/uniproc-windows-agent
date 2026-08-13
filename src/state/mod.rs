@@ -23,6 +23,7 @@ pub struct SystemState {
     machine: Option<MachineSnapshot>,
     machine_totals: MachineTotals,
     service_pids: HashSet<u32>,
+    services: Vec<crate::providers::utils::ServiceInfo>,
 }
 
 impl SystemState {
@@ -32,14 +33,20 @@ impl SystemState {
             machine: None,
             machine_totals: MachineTotals::default(),
             service_pids: HashSet::new(),
+            services: Vec::new(),
         }
     }
 
     pub fn apply(&mut self, change: StateChange) {
         match &change {
             StateChange::Machine(snap) => self.machine = Some(snap.clone()),
-            StateChange::ServicePidsSnapshot(pids) => {
-                self.service_pids = pids.iter().copied().collect();
+            StateChange::ServicesSnapshot(services) => {
+                self.service_pids = services
+                    .iter()
+                    .map(|s| s.pid)
+                    .filter(|&pid| pid != 0)
+                    .collect();
+                self.services = services.clone();
             }
             StateChange::Disk(e) => match e.event_type {
                 DiskEventType::Read => {
@@ -82,6 +89,10 @@ impl SystemState {
 
     pub fn is_service(&self, pid: u32) -> bool {
         self.service_pids.contains(&pid)
+    }
+
+    pub fn services(&self) -> &[crate::providers::utils::ServiceInfo] {
+        &self.services
     }
 }
 
