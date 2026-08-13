@@ -29,7 +29,6 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::Storage::Packaging::Appx::{GetApplicationUserModelId, GetPackageFullName};
 use windows::Win32::UI::Shell::CommandLineToArgvW;
-use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible};
 
 use crate::commands::services::ScHandle;
 use crate::state::events::ProcessSignature;
@@ -503,29 +502,6 @@ pub fn enum_service_pids(scm: ScHandle, buf: &mut Vec<u8>) -> Vec<u32> {
     }
 }
 
-pub fn enum_visible_window_pids() -> Vec<u32> {
-    let mut pids = std::collections::HashSet::new();
-    unsafe extern "system" fn enum_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        unsafe {
-            let pids = &mut *(lparam.0 as *mut std::collections::HashSet<u32>);
-            if IsWindowVisible(hwnd).as_bool() {
-                let mut pid = 0u32;
-                GetWindowThreadProcessId(hwnd, Some(&mut pid));
-                if pid != 0 {
-                    pids.insert(pid);
-                }
-            }
-            BOOL(1)
-        }
-    }
-    unsafe {
-        let _ = EnumWindows(
-            Some(enum_window_proc),
-            LPARAM(&mut pids as *mut _ as isize),
-        );
-    }
-    pids.into_iter().collect()
-}
 
 #[cfg(test)]
 mod signature_tests {

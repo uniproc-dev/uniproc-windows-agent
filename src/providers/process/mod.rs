@@ -18,7 +18,7 @@ use crate::providers::process::vars::*;
 use crate::providers::provider::{LivePids, Provider};
 use crate::providers::display_name;
 use crate::providers::utils::{
-    check_signature, enum_service_pids, enum_visible_window_pids, is_windows_process,
+    check_signature, enum_service_pids, is_windows_process,
     get_process_package_info, parse_cmd_line, query_command_line, query_image_path,
 };
 use crate::sink::Sink;
@@ -246,9 +246,6 @@ impl Provider for KernelProcessProvider {
                                 &mut services_buf,
                             )));
                         }
-                        sink.emit(StateChange::VisibleWindowPidsSnapshot(
-                            enum_visible_window_pids(),
-                        ));
                     }
                 }
             })?;

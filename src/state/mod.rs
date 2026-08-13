@@ -23,7 +23,6 @@ pub struct SystemState {
     machine: Option<MachineSnapshot>,
     machine_totals: MachineTotals,
     service_pids: HashSet<u32>,
-    window_pids: HashSet<u32>,
 }
 
 impl SystemState {
@@ -33,7 +32,6 @@ impl SystemState {
             machine: None,
             machine_totals: MachineTotals::default(),
             service_pids: HashSet::new(),
-            window_pids: HashSet::new(),
         }
     }
 
@@ -42,9 +40,6 @@ impl SystemState {
             StateChange::Machine(snap) => self.machine = Some(snap.clone()),
             StateChange::ServicePidsSnapshot(pids) => {
                 self.service_pids = pids.iter().copied().collect();
-            }
-            StateChange::VisibleWindowPidsSnapshot(pids) => {
-                self.window_pids = pids.iter().copied().collect();
             }
             StateChange::Disk(e) => match e.event_type {
                 DiskEventType::Read => {
@@ -87,10 +82,6 @@ impl SystemState {
 
     pub fn is_service(&self, pid: u32) -> bool {
         self.service_pids.contains(&pid)
-    }
-
-    pub fn has_visible_window(&self, pid: u32) -> bool {
-        self.window_pids.contains(&pid)
     }
 }
 

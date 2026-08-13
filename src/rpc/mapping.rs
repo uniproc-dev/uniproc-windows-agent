@@ -48,7 +48,6 @@ pub fn build_report(state: &SystemState, mut out: report::Builder) {
         p.set_net_tx_bytes(e.network.sent_bytes);
 
         p.set_is_service(state.is_service(e.pid));
-        p.set_has_visible_window(state.has_visible_window(e.pid));
         p.set_is_kernel_process(e.is_kernel_process);
         p.set_is_windows_process(e.is_windows_process);
         p.set_signature(signature_status(e.signature));

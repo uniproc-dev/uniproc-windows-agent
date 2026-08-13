@@ -123,7 +123,6 @@ pub enum StateChange {
     /// Whole-set snapshots from the periodic inventory; they replace the
     /// previous sets instead of diffing per process.
     ServicePidsSnapshot(Vec<u32>),
-    VisibleWindowPidsSnapshot(Vec<u32>),
     Memory(MemorySnapshot),
     Machine(MachineSnapshot),
     Disk(DiskEvent),

@@ -52,15 +52,13 @@ async fn run(service: String) -> Result<(), Box<dyn std::error::Error>> {
 
     for p in processes
         .iter()
-        .filter(|p| p.get_is_service() || p.get_has_visible_window() || p.get_is_kernel_process())
         .take(8)
     {
         println!(
-            "    pid={:<6} {:<28} svc={} window={} kernel={} windows={} sig={:?}",
+            "    pid={:<6} {:<28} svc={} kernel={} windows={} sig={:?}",
             p.get_pid(),
             p.get_name()?.to_str()?,
             p.get_is_service(),
-            p.get_has_visible_window(),
             p.get_is_kernel_process(),
             p.get_is_windows_process(),
             p.get_signature()?,

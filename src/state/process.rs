@@ -125,7 +125,7 @@ impl ProcessTable {
                     entry.is_windows_process = e.is_windows_process;
                 }
             }
-            StateChange::ServicePidsSnapshot(_) | StateChange::VisibleWindowPidsSnapshot(_) => {}
+            StateChange::ServicePidsSnapshot(_) => {}
             StateChange::ProcessStopped(pid) => {
                 self.processes.remove(&pid);
             }
