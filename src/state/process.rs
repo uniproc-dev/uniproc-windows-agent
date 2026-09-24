@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use fxhash::FxHashMap;
 
 use crate::state::events::{
     DiskEventType, MemorySnapshot, NetworkEventType, ProcessStarted, ProcessSignature, StateChange,
@@ -40,8 +40,10 @@ pub struct ProcessEntry {
     pub package_relative_app_id: String,
 
     pub signature: ProcessSignature,
+    pub exited: bool,
     pub is_kernel_process: bool,
     pub is_windows_process: bool,
+    pub console_host_pid: u32,
 
     pub memory: Option<MemorySnapshot>,
     pub cpu: CpuStats,
@@ -62,8 +64,10 @@ impl From<&ProcessStarted> for ProcessEntry {
             package_name: e.package_full_name.clone(),
             package_relative_app_id: e.package_relative_app_id.clone(),
             signature: ProcessSignature::Unknown,
+            exited: false,
             is_kernel_process: e.is_kernel_process,
             is_windows_process: e.is_kernel_process,
+            console_host_pid: 0,
             memory: None,
             cpu: CpuStats::default(),
             disk: DiskStats::default(),
@@ -85,8 +89,10 @@ impl From<ProcessStarted> for ProcessEntry {
             package_name: e.package_full_name,
             package_relative_app_id: e.package_relative_app_id,
             signature: ProcessSignature::Unknown,
+            exited: false,
             is_kernel_process: e.is_kernel_process,
             is_windows_process: e.is_kernel_process,
+            console_host_pid: 0,
             memory: None,
             cpu: CpuStats::default(),
             disk: DiskStats::default(),
@@ -95,52 +101,112 @@ impl From<ProcessStarted> for ProcessEntry {
     }
 }
 
+pub const IDLE_THREAD_ID: u32 = 0;
+pub const IDLE_PROCESS_ID: u32 = 0;
+pub const NO_PROCESS_ID: u32 = u32::MAX;
+
 pub struct ProcessTable {
-    processes: HashMap<u32, ProcessEntry>,
-    tid_to_pid: HashMap<u32, u32>,
+    processes: FxHashMap<u32, ProcessEntry>,
+    tid_to_pid: FxHashMap<u32, u32>,
+    samples: FxHashMap<u32, u64>,
+    samples_unattributed: u64,
+    samples_idle: u64,
+    recently_stopped: FxHashMap<u32, u32>,
+
+
+    last_fold: (u64, u64, u64),
+
+    exited_last_window: Vec<u32>,
+
+    passports: u32,
 }
 
 impl ProcessTable {
     pub fn new() -> Self {
         Self {
-            processes: HashMap::new(),
-            tid_to_pid: HashMap::new(),
+            processes: FxHashMap::default(),
+            tid_to_pid: FxHashMap::default(),
+            samples: FxHashMap::default(),
+            samples_unattributed: 0,
+            samples_idle: 0,
+            recently_stopped: FxHashMap::default(),
+
+
+            last_fold: (0, 0, 0),
+
+            exited_last_window: Vec::new(),
+
+            passports: 0,
         }
+    }
+
+    /// Moves whenever anything a process's passport (the protocol's
+    /// ProcessInfo) is built from changes, or a process joins or leaves.
+    pub fn passport_generation(&self) -> u32 {
+        self.passports
+    }
+
+    fn passport_changed(&mut self) {
+        self.passports = self.passports.wrapping_add(1);
     }
 
     pub fn apply(&mut self, change: StateChange) {
         match change {
             StateChange::ProcessStarted(e) | StateChange::ProcessRundown(e) => {
                 self.processes.insert(e.pid, ProcessEntry::from(e));
+                self.passport_changed();
             }
             StateChange::ProcessEnriched(e) => {
-                if let Some(entry) = self.processes.get_mut(&e.pid) {
-                    if !e.command_line.is_empty() {
-                        entry.command_line = e.command_line;
-                    }
-                    entry.image_path = e.image_path;
-                    entry.display_name = e.display_name;
-                    entry.signature = e.signature;
-                    entry.is_kernel_process = e.is_kernel_process;
-                    entry.is_windows_process = e.is_windows_process;
+                let Some(entry) = self.processes.get_mut(&e.pid) else {
+                    return;
+                };
+                let is_windows_process = entry.is_kernel_process || e.is_windows_process;
+                let changed = (!e.command_line.is_empty() && entry.command_line != e.command_line)
+                    || entry.image_path != e.image_path
+                    || entry.display_name != e.display_name
+                    || entry.signature != e.signature
+                    || entry.is_windows_process != is_windows_process
+                    || entry.console_host_pid != e.console_host_pid;
+                if !changed {
+                    return;
                 }
+                if !e.command_line.is_empty() {
+                    entry.command_line = e.command_line;
+                }
+                entry.image_path = e.image_path;
+                entry.display_name = e.display_name;
+                entry.signature = e.signature;
+                entry.is_windows_process = is_windows_process;
+                entry.console_host_pid = e.console_host_pid;
+                self.passport_changed();
             }
             StateChange::ServicesSnapshot(_) => {}
             StateChange::ProcessStopped(pid) => {
-                self.processes.remove(&pid);
+                if let Some(entry) = self.processes.get_mut(&pid) {
+                    entry.exited = true;
+                }
             }
             StateChange::ThreadStarted { pid, tid } => {
                 self.tid_to_pid.insert(tid, pid);
             }
             StateChange::ThreadStopped { tid } => {
-                self.tid_to_pid.remove(&tid);
+                if let Some(pid) = self.tid_to_pid.remove(&tid) {
+                    self.recently_stopped.insert(tid, pid);
+                }
             }
-            StateChange::Memory(snap) => {
-                if let Some(entry) = self.processes.get_mut(&snap.pid) {
-                    entry.memory = Some(snap);
+            StateChange::Memory(snaps) => {
+                for snap in snaps {
+                    if let Some(entry) = self.processes.get_mut(&snap.pid) {
+                        entry.memory = Some(snap);
+                    }
                 }
             }
             StateChange::Machine(_) => {}
+            StateChange::CpuSamples(samples) => {
+                for (key, count) in samples {
+                    self.record_sample(key.tid, key.pid_hint, count);
+                }
+            }
             StateChange::CpuUsage { pid, percent } => {
                 if let Some(entry) = self.processes.get_mut(&pid) {
                     entry.cpu.total_percent = percent;
@@ -179,6 +245,83 @@ impl ProcessTable {
         }
     }
 
+    pub fn record_sample(&mut self, tid: u32, pid_hint: u32, count: u64) {
+        if tid == IDLE_THREAD_ID {
+            self.samples_idle += count;
+            return;
+        }
+
+        let resolved = self
+            .tid_to_pid
+            .get(&tid)
+            .or_else(|| self.recently_stopped.get(&tid))
+            .copied()
+            .or_else(|| {
+                (pid_hint != IDLE_PROCESS_ID
+                    && pid_hint != NO_PROCESS_ID
+                    && self.processes.contains_key(&pid_hint))
+                .then_some(pid_hint)
+            });
+
+        match resolved {
+            Some(pid) => *self.samples.entry(pid).or_default() += count,
+            None => {
+                if pid_hint == IDLE_PROCESS_ID || pid_hint == NO_PROCESS_ID {
+                    self.samples_idle += count;
+                } else {
+                    self.samples_unattributed += count;
+                }
+            }
+        }
+    }
+
+    pub fn fold_samples(&mut self, attributable_percent: f32) {
+        let total: u64 = self.samples.values().sum::<u64>() + self.samples_unattributed;
+
+        for entry in self.processes.values_mut() {
+            entry.cpu.total_percent = 0.0;
+        }
+
+        if total > 0 {
+            for (pid, count) in &self.samples {
+                if let Some(entry) = self.processes.get_mut(pid) {
+                    entry.cpu.total_percent =
+                        (*count as f64 / total as f64) * attributable_percent as f64;
+                }
+            }
+        }
+
+        self.last_fold = (
+            self.samples.values().sum::<u64>(),
+            self.samples_unattributed,
+            self.samples_idle,
+        );
+
+        let mut removed = false;
+        for pid in self.exited_last_window.drain(..) {
+            removed |= self.processes.remove(&pid).is_some();
+        }
+        if removed {
+            self.passport_changed();
+        }
+        self.exited_last_window = self
+            .processes
+            .values()
+            .filter(|entry| entry.exited)
+            .map(|entry| entry.pid)
+            .collect();
+        self.samples.clear();
+        self.samples_unattributed = 0;
+        self.samples_idle = 0;
+        self.recently_stopped.clear();
+    }
+
+    pub fn sample_counts(&self) -> (u64, u64, u64) {
+        self.last_fold
+    }
+
+
+
     pub fn pid_for_tid(&self, tid: u32) -> Option<u32> {
         self.tid_to_pid.get(&tid).copied()
     }
@@ -199,5 +342,237 @@ impl ProcessTable {
 impl Default for ProcessTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn started(pid: u32) -> StateChange {
+        StateChange::ProcessStarted(crate::state::events::ProcessStarted {
+            pid,
+            parent_pid: 0,
+            session_id: 0,
+            image_name: format!("p{pid}.exe"),
+            command_line: Vec::new(),
+            package_full_name: String::new(),
+            package_relative_app_id: String::new(),
+            is_kernel_process: false,
+        })
+    }
+
+    fn sample(t: &mut ProcessTable, tid: u32, pid_hint: u32, count: u64) {
+        t.record_sample(tid, pid_hint, count);
+    }
+
+    fn table_with_threads() -> ProcessTable {
+        let mut t = ProcessTable::new();
+        t.apply(started(100));
+        t.apply(started(200));
+        t.apply(StateChange::ThreadStarted { pid: 100, tid: 1 });
+        t.apply(StateChange::ThreadStarted { pid: 200, tid: 2 });
+        t
+    }
+
+    #[test]
+    fn samples_are_shared_out_of_the_attributable_time() {
+        let mut t = table_with_threads();
+        sample(&mut t, 1, 0, 30);
+        sample(&mut t, 2, 0, 10);
+
+        t.fold_samples(80.0);
+
+        assert!((t.get(100).unwrap().cpu.total_percent - 60.0).abs() < 0.01);
+        assert!((t.get(200).unwrap().cpu.total_percent - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn samples_from_threads_nobody_claims_still_shrink_everyone_else() {
+        let mut t = table_with_threads();
+        sample(&mut t, 1, 100, 50);
+        sample(&mut t, 999, 777, 50);
+
+        t.fold_samples(100.0);
+
+        assert!(
+            (t.get(100).unwrap().cpu.total_percent - 50.0).abs() < 0.01,
+            "an unattributed sample must not be redistributed to the survivors"
+        );
+    }
+
+    #[test]
+    fn a_process_that_burnt_nothing_this_window_drops_to_zero() {
+        let mut t = table_with_threads();
+        sample(&mut t, 1, 0, 10);
+        t.fold_samples(100.0);
+        assert!(t.get(100).unwrap().cpu.total_percent > 0.0);
+
+        sample(&mut t, 2, 0, 10);
+        t.fold_samples(100.0);
+
+        assert_eq!(t.get(100).unwrap().cpu.total_percent, 0.0);
+        assert!((t.get(200).unwrap().cpu.total_percent - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn idle_samples_do_not_shrink_the_busy_processes() {
+        let mut t = table_with_threads();
+        sample(&mut t, 1, 0, 10);
+        sample(&mut t, IDLE_THREAD_ID, 0, 90);
+
+        t.fold_samples(100.0);
+
+        assert!(
+            (t.get(100).unwrap().cpu.total_percent - 100.0).abs() < 0.01,
+            "idle is already out of the busy figure; counting it again halves everyone"
+        );
+    }
+
+    #[test]
+    fn a_sample_that_arrives_after_its_thread_died_still_finds_its_process() {
+        let mut t = table_with_threads();
+        t.apply(StateChange::ThreadStopped { tid: 1 });
+        sample(&mut t, 1, 0, 10);
+
+        t.fold_samples(100.0);
+
+        assert!(
+            (t.get(100).unwrap().cpu.total_percent - 100.0).abs() < 0.01,
+            "samples and thread events come from separate sessions, so a stop can be applied first"
+        );
+    }
+
+    #[test]
+    fn an_unknown_thread_falls_back_to_the_process_the_event_was_charged_to() {
+        let mut t = table_with_threads();
+        sample(&mut t, 4242, 200, 10);
+
+        t.fold_samples(100.0);
+
+        assert!((t.get(200).unwrap().cpu.total_percent - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_hint_pointing_at_nothing_is_not_trusted() {
+        let mut t = table_with_threads();
+        sample(&mut t, 4242, 777, 10);
+
+        t.fold_samples(100.0);
+
+        assert_eq!(t.get(100).unwrap().cpu.total_percent, 0.0);
+        assert_eq!(t.get(200).unwrap().cpu.total_percent, 0.0);
+    }
+
+    #[test]
+    fn a_process_that_died_this_window_still_gets_its_share() {
+        let mut t = table_with_threads();
+        t.apply(StateChange::ProcessStopped(100));
+        sample(&mut t, 1, 100, 10);
+
+        t.fold_samples(100.0);
+
+        let dead = t.get(100).expect("the row survives the window it died in");
+        assert!(dead.exited);
+        assert!((dead.cpu.total_percent - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_dead_are_gone_by_the_next_window() {
+        let mut t = table_with_threads();
+        t.apply(StateChange::ProcessStopped(100));
+        t.fold_samples(100.0);
+        assert!(t.get(100).is_some());
+
+        t.fold_samples(100.0);
+        assert!(t.get(100).is_none());
+    }
+
+    #[test]
+    fn samples_taken_outside_any_process_do_not_shrink_the_processes() {
+        let mut t = table_with_threads();
+        sample(&mut t, 1, 100, 10);
+        sample(&mut t, 7777, NO_PROCESS_ID, 90);
+
+        t.fold_samples(100.0);
+
+        assert!(
+            (t.get(100).unwrap().cpu.total_percent - 100.0).abs() < 0.01,
+            "idle and interrupt context are already out of the attributable figure"
+        );
+    }
+
+    fn enriched(pid: u32, display_name: &str) -> StateChange {
+        StateChange::ProcessEnriched(crate::state::events::ProcessEnriched {
+            pid,
+            display_name: display_name.to_string(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_start_moves_the_passport_generation() {
+        let mut t = ProcessTable::new();
+        let before = t.passport_generation();
+        t.apply(started(100));
+        assert_ne!(t.passport_generation(), before);
+    }
+
+    #[test]
+    fn an_enrichment_moves_it_only_when_the_passport_changes() {
+        let mut t = table_with_threads();
+        t.apply(enriched(100, "Probe"));
+        let named = t.passport_generation();
+
+        t.apply(enriched(100, "Probe"));
+        assert_eq!(t.passport_generation(), named, "nothing changed");
+
+        t.apply(enriched(100, "Renamed"));
+        assert_ne!(t.passport_generation(), named);
+    }
+
+    #[test]
+    fn a_console_host_arriving_moves_it() {
+        let mut t = table_with_threads();
+        let before = t.passport_generation();
+        t.apply(StateChange::ProcessEnriched(crate::state::events::ProcessEnriched {
+            pid: 100,
+            console_host_pid: 4242,
+            ..Default::default()
+        }));
+        assert_ne!(t.passport_generation(), before);
+        assert_eq!(t.get(100).unwrap().console_host_pid, 4242);
+    }
+
+    #[test]
+    fn an_enrichment_for_a_process_already_gone_moves_nothing() {
+        let mut t = table_with_threads();
+        let before = t.passport_generation();
+        t.apply(enriched(999, "Ghost"));
+        assert_eq!(t.passport_generation(), before);
+    }
+
+    #[test]
+    fn a_stop_keeps_the_passport_until_the_row_is_removed() {
+        let mut t = table_with_threads();
+        let before = t.passport_generation();
+
+        t.apply(StateChange::ProcessStopped(100));
+        t.fold_samples(100.0);
+        assert_eq!(t.passport_generation(), before, "the row is still listed");
+
+        t.fold_samples(100.0);
+        assert_ne!(t.passport_generation(), before, "the row left the list");
+    }
+
+    #[test]
+    fn a_quiet_window_leaves_nobody_holding_stale_figures() {
+        let mut t = table_with_threads();
+        sample(&mut t, 1, 0, 10);
+        t.fold_samples(100.0);
+
+        t.fold_samples(0.0);
+
+        assert_eq!(t.get(100).unwrap().cpu.total_percent, 0.0);
     }
 }

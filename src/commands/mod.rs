@@ -1,3 +1,4 @@
+pub mod cpu;
 pub mod process;
 pub mod services;
 mod vars;

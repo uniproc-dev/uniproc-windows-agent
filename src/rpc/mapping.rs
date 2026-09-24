@@ -1,5 +1,5 @@
 use uniproc_protocol::windows_capnp::{
-    ServiceState as WireServiceState, SignatureStatus, machine_stats, report,
+    ServiceState as WireServiceState, SignatureStatus, machine_stats, windows_agent,
 };
 
 use crate::providers::utils::ServiceState;
@@ -28,10 +28,7 @@ fn service_state(s: ServiceState) -> WireServiceState {
     }
 }
 
-pub fn build_report(state: &SystemState, mut out: report::Builder) {
-    build_machine_stats(state, out.reborrow().init_machine());
-    build_services(state, &mut out);
-
+pub fn build_processes(state: &SystemState, mut out: windows_agent::get_processes_results::Builder) {
     let mut list = out.reborrow().init_processes(state.len() as u32);
     for (i, e) in state.entries().enumerate() {
         let mut p = list.reborrow().get(i as u32);
@@ -41,7 +38,6 @@ pub fn build_report(state: &SystemState, mut out: report::Builder) {
         p.set_name(&e.image_name);
         p.set_package_full_name(&e.package_name);
         p.set_package_relative_app_id(&e.package_relative_app_id);
-        p.set_cpu_percent(e.cpu.total_percent as f32);
 
         {
             let mut cmdline = p.reborrow().init_cmdline(e.command_line.len() as u32);
@@ -50,30 +46,46 @@ pub fn build_report(state: &SystemState, mut out: report::Builder) {
             }
         }
 
-        let mem = e.memory.as_ref();
-        p.set_working_set_kb(mem.map(|m| m.working_set_bytes / 1024).unwrap_or(0));
-        p.set_private_bytes_kb(mem.map(|m| m.private_bytes / 1024).unwrap_or(0));
-        p.set_peak_working_set_kb(mem.map(|m| m.peak_working_set_bytes / 1024).unwrap_or(0));
-        p.set_private_working_set_kb(mem.map(|m| m.private_working_set_bytes / 1024).unwrap_or(0));
-
-        p.set_disk_read_bytes(e.disk.read_bytes);
-        p.set_disk_write_bytes(e.disk.write_bytes);
-        p.set_disk_read_iops(e.disk.read_ops);
-        p.set_disk_write_iops(e.disk.write_ops);
-
-        p.set_net_rx_bytes(e.network.recv_bytes);
-        p.set_net_tx_bytes(e.network.sent_bytes);
-
         p.set_is_service(state.is_service(e.pid));
         p.set_is_kernel_process(e.is_kernel_process);
         p.set_is_windows_process(e.is_windows_process);
         p.set_signature(signature_status(e.signature));
         p.set_image_path(&e.image_path);
         p.set_display_name(&e.display_name);
+        p.set_console_host_pid(e.console_host_pid);
     }
 }
 
-fn build_services(state: &SystemState, out: &mut report::Builder) {
+/// Covers exactly the pids `build_processes` lists from the same state, so
+/// the two must be built under one lock for `processesEtag` to hold.
+pub fn build_process_metrics(
+    state: &SystemState,
+    mut out: windows_agent::get_process_metrics_results::Builder,
+) {
+    out.set_processes_etag(state.processes_etag());
+    let mut list = out.reborrow().init_metrics(state.len() as u32);
+    for (i, e) in state.entries().enumerate() {
+        let mut m = list.reborrow().get(i as u32);
+        m.set_pid(e.pid);
+        m.set_cpu_percent(e.cpu.total_percent as f32);
+
+        let mem = e.memory.as_ref();
+        m.set_working_set_kb(mem.map_or(0, |m| m.working_set_bytes / 1024));
+        m.set_private_bytes_kb(mem.map_or(0, |m| m.private_bytes / 1024));
+        m.set_peak_working_set_kb(mem.map_or(0, |m| m.peak_working_set_bytes / 1024));
+        m.set_private_working_set_kb(mem.map_or(0, |m| m.private_working_set_bytes / 1024));
+
+        m.set_disk_read_bytes(e.disk.read_bytes);
+        m.set_disk_write_bytes(e.disk.write_bytes);
+        m.set_disk_read_iops(e.disk.read_ops);
+        m.set_disk_write_iops(e.disk.write_ops);
+
+        m.set_net_rx_bytes(e.network.recv_bytes);
+        m.set_net_tx_bytes(e.network.sent_bytes);
+    }
+}
+
+pub fn build_services(state: &SystemState, mut out: windows_agent::get_services_results::Builder) {
     let services = state.services();
     let mut list = out.reborrow().init_services(services.len() as u32);
     for (i, svc) in services.iter().enumerate() {
@@ -88,7 +100,7 @@ fn build_services(state: &SystemState, out: &mut report::Builder) {
     }
 }
 
-fn build_machine_stats(state: &SystemState, mut out: machine_stats::Builder) {
+pub fn build_machine(state: &SystemState, mut out: machine_stats::Builder) {
     if let Some(m) = state.machine() {
         out.set_total_physical_kb(m.total_physical_kb);
         out.set_available_physical_kb(m.available_physical_kb);
@@ -96,6 +108,8 @@ fn build_machine_stats(state: &SystemState, mut out: machine_stats::Builder) {
         out.set_cpu_percent(m.cpu_percent);
         out.set_cpu_max_mhz(m.cpu_max_mhz);
         out.set_cpu_current_mhz(m.cpu_current_mhz);
+        out.set_cpu_interrupt_percent(m.cpu_interrupt_percent);
+        out.set_cpu_dpc_percent(m.cpu_dpc_percent);
     }
 
     let totals = state.machine_totals();

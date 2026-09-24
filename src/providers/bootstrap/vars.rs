@@ -7,3 +7,6 @@ pub const INITIAL_BUFFER_SIZE: usize = 1024 * 1024;
 /// Well-known kernel pseudo-process ids.
 pub const IDLE_PROCESS_PID: u32 = 0;
 pub const SYSTEM_PROCESS_PID: u32 = 4;
+
+/// Processes the kernel starts under System that have no image file.
+pub const KERNEL_PSEUDO_PROCESSES: &[&str] = &["Registry", "Memory Compression", "Secure System"];

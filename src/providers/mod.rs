@@ -1,8 +1,8 @@
 use crate::settings::CollectorSettings;
-use crate::supervisor::Supervisor;
+pub use crate::supervisor::Supervisor;
 
 pub mod bootstrap;
-pub mod cpu;
+pub mod cpu_sampler;
 pub mod display_name;
 pub mod disk;
 pub mod machine;
@@ -18,14 +18,14 @@ impl Default for Supervisor {
         let enrich_queue = crossbeam_channel::unbounded();
         Supervisor::new(
             vec![
-                Box::new(cpu::CpuPollerProvider::new(settings.cpu_interval_ms.clone())),
+                Box::new(cpu_sampler::CpuSamplerProvider::new()),
                 Box::new(bootstrap::BootstrapProvider::new(Some(
                     enrich_queue.0.clone(),
                 ))),
                 Box::new(disk::KernelDiskProvider::new()),
                 Box::new(machine::MachineProvider::new(settings.cpu_interval_ms.clone())),
                 Box::new(memory::MemoryPollerProvider::new(
-                    settings.memory_interval_ms.clone(),
+                    settings.memory_interval.clone(),
                 )),
                 Box::new(network::KernelNetworkProvider::new()),
                 Box::new(process::KernelProcessProvider::with_queue(enrich_queue)),

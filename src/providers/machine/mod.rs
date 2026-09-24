@@ -1,3 +1,4 @@
+mod processor_times;
 mod sample;
 mod vars;
 
@@ -7,7 +8,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::providers::machine::sample::{CpuTimes, PdhProcessorPerformance, sample_machine};
+use crate::providers::machine::processor_times::ProcessorTimes;
+use crate::providers::machine::sample::{PdhProcessorPerformance, sample_machine};
 use crate::providers::provider::{LivePids, Provider};
 use crate::sink::Sink;
 use crate::state::events::StateChange;
@@ -44,7 +46,7 @@ impl Provider for MachineProvider {
         std::thread::Builder::new()
             .name("machine-poller".into())
             .spawn(move || {
-                let mut prev_cpu_times: Option<CpuTimes> = None;
+                let mut prev_cpu_times: Option<ProcessorTimes> = None;
                 let mut pdh = PdhProcessorPerformance::open();
                 let mut power_info = Vec::new();
                 while running.load(Ordering::Relaxed) {

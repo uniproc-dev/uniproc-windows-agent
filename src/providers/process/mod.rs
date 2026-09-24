@@ -1,4 +1,5 @@
 mod events;
+mod signature_cache;
 mod vars;
 
 use std::sync::Arc;
@@ -19,7 +20,8 @@ use crate::providers::provider::{LivePids, Provider};
 use crate::providers::display_name;
 use crate::providers::utils::{
     check_signature, enum_services, is_windows_process, query_service_config,
-    get_process_package_info, parse_cmd_line, query_command_line, query_image_path,
+    get_process_package_info, parse_cmd_line, query_command_line, query_console_host_pid,
+    query_image_path,
 };
 use crate::sink::Sink;
 use crate::state::events::{ProcessEnriched, ProcessSignature, ProcessStarted, StateChange};
@@ -33,9 +35,9 @@ pub use vars::KERNEL_PROCESS_PROVIDER;
 /// the actual (blocking) enrichment and emits a follow-up StateChange.
 pub struct KernelProcessProvider {
     tx: Sender<u32>,
-    rx: Mutex<Option<Receiver<u32>>>,
+    rx: Receiver<u32>,
     running: Arc<AtomicBool>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl KernelProcessProvider {
@@ -47,9 +49,9 @@ impl KernelProcessProvider {
     pub fn with_queue((tx, rx): (Sender<u32>, Receiver<u32>)) -> Self {
         Self {
             tx,
-            rx: Mutex::new(Some(rx)),
+            rx,
             running: Arc::new(AtomicBool::new(false)),
-            worker: Mutex::new(None),
+            worker: Mutex::new(Vec::new()),
         }
     }
 }
@@ -73,9 +75,10 @@ struct PathVerdict {
     display_name: String,
 }
 
+
 fn enrich(
     pid: u32,
-    verdict_cache: &mut std::collections::HashMap<String, PathVerdict>,
+    persisted: &Option<signature_cache::PersistentSignatures>,
 ) -> ProcessEnriched {
     // Per-process by nature (different instances of one exe differ), not cached.
     let command_line = unsafe { query_command_line(pid) }
@@ -85,37 +88,69 @@ fn enrich(
     let image_path = unsafe { query_image_path(pid) }.unwrap_or_default();
     // Only needed to resolve a packaged app's manifest name; classic
     // binaries have none and fall through to the version resource.
-    let package_full_name = unsafe { get_process_package_info(pid) }
-        .map(|(full_name, _)| full_name)
-        .unwrap_or_default();
-    let is_kernel_process = image_path.is_empty() || !std::path::Path::new(&image_path).exists();
+    let (package_full_name, package_app_id) =
+        unsafe { get_process_package_info(pid) }.unwrap_or_default();
+    let path_missing = image_path.is_empty() || !std::path::Path::new(&image_path).exists();
 
     // A file replaced while its process is alive keeps the stale verdict — fine.
-    let verdict = if is_kernel_process {
-        // No file to inspect: no signature, no version resource. These are
-        // Windows' own pseudo-processes by definition.
+    let verdict = if path_missing {
+        // No file to inspect: no signature, no version resource. That says
+        // nothing about what the process is - kernel pseudo-processes are
+        // decided at rundown, and anything else just could not be read.
         PathVerdict {
             signature: ProcessSignature::Unknown,
-            is_windows_process: true,
+            is_windows_process: false,
             display_name: String::new(),
         }
     } else {
-        verdict_cache
-            .entry(image_path.clone())
-            .or_insert_with(|| {
+        let cache = persisted.as_ref().map(|p| p.cache());
+        let stamp = signature_cache::file_stamp(&image_path);
+
+        let hit = match (stamp, cache) {
+            (Some(stamp), Some(cache)) => cache.lookup(&image_path, stamp),
+            _ => None,
+        };
+
+        match hit {
+            Some(hit) => PathVerdict {
+                signature: signature_cache::signature_from_code(hit.signature),
+                is_windows_process: hit.is_windows_process,
+                display_name: hit.display_name,
+            },
+            None => {
                 let signature = signature_of(&image_path, &package_full_name);
-                PathVerdict {
+                let verdict = PathVerdict {
                     signature,
                     is_windows_process: is_windows_process(false, signature),
-                    // Packaged apps are keyed by path here too. That is a
-                    // deliberate simplification: one package's executable is
-                    // one path, so the manifest lookup would produce the same
-                    // answer for every process sharing it.
-                    display_name: display_name::resolve(&image_path, &package_full_name)
-                        .unwrap_or_default(),
+                    // Packaged apps are keyed by path here too, which assumes
+                    // one application per executable. A package that runs
+                    // several applications from one exe would show the first
+                    // one's name for all of them.
+                    display_name: display_name::resolve(
+                        &image_path,
+                        &package_full_name,
+                        &package_app_id,
+                    )
+                    .unwrap_or_default(),
+                };
+
+                if let (Some(stamp), Some(cache)) = (stamp, cache) {
+                    cache.remember(
+                        &image_path,
+                        signature_cache::CachedVerdict {
+                            signature: signature_cache::signature_to_code(verdict.signature),
+                            is_windows_process: verdict.is_windows_process,
+                            display_name: verdict.display_name.clone(),
+                            size: stamp.0,
+                            modified_ms: stamp.1,
+                            resolver: signature_cache::RESOLVER,
+                        },
+                    );
                 }
-            })
-            .clone()
+
+                verdict
+            }
+        }
     };
 
     ProcessEnriched {
@@ -124,8 +159,8 @@ fn enrich(
         image_path,
         display_name: verdict.display_name,
         signature: verdict.signature,
-        is_kernel_process,
         is_windows_process: verdict.is_windows_process,
+        console_host_pid: unsafe { query_console_host_pid(pid) },
     }
 }
 
@@ -211,62 +246,80 @@ impl Provider for KernelProcessProvider {
     }
 
     fn start(&self, _: LivePids, sink: Sink) -> Result<()> {
-        let Some(rx) = self.rx.lock().take() else {
+        if self.running.swap(true, Ordering::SeqCst) {
             return Ok(());
-        };
-        self.running.store(true, Ordering::SeqCst);
-        let running = self.running.clone();
+        }
+        let rx = self.rx.clone();
 
-        let handle = std::thread::Builder::new()
-            .name("process-enrich".into())
-            .spawn(move || {
-                let scm = ScManager::open().ok();
-                let mut last_inventory = Instant::now() - INVENTORY_INTERVAL;
-                let mut verdict_cache = std::collections::HashMap::new();
-                let mut services_buf = Vec::new();
-                let mut config_cache: std::collections::HashMap<String, _> =
-                    std::collections::HashMap::new();
+        let persisted = signature_cache::open();
+        let mut handles = Vec::with_capacity(2);
 
-                // Timeout, not channel-disconnect: the router-held Sender
-                // clone only drops when KernelRouter drops, which happens
-                // *after* Supervisor::stop() has already called this stop().
-                while running.load(Ordering::Relaxed) {
-                    match rx.recv_timeout(Duration::from_millis(200)) {
-                        Ok(pid) => sink.emit(StateChange::ProcessEnriched(enrich(
-                            pid,
-                            &mut verdict_cache,
-                        ))),
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
+        {
+            let running = self.running.clone();
+            let sink = sink.clone();
 
-                    if last_inventory.elapsed() >= INVENTORY_INTERVAL {
-                        last_inventory = Instant::now();
-                        if let Some(scm) = &scm {
-                            let mut services = enum_services(scm.handle(), &mut services_buf);
-                            for svc in &mut services {
-                                let config = config_cache
-                                    .entry(svc.name.clone())
-                                    .or_insert_with(|| query_service_config(scm.handle(), &svc.name));
-                                svc.load_group = config.load_group.clone();
-                                svc.description = config.description.clone();
-                                svc.image_path = config.image_path.clone();
+            handles.push(
+                std::thread::Builder::new()
+                    .name("process-enrich".into())
+                    .spawn(move || {
+                        // Timeout, not channel-disconnect: the router-held Sender
+                        // clone only drops when KernelRouter drops, which happens
+                        // *after* Supervisor::stop() has already called this stop().
+                        while running.load(Ordering::Relaxed) {
+                            match rx.recv_timeout(Duration::from_millis(200)) {
+                                Ok(pid) => sink.emit(StateChange::ProcessEnriched(enrich(
+                                    pid, &persisted,
+                                ))),
+                                Err(RecvTimeoutError::Timeout) => {}
+                                Err(RecvTimeoutError::Disconnected) => break,
                             }
-                            config_cache.retain(|name, _| {
-                                services.iter().any(|s| &s.name == name)
-                            });
-                            sink.emit(StateChange::ServicesSnapshot(services));
                         }
+                    })?,
+            );
+        }
+
+        let running = self.running.clone();
+        handles.push(
+            std::thread::Builder::new()
+                .name("service-inventory".into())
+                .spawn(move || {
+                    let scm = ScManager::open().ok();
+                    let mut services_buf = Vec::new();
+                    let mut config_cache: std::collections::HashMap<String, _> =
+                        std::collections::HashMap::new();
+                    let mut last_inventory = Instant::now() - INVENTORY_INTERVAL;
+
+                    while running.load(Ordering::Relaxed) {
+                        if last_inventory.elapsed() >= INVENTORY_INTERVAL {
+                            last_inventory = Instant::now();
+                            if let Some(scm) = &scm {
+                                let mut services = enum_services(scm.handle(), &mut services_buf);
+                                for svc in &mut services {
+                                    let config =
+                                        config_cache.entry(svc.name.clone()).or_insert_with(|| {
+                                            query_service_config(scm.handle(), &svc.name)
+                                        });
+                                    svc.load_group = config.load_group.clone();
+                                    svc.description = config.description.clone();
+                                    svc.image_path = config.image_path.clone();
+                                }
+                                config_cache
+                                    .retain(|name, _| services.iter().any(|s| &s.name == name));
+                                sink.emit(StateChange::ServicesSnapshot(services));
+                            }
+                        }
+                        std::thread::sleep(INVENTORY_POLL);
                     }
-                }
-            })?;
-        *self.worker.lock() = Some(handle);
+                })?,
+        );
+
+        *self.worker.lock() = handles;
         Ok(())
     }
 
     fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
-        if let Some(handle) = self.worker.lock().take() {
+        for handle in self.worker.lock().drain(..) {
             let _ = handle.join();
         }
     }

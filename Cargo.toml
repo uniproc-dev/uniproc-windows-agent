@@ -20,8 +20,8 @@ windows = { version = "0.62.2", features = [
 ntapi = "0.4.3"
 fxhash = "0.2.1"
 
-ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", tag = "v0.4.0" }
-uniproc-protocol = { git = "https://github.com/uniproc-dev/uniproc-protocol", tag = "v0.7.0" }
+ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", tag = "v0.5.1" }
+uniproc-protocol = { git = "https://github.com/uniproc-dev/uniproc-protocol", tag = "v0.9.0" }
 capnp = "0.27"
 capnp-rpc = "0.27"
 dhat = "0.3.3"
@@ -36,11 +36,27 @@ anyhow = "1"
 ctrlc = "3"
 binrw = "0.15.0"
 
+amethystate = { version = "0.20", default-features = false, features = ["redb"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 
+# The read-only state API: its own thread with a current-thread tokio runtime,
+# beside the capnp side's compio. The two share only the state behind its lock.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net"] }
+getrandom = "0.3"
+
+roxmltree = "0.20"
+
 dashmap = "6.1.0"
 compio = "0.18.0"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+
+[profile.release]
+debug = true

@@ -1,41 +1,19 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::providers::memory::vars::{PROCESS_VM_COUNTERS, PROCESS_VM_COUNTERS2, STATUS_SUCCESS};
+use crate::aligned::AlignedBuf;
+use crate::settings::PollInterval;
+use crate::providers::bootstrap::vars::{INITIAL_BUFFER_SIZE, STATUS_INFO_LENGTH_MISMATCH};
 use crate::providers::provider::LivePids;
 use crate::state::events::MemorySnapshot;
-use anyhow::{Result, bail};
-use ntapi::ntpsapi::NtQueryInformationProcess;
+use ntapi::ntexapi::{
+    SYSTEM_EXTENDED_THREAD_INFORMATION, SYSTEM_PROCESS_INFORMATION,
+    SYSTEM_PROCESS_INFORMATION_EXTENSION,
+};
 use tracing::debug;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS};
 
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
-struct VmCountersEx {
-    PeakVirtualSize: usize,
-    VirtualSize: usize,
-    PageFaultCount: u32,
-    _pad: u32,
-    PeakWorkingSetSize: usize,
-    WorkingSetSize: usize,
-    QuotaPeakPagedPoolUsage: usize,
-    QuotaPagedPoolUsage: usize,
-    QuotaPeakNonPagedPoolUsage: usize,
-    QuotaNonPagedPoolUsage: usize,
-    PagefileUsage: usize,
-    PeakPagefileUsage: usize,
-    PrivateUsage: usize,
-}
-
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
-struct VmCountersEx2 {
-    base: VmCountersEx,
-    PrivateWorkingSetSize: usize,
-    SharedCommitUsage: usize,
-}
+const SYSTEM_FULL_PROCESS_INFORMATION: SYSTEM_INFORMATION_CLASS = SYSTEM_INFORMATION_CLASS(148);
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -44,119 +22,152 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-pub unsafe fn query_process_memory(pid: u32) -> Result<MemorySnapshot> {
-    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?;
-    let result = do_query(handle, pid);
-    let _ = CloseHandle(handle);
-    result
-}
+unsafe fn shared_commit_of(start: *const u8, threads: usize, limit: usize) -> u64 {
+    let offset = size_of::<SYSTEM_PROCESS_INFORMATION>()
+        + threads * size_of::<SYSTEM_EXTENDED_THREAD_INFORMATION>();
 
-fn do_query(handle: HANDLE, pid: u32) -> Result<MemorySnapshot> {
-    let mut ret_len: u32 = 0;
-    let handle = handle.0 as *const _ as *mut _;
-
-    let mut ex2 = VmCountersEx2::default();
-    let status2 = unsafe {
-        NtQueryInformationProcess(
-            handle,
-            PROCESS_VM_COUNTERS2,
-            &mut ex2 as *mut _ as *mut _,
-            core::mem::size_of::<VmCountersEx2>() as u32,
-            &mut ret_len,
-        )
-    };
-
-    if status2 == STATUS_SUCCESS {
-        return Ok(snap_from_ex2(pid, &ex2));
+    if offset + size_of::<SYSTEM_PROCESS_INFORMATION_EXTENSION>() > limit {
+        return 0;
     }
 
-    let mut ex = VmCountersEx::default();
-    let status = unsafe {
-        NtQueryInformationProcess(
-            handle,
-            PROCESS_VM_COUNTERS,
-            &mut ex as *mut _ as *mut _,
-            core::mem::size_of::<VmCountersEx>() as u32,
-            &mut ret_len,
-        )
+    let ext = unsafe {
+        start
+            .add(offset)
+            .cast::<SYSTEM_PROCESS_INFORMATION_EXTENSION>()
+            .read_unaligned()
     };
-
-    if status == STATUS_SUCCESS {
-        return Ok(snap_from_ex(pid, &ex));
-    }
-
-    bail!(
-        "NtQueryInformationProcess failed for pid={pid}: \
-         class65={:#010x} class3={:#010x}",
-        status2 as u32,
-        status as u32
-    )
+    ext.SharedCommitCharge as u64
 }
 
-fn snap_from_ex(pid: u32, ex: &VmCountersEx) -> MemorySnapshot {
+fn snap_from_entry(entry: &SYSTEM_PROCESS_INFORMATION, now: u64) -> MemorySnapshot {
     MemorySnapshot {
-        pid,
-        timestamp_ms: now_ms(),
-        virtual_size_bytes: ex.VirtualSize as u64,
-        peak_virtual_size_bytes: ex.PeakVirtualSize as u64,
-        working_set_bytes: ex.WorkingSetSize as u64,
-        peak_working_set_bytes: ex.PeakWorkingSetSize as u64,
-        private_working_set_bytes: 0,
-        private_bytes: ex.PrivateUsage as u64,
-        peak_private_bytes: ex.PeakPagefileUsage as u64,
-        paged_pool_bytes: ex.QuotaPagedPoolUsage as u64,
-        peak_paged_pool_bytes: ex.QuotaPeakPagedPoolUsage as u64,
-        nonpaged_pool_bytes: ex.QuotaNonPagedPoolUsage as u64,
-        peak_nonpaged_pool_bytes: ex.QuotaPeakNonPagedPoolUsage as u64,
-        page_fault_count: ex.PageFaultCount,
+        pid: entry.UniqueProcessId as u32,
+        timestamp_ms: now,
+        virtual_size_bytes: entry.VirtualSize as u64,
+        peak_virtual_size_bytes: entry.PeakVirtualSize as u64,
+        working_set_bytes: entry.WorkingSetSize as u64,
+        peak_working_set_bytes: entry.PeakWorkingSetSize as u64,
+        private_working_set_bytes: unsafe { *entry.WorkingSetPrivateSize.QuadPart() } as u64,
+        private_bytes: entry.PagefileUsage as u64,
+        peak_private_bytes: entry.PeakPagefileUsage as u64,
+        paged_pool_bytes: entry.QuotaPagedPoolUsage as u64,
+        peak_paged_pool_bytes: entry.QuotaPeakPagedPoolUsage as u64,
+        nonpaged_pool_bytes: entry.QuotaNonPagedPoolUsage as u64,
+        peak_nonpaged_pool_bytes: entry.QuotaPeakNonPagedPoolUsage as u64,
+        page_fault_count: entry.PageFaultCount,
         shared_commit_bytes: 0,
     }
 }
 
-fn snap_from_ex2(pid: u32, ex2: &VmCountersEx2) -> MemorySnapshot {
-    let mut snap = snap_from_ex(pid, &ex2.base);
-    snap.private_working_set_bytes = ex2.PrivateWorkingSetSize as u64;
-    snap.shared_commit_bytes = ex2.SharedCommitUsage as u64;
-    snap
+fn query_all(buf: &mut AlignedBuf, out: &mut Vec<MemorySnapshot>) -> bool {
+    out.clear();
+    if buf.is_empty() {
+        buf.resize(INITIAL_BUFFER_SIZE);
+    }
+
+    loop {
+        let mut return_length = 0u32;
+        let status = unsafe {
+            NtQuerySystemInformation(
+                SYSTEM_FULL_PROCESS_INFORMATION,
+                buf.as_mut_ptr() as *mut _,
+                buf.len() as u32,
+                &mut return_length,
+            )
+        };
+
+        if status.0 == STATUS_INFO_LENGTH_MISMATCH {
+            buf.resize(return_length as usize + 64 * 1024);
+            continue;
+        }
+
+        if status.is_err() {
+            debug!("memory poll: NtQuerySystemInformation failed: {status:?}");
+            return false;
+        }
+
+        let now = now_ms();
+        let total = return_length as usize;
+        let mut offset = 0usize;
+        loop {
+            let start = unsafe { buf.as_ptr().add(offset) };
+            let entry = unsafe { start.cast::<SYSTEM_PROCESS_INFORMATION>().read_unaligned() };
+
+            let limit = if entry.NextEntryOffset == 0 {
+                total.saturating_sub(offset)
+            } else {
+                entry.NextEntryOffset as usize
+            };
+
+            let mut snap = snap_from_entry(&entry, now);
+            snap.shared_commit_bytes =
+                unsafe { shared_commit_of(start, entry.NumberOfThreads as usize, limit) };
+            out.push(snap);
+
+            if entry.NextEntryOffset == 0 {
+                break;
+            }
+            offset += entry.NextEntryOffset as usize;
+        }
+        return true;
+    }
 }
 
 pub struct MemoryPoller {
     running: Arc<AtomicBool>,
-    interval_ms: Arc<AtomicU64>,
+    interval: Arc<PollInterval>,
 }
 
 impl MemoryPoller {
-    pub fn new(interval_ms: Arc<AtomicU64>) -> Self {
+    pub fn new(interval: Arc<PollInterval>) -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
-            interval_ms,
+            interval,
         }
     }
 
-    pub fn start<F>(&self, live_pids: LivePids, on_snapshot: F)
+    pub fn start<F>(&self, _live_pids: LivePids, on_pass: F)
     where
-        F: Fn(MemorySnapshot) + Send + 'static,
+        F: Fn(Vec<MemorySnapshot>) + Send + 'static,
     {
         if self.running.swap(true, Ordering::SeqCst) {
             return;
         }
 
         let running = self.running.clone();
-        let interval_ms = self.interval_ms.clone();
+        let interval = self.interval.clone();
 
         std::thread::Builder::new()
             .name("memory-poller".into())
-            .spawn(move || unsafe {
+            .spawn(move || {
+                let mut passes = 0u64;
+                let mut micros_total = 0u64;
+                let mut buf = AlignedBuf::zeroed(0);
+                let mut snaps: Vec<MemorySnapshot> = Vec::new();
+
                 while running.load(Ordering::Relaxed) {
-                    for entry in live_pids.iter() {
-                        let pid = *entry.key();
-                        match query_process_memory(pid) {
-                            Ok(snap) => on_snapshot(snap),
-                            Err(e) => debug!(pid, "memory poll: {e:#}"),
-                        }
+                    let pass_start = std::time::Instant::now();
+                    let mut counted = 0usize;
+                    let mut snaps_shared = 0usize;
+                    if query_all(&mut buf, &mut snaps) {
+                        counted = snaps.len();
+                        snaps_shared = snaps.iter().filter(|s| s.shared_commit_bytes > 0).count();
+                        on_pass(std::mem::take(&mut snaps));
                     }
-                    let ms = interval_ms.load(Ordering::Relaxed);
-                    std::thread::sleep(Duration::from_millis(ms));
+                    passes += 1;
+                    micros_total += pass_start.elapsed().as_micros() as u64;
+                    if passes % 20 == 0 {
+                        tracing::warn!(
+                            pids = counted,
+                            with_shared = snaps_shared,
+                            passes,
+                            avg_micros = micros_total / passes,
+                            busy_percent_of_core =
+                                format!("{:.2}", micros_total as f64 / (passes as f64 * 1000.0) * 100.0),
+                            "memory poller"
+                        );
+                    }
+                    interval.wait();
                 }
             })
             .expect("failed to spawn memory-poller thread");
@@ -164,5 +175,7 @@ impl MemoryPoller {
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
+        self.interval.wake();
     }
 }
+

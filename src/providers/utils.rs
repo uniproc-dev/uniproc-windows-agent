@@ -1,7 +1,7 @@
 use ntapi::ntrtl::RTL_USER_PROCESS_PARAMETERS;
 use ntapi::winapi::um::winbase::LocalFree;
 use windows::core::{PCWSTR, PWSTR};
-use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
+use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS, ProcessBasicInformation};
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, HWND, TRUST_E_NOSIGNATURE, TRUST_E_SUBJECT_FORM_UNKNOWN};
 use windows::Win32::Security::Cryptography::Catalog::{
     CATALOG_INFO, CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
@@ -182,6 +182,36 @@ pub unsafe fn query_image_path(pid: u32) -> Option<String> {
     });
     let _ = CloseHandle(handle);
     result
+}
+
+const PROCESS_CONSOLE_HOST_PROCESS: PROCESSINFOCLASS = PROCESSINFOCLASS(49);
+
+/// Pid of the conhost serving `pid`'s console, or 0 when it has none.
+pub unsafe fn query_console_host_pid(pid: u32) -> u32 {
+    let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+        return 0;
+    };
+    let mut value = 0usize;
+    let status = NtQueryInformationProcess(
+        handle,
+        PROCESS_CONSOLE_HOST_PROCESS,
+        &mut value as *mut usize as *mut _,
+        std::mem::size_of::<usize>() as u32,
+        std::ptr::null_mut(),
+    );
+    let _ = CloseHandle(handle);
+    if status.is_err() {
+        return 0;
+    }
+    console_host_from(value)
+}
+
+fn console_host_from(value: usize) -> u32 {
+    if value & 3 == 1 {
+        (value & !3) as u32
+    } else {
+        0
+    }
 }
 
 thread_local! {
@@ -451,7 +481,7 @@ pub fn is_windows_process(is_kernel: bool, signature: ProcessSignature) -> bool 
     is_kernel || signature == ProcessSignature::Microsoft
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ServiceInfo {
     pub name: String,
     pub display_name: String,
@@ -668,6 +698,27 @@ mod signature_tests {
                 ProcessSignature::Microsoft,
                 "{name} should verify through the system catalogs"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod console_host_tests {
+    use super::{console_host_from, query_console_host_pid};
+
+    #[test]
+    fn only_the_console_flag_names_a_host() {
+        assert_eq!(console_host_from(0x1234 << 2 | 1), 0x1234 << 2);
+        assert_eq!(console_host_from(0x1234 << 2), 0, "flag 0 carries the parent pid");
+        assert_eq!(console_host_from(0x1234 << 2 | 2), 0, "flag 2 carries some other pid");
+        assert_eq!(console_host_from(1), 0, "a console process with no host");
+    }
+
+    #[test]
+    fn a_test_run_from_a_console_sees_its_host() {
+        let host = unsafe { query_console_host_pid(std::process::id()) };
+        if host != 0 {
+            assert_ne!(host, std::process::id());
         }
     }
 }

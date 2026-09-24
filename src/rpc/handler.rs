@@ -2,11 +2,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use uniproc_protocol::meta_capnp::{self, ResponseStatus};
 use uniproc_protocol::windows_capnp::{ProcessPriority as ProtoPriority, windows_agent};
 
 use crate::commands::process::ProcessPriority;
 use crate::commands::{Commands, Outcome};
 use crate::monitor::SharedSupervisor;
+use crate::rpc::mapping;
 use crate::settings::CollectorSettings;
 use crate::state::SystemState;
 
@@ -38,6 +40,28 @@ fn code(outcome: Outcome) -> u32 {
     outcome.err().unwrap_or(0)
 }
 
+fn unconditional(mut meta: meta_capnp::response_meta::Builder) {
+    meta.set_etag(0);
+    meta.set_status(ResponseStatus::Ok);
+}
+
+fn conditional(mut meta: meta_capnp::response_meta::Builder, if_none_match: u64, etag: u64) -> bool {
+    meta.set_etag(etag);
+    if if_none_match != 0 && if_none_match == etag {
+        meta.set_status(ResponseStatus::NotModified);
+        false
+    } else {
+        meta.set_status(ResponseStatus::Ok);
+        true
+    }
+}
+
+impl AgentImpl {
+    fn tick(&self) {
+        self.supervisor.lock().tick();
+    }
+}
+
 fn name(params: capnp::text::Reader) -> Result<String, capnp::Error> {
     Ok(params.to_str()?.to_owned())
 }
@@ -62,6 +86,7 @@ macro_rules! service_method {
         ) -> Result<(), capnp::Error> {
             let service_name = name(params.get()?.get_name()?)?;
             let outcome = self.commands.$call(service_name).await;
+            unconditional(results.get().init_meta());
             results.get().set_code(code(outcome));
             Ok(())
         }
@@ -71,30 +96,71 @@ macro_rules! service_method {
 impl windows_agent::Server for AgentImpl {
     async fn ping(
         self: Rc<Self>,
-        _: windows_agent::PingParams,
-        _: windows_agent::PingResults,
+        params: windows_agent::PingParams,
+        mut results: windows_agent::PingResults,
     ) -> Result<(), capnp::Error> {
+        let nonce = params.get()?.get_nonce();
+        unconditional(results.get().init_meta());
+        results.get().set_nonce(nonce);
         Ok(())
     }
 
-    async fn get_report(
+    async fn get_machine(
         self: Rc<Self>,
-        _: windows_agent::GetReportParams,
-        mut results: windows_agent::GetReportResults,
+        _: windows_agent::GetMachineParams,
+        mut results: windows_agent::GetMachineResults,
     ) -> Result<(), capnp::Error> {
-        {
-            let mut supervisor = self.supervisor.lock();
-            supervisor.tick();
+        self.tick();
+        unconditional(results.get().init_meta());
+        mapping::build_machine(&self.state.lock(), results.get().init_machine());
+        Ok(())
+    }
+
+    async fn get_services(
+        self: Rc<Self>,
+        params: windows_agent::GetServicesParams,
+        mut results: windows_agent::GetServicesResults,
+    ) -> Result<(), capnp::Error> {
+        let if_none_match = params.get()?.get_meta()?.get_if_none_match();
+        self.tick();
+        let state = self.state.lock();
+        if conditional(results.get().init_meta(), if_none_match, state.services_etag()) {
+            mapping::build_services(&state, results.get());
         }
-        crate::rpc::mapping::build_report(&self.state.lock(), results.get().init_report());
+        Ok(())
+    }
+
+    async fn get_processes(
+        self: Rc<Self>,
+        params: windows_agent::GetProcessesParams,
+        mut results: windows_agent::GetProcessesResults,
+    ) -> Result<(), capnp::Error> {
+        let if_none_match = params.get()?.get_meta()?.get_if_none_match();
+        self.tick();
+        let state = self.state.lock();
+        if conditional(results.get().init_meta(), if_none_match, state.processes_etag()) {
+            mapping::build_processes(&state, results.get());
+        }
+        Ok(())
+    }
+
+    async fn get_process_metrics(
+        self: Rc<Self>,
+        _: windows_agent::GetProcessMetricsParams,
+        mut results: windows_agent::GetProcessMetricsResults,
+    ) -> Result<(), capnp::Error> {
+        self.tick();
+        unconditional(results.get().init_meta());
+        mapping::build_process_metrics(&self.state.lock(), results.get());
         Ok(())
     }
 
     async fn set_config(
         self: Rc<Self>,
         params: windows_agent::SetConfigParams,
-        _: windows_agent::SetConfigResults,
+        mut results: windows_agent::SetConfigResults,
     ) -> Result<(), capnp::Error> {
+        unconditional(results.get().init_meta());
         let params = params.get()?;
         let memory_interval_ms = params.get_memory_interval_ms();
         let cpu_interval_ms = params.get_cpu_interval_ms();
@@ -116,6 +182,7 @@ impl windows_agent::Server for AgentImpl {
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
         let outcome = self.commands.process_kill(pid).await;
+        unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
     }
@@ -127,6 +194,7 @@ impl windows_agent::Server for AgentImpl {
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
         let outcome = self.commands.process_suspend(pid).await;
+        unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
     }
@@ -138,6 +206,7 @@ impl windows_agent::Server for AgentImpl {
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
         let outcome = self.commands.process_resume(pid).await;
+        unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
     }
@@ -152,6 +221,7 @@ impl windows_agent::Server for AgentImpl {
             .commands
             .process_set_priority(params.get_pid(), priority(params.get_priority()?))
             .await;
+        unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
     }
@@ -166,6 +236,7 @@ impl windows_agent::Server for AgentImpl {
             .commands
             .process_set_affinity(params.get_pid(), params.get_mask())
             .await;
+        unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
     }

@@ -1,4 +1,4 @@
-use windows::Win32::Foundation::{FILETIME, STATUS_SUCCESS};
+use windows::Win32::Foundation::STATUS_SUCCESS;
 use windows::Win32::System::Performance::{
     PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue,
@@ -8,21 +8,10 @@ use windows::Win32::System::Power::{
     CallNtPowerInformation, PROCESSOR_POWER_INFORMATION, ProcessorInformation,
 };
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows::Win32::System::Threading::GetSystemTimes;
 
+use crate::providers::machine::processor_times::{ProcessorTimes, sample_processor_times};
 use crate::providers::machine::vars::PDH_PROCESSOR_PERFORMANCE;
 use crate::state::events::MachineSnapshot;
-
-#[derive(Clone, Copy)]
-pub struct CpuTimes {
-    idle: u64,
-    kernel: u64,
-    user: u64,
-}
-
-fn filetime_to_u64(ft: FILETIME) -> u64 {
-    ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
-}
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -31,45 +20,6 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn sample_cpu_percent(prev: &mut Option<CpuTimes>) -> f32 {
-    let mut idle = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-
-    if unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.is_err() {
-        return 0.0;
-    }
-
-    let current = CpuTimes {
-        idle: filetime_to_u64(idle),
-        kernel: filetime_to_u64(kernel),
-        user: filetime_to_u64(user),
-    };
-
-    let percent = if let Some(last) = *prev {
-        let idle_delta = current.idle.saturating_sub(last.idle);
-        let kernel_delta = current.kernel.saturating_sub(last.kernel);
-        let user_delta = current.user.saturating_sub(last.user);
-        let total_delta = kernel_delta.saturating_add(user_delta);
-
-        if total_delta == 0 {
-            0.0
-        } else {
-            ((total_delta.saturating_sub(idle_delta)) as f64 * 100.0 / total_delta as f64)
-                .clamp(0.0, 100.0) as f32
-        }
-    } else {
-        0.0
-    };
-
-    *prev = Some(current);
-    percent
-}
-
-/// Persistent PDH query: opened once per poller thread instead of
-/// open/close on every sample. With a persistent query the rate is measured
-/// between consecutive collects (~one poll interval apart), so no extra
-/// sleep is needed between them.
 pub struct PdhProcessorPerformance {
     query: PDH_HQUERY,
     counter: PDH_HCOUNTER,
@@ -155,12 +105,15 @@ fn sample_cpu_frequency_mhz(
 }
 
 pub fn sample_machine(
-    prev_cpu_times: &mut Option<CpuTimes>,
+    prev_cpu_times: &mut Option<ProcessorTimes>,
     pdh: Option<&mut PdhProcessorPerformance>,
     info: &mut Vec<PROCESSOR_POWER_INFORMATION>,
 ) -> MachineSnapshot {
+    let cpu = sample_processor_times(prev_cpu_times);
     let mut snap = MachineSnapshot {
-        cpu_percent: sample_cpu_percent(prev_cpu_times),
+        cpu_percent: cpu.busy_percent,
+        cpu_interrupt_percent: cpu.interrupt_percent,
+        cpu_dpc_percent: cpu.dpc_percent,
         timestamp_ms: now_ms(),
         ..Default::default()
     };

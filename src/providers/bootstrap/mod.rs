@@ -1,5 +1,5 @@
 mod enum_processes;
-mod vars;
+pub(crate) mod vars;
 
 use anyhow::Result;
 use crossbeam_channel::Sender;

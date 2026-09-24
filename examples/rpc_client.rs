@@ -1,16 +1,17 @@
 //! Manual end-to-end check against a running agent:
 //!   cargo run --example rpc_client -- [service_name]
 //!
-//! Calls ping, getReport, process commands on a self-spawned child, and a
+//! Calls ping, getMachine, getProcesses, process commands on a self-spawned child, and a
 //! service restart (default: Spooler) with a concurrent ping to prove the
 //! RPC thread is not blocked by Win32 calls.
 
 use std::time::Instant;
 
-use ogurpchik::auth::handshake::HandshakeMode;
+use ogurpchik::auth::handshake::{HandshakeMode, SchemaId};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::connect_session;
 use uniproc_protocol::windows_capnp::windows_agent;
+use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE, WINDOWS_SCHEMA_ID};
 
 struct ClientStub;
 impl windows_agent::Server for ClientStub {}
@@ -24,10 +25,11 @@ fn main() {
 }
 
 async fn run(service: String) -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = Endpoint::for_service("uniproc", "windows-agent")?;
+    let endpoint = Endpoint::for_service(APP_NAME, WINDOWS_AGENT_SERVICE)?;
     let session = connect_session::<windows_agent::Client, _>(
         &endpoint,
         &HandshakeMode::version_only(),
+        SchemaId(WINDOWS_SCHEMA_ID),
         ClientStub,
     )
     .await
@@ -37,12 +39,12 @@ async fn run(service: String) -> Result<(), Box<dyn std::error::Error>> {
     client.ping_request().send().promise.await?;
     println!("ping: ok");
 
-    let reply = client.get_report_request().send().promise.await?;
-    let report = reply.get()?.get_report()?;
-    let machine = report.get_machine()?;
-    let processes = report.get_processes()?;
+    let reply = client.get_machine_request().send().promise.await?;
+    let machine = reply.get()?.get_machine()?;
+    let processes_reply = client.get_processes_request().send().promise.await?;
+    let processes = processes_reply.get()?.get_processes()?;
     println!(
-        "getReport: {} processes, cpu {:.1}%, mem used {} kb, net rx {} tx {}",
+        "getProcesses: {} processes; getMachine: cpu {:.1}%, mem used {} kb, net rx {} tx {}",
         processes.len(),
         machine.get_cpu_percent(),
         machine.get_used_physical_kb(),

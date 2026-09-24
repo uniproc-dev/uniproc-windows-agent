@@ -6,6 +6,8 @@ use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
 use windows::Win32::System::Diagnostics::Etw::*;
 use windows::core::{GUID, PCWSTR};
 
+use crate::aligned::AlignedBuf;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionMode {
     Normal,
@@ -50,7 +52,7 @@ impl Drop for EtwSession {
         let w = session_name_wide(&self.name);
         let name_ptr = PCWSTR(w.as_ptr());
         let props_size = size_of::<EVENT_TRACE_PROPERTIES>() + w.len() * 2 + 512;
-        let mut buf = vec![0u8; props_size];
+        let mut buf = AlignedBuf::zeroed(props_size);
         let props = unsafe { build_props(&mut buf, None, 0, SessionMode::Normal) };
         let _ = unsafe { StopTraceW(self.handle, name_ptr, props) };
         info!("ETW session '{}' stopped", self.name);
@@ -71,7 +73,7 @@ fn start_raw(
     let displayed = String::from_utf16_lossy(unsafe { pcwstr.as_wide() });
     let name_bytes = unsafe { pcwstr.as_wide() }.len() * 2;
     let props_size = size_of::<EVENT_TRACE_PROPERTIES>() + name_bytes + 2;
-    let mut buf = vec![0u8; props_size];
+    let mut buf = AlignedBuf::zeroed(props_size);
     let props = unsafe { build_props(&mut buf, guid, flags, mode) };
 
     let mut handle = CONTROLTRACE_HANDLE::default();
@@ -101,7 +103,7 @@ fn start_raw(
 }
 
 unsafe fn build_props(
-    buf: &mut Vec<u8>,
+    buf: &mut AlignedBuf,
     guid: Option<GUID>,
     flags: u32,
     mode: SessionMode,

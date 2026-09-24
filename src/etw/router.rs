@@ -1,17 +1,11 @@
-use std::collections::HashMap;
+use fxhash::FxHashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use anyhow::Result;
 use tracing::error;
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Security::{
-    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
-    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
-};
 use windows::Win32::System::Diagnostics::Etw::{EVENT_RECORD, EVENT_TRACE_FLAG, ProcessTrace};
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{GUID, w};
 
 use crate::etw::consumer::{EventSink, TraceConsumer};
@@ -21,7 +15,11 @@ use crate::sink::Sink;
 use crate::state::events::StateChange;
 
 pub(crate) fn manifest_session_name(guid: &GUID) -> String {
-    format!("{SESSION_NAME_PREFIX}{guid:?}").replace(['{', '}'], "")
+    manifest_session_name_in(SESSION_NAME_PREFIX, guid)
+}
+
+fn manifest_session_name_in(prefix: &str, guid: &GUID) -> String {
+    format!("{prefix}{guid:?}").replace(['{', '}'], "")
 }
 
 type Handler = Box<dyn FnMut(&EVENT_RECORD, &[u8], &mut Vec<StateChange>) + Send>;
@@ -46,7 +44,9 @@ pub struct KernelRouterBuilder {
     flags: u32,
     manifest: Vec<GUID>,
     handlers: Vec<Handler>,
-    routes: HashMap<GUID, Vec<usize>>,
+    routes: FxHashMap<GUID, Vec<usize>>,
+    prefix: String,
+    kernel_session: String,
 }
 
 impl KernelRouterBuilder {
@@ -71,6 +71,12 @@ impl KernelRouterBuilder {
         self
     }
 
+    pub fn session_namespace(&mut self, prefix: &str) -> &mut Self {
+        self.prefix = prefix.to_string();
+        self.kernel_session = format!("{prefix}Kernel");
+        self
+    }
+
     /// Manifest providers: own session per GUID, enabled via EnableTraceEx2.
     /// Events are matched by EventDescriptor.Id inside the handler.
     pub fn manifest(&mut self, provider: GUID) -> &mut Self {
@@ -87,6 +93,8 @@ impl KernelRouterBuilder {
             manifest,
             handlers,
             routes,
+            prefix,
+            kernel_session,
         } = self;
 
         let mut core = Box::new(parking_lot::Mutex::new(RouterCore {
@@ -101,18 +109,18 @@ impl KernelRouterBuilder {
         let mut consumers = Vec::new();
 
         if flags != 0 {
-            unsafe { enable_profile_privilege()? };
-            let session = EtwSession::start(KERNEL_SESSION_NAME, flags, SessionMode::SystemLogger)?;
+            crate::privileges::enable(w!("SeSystemProfilePrivilege"))?;
+            let session = EtwSession::start(&kernel_session, flags, SessionMode::SystemLogger)?;
             // SAFETY: ptr points at `core`, which KernelRouter owns and drops
             // only after every pump thread has been joined; callbacks from
             // different sessions serialize on the mutex inside.
-            let consumer = unsafe { TraceConsumer::open(KERNEL_SESSION_NAME, ptr)? };
+            let consumer = unsafe { TraceConsumer::open(&kernel_session, ptr)? };
             sessions.push(session);
             consumers.push(consumer);
         }
 
         for guid in &manifest {
-            let name = manifest_session_name(guid);
+            let name = manifest_session_name_in(&prefix, guid);
             let session = EtwSession::start(&name, 0, SessionMode::Normal)?;
             session.enable(guid)?;
             // SAFETY: same as above.
@@ -149,7 +157,7 @@ impl KernelRouterBuilder {
 }
 
 struct RouterCore {
-    routes: HashMap<GUID, Vec<usize>>,
+    routes: FxHashMap<GUID, Vec<usize>>,
     handlers: Vec<Handler>,
     sink: Sink,
     scratch: Vec<StateChange>,
@@ -187,7 +195,9 @@ impl KernelRouter {
             flags: 0,
             manifest: Vec::new(),
             handlers: Vec::new(),
-            routes: HashMap::new(),
+            routes: FxHashMap::default(),
+            prefix: SESSION_NAME_PREFIX.to_string(),
+            kernel_session: KERNEL_SESSION_NAME.to_string(),
         }
     }
 }
@@ -211,31 +221,6 @@ pub fn to_user_data(record: &EVENT_RECORD) -> Option<&[u8]> {
     Some(unsafe {
         std::slice::from_raw_parts(record.UserData as *const u8, record.UserDataLength as usize)
     })
-}
-
-unsafe fn enable_profile_privilege() -> Result<()> {
-    let mut token = HANDLE::default();
-    unsafe {
-        OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-            &mut token,
-        )?
-    };
-
-    let mut luid = Default::default();
-    unsafe { LookupPrivilegeValueW(None, w!("SeSystemProfilePrivilege"), &mut luid)? };
-
-    let tp = TOKEN_PRIVILEGES {
-        PrivilegeCount: 1,
-        Privileges: [LUID_AND_ATTRIBUTES {
-            Luid: luid,
-            Attributes: SE_PRIVILEGE_ENABLED,
-        }],
-    };
-
-    unsafe { AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None)? };
-    Ok(())
 }
 
 #[cfg(test)]

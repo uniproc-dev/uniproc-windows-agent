@@ -9,11 +9,28 @@ use crate::supervisor::Supervisor;
 pub type SharedSupervisor = Arc<Mutex<Supervisor>>;
 
 pub fn run(stop: impl FnOnce()) -> Result<()> {
+    // Without it, processes of other accounts (SYSTEM, DWM, UMFD, Hyper-V)
+    // refuse even a limited query handle: no image path, signature or icon.
+    // LocalSystem holds it enabled already; an elevated console must ask.
+    if let Err(error) = crate::privileges::enable(windows::core::w!("SeDebugPrivilege")) {
+        tracing::warn!(%error, "running without SeDebugPrivilege: other accounts' processes stay opaque");
+    }
+
     let mut supervisor = Supervisor::default();
     supervisor.start()?;
     let tick_interval = supervisor.tick_interval();
 
+    let state = supervisor.state();
     let supervisor: SharedSupervisor = Arc::new(Mutex::new(supervisor));
+
+    match crate::http::serve(state, supervisor.clone()) {
+        Ok(access) => info!(
+            url = access.url,
+            access = %crate::http::access_path().display(),
+            "state API listening"
+        ),
+        Err(error) => tracing::warn!(%error, "the state API did not start"),
+    }
 
     let node_supervisor = supervisor.clone();
     std::thread::spawn(move || {

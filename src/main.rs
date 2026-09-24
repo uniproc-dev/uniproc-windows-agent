@@ -1,8 +1,11 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(non_snake_case, non_camel_case_types)]
 
+mod aligned;
 mod commands;
 pub mod etw;
+mod http;
+mod privileges;
 mod logger;
 mod monitor;
 mod providers;
@@ -42,6 +45,13 @@ enum Command {
     Uninstall,
     /// Run directly in the console
     Run,
+    /// Print the cpu breakdown and the top consumers, once a second
+    Cpu {
+        #[arg(long, default_value_t = 5)]
+        iterations: u32,
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
 }
 
 #[cfg(debug_assertions)]
@@ -67,6 +77,10 @@ fn main() -> Result<()> {
         Some(Command::Run) => {
             logger::init_console();
             service::run_direct()?;
+        }
+        Some(Command::Cpu { iterations, top }) => {
+            logger::init_console();
+            commands::cpu::run(iterations, top)?;
         }
         None => {
             service::run_as_service(SERVICE_NAME)?;

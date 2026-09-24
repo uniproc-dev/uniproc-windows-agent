@@ -32,8 +32,9 @@ pub struct ProcessEnriched {
     /// none of the sources answered - `image_name` stays the fallback.
     pub display_name: String,
     pub signature: ProcessSignature,
-    pub is_kernel_process: bool,
     pub is_windows_process: bool,
+    /// Pid of the conhost serving the console at enrichment, 0 for none.
+    pub console_host_pid: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -61,6 +62,8 @@ pub struct MachineSnapshot {
     pub available_physical_kb: u64,
     pub used_physical_kb: u64,
     pub cpu_percent: f32,
+    pub cpu_interrupt_percent: f32,
+    pub cpu_dpc_percent: f32,
     pub cpu_max_mhz: u64,
     pub cpu_current_mhz: u64,
     pub timestamp_ms: u64,
@@ -123,9 +126,12 @@ pub enum StateChange {
     /// Whole-set snapshots from the periodic inventory; they replace the
     /// previous sets instead of diffing per process.
     ServicesSnapshot(Vec<crate::providers::utils::ServiceInfo>),
-    Memory(MemorySnapshot),
+    Memory(Vec<MemorySnapshot>),
     Machine(MachineSnapshot),
     Disk(DiskEvent),
     Network(NetworkEvent),
     CpuUsage { pid: u32, percent: f64 },
+    /// Profile samples per thread since the previous batch, attributed to
+    /// processes when applied and shared out at the next machine snapshot.
+    CpuSamples(crate::providers::cpu_sampler::counters::Samples),
 }

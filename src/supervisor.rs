@@ -15,12 +15,14 @@ use crate::state::events::StateChange;
 
 pub struct SupervisorConfig {
     pub tick_interval: Duration,
+    pub session_namespace: Option<String>,
 }
 
 impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
             tick_interval: Duration::from_millis(100),
+            session_namespace: None,
         }
     }
 }
@@ -56,6 +58,14 @@ impl Supervisor {
         }
     }
 
+    pub fn set_config(&mut self, config: SupervisorConfig) {
+        self.config = config;
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.sink.as_ref().map(|s| s.dropped()).unwrap_or(0)
+    }
+
     pub fn state(&self) -> Arc<Mutex<SystemState>> {
         self.state.clone()
     }
@@ -72,6 +82,9 @@ impl Supervisor {
         let (sink, rx) = Sink::bounded(crate::sink::DEFAULT_CAPACITY);
 
         let mut builder = KernelRouter::builder();
+        if let Some(prefix) = &self.config.session_namespace {
+            builder.session_namespace(prefix);
+        }
         for p in &self.providers {
             p.register(&mut builder)?;
         }

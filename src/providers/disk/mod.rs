@@ -1,7 +1,7 @@
+use fxhash::FxHashMap;
 mod events;
 mod vars;
 
-use std::collections::HashMap;
 
 use anyhow::Result;
 use windows::Win32::System::Diagnostics::Etw::EVENT_TRACE_FLAG_DISK_IO;
@@ -37,7 +37,7 @@ impl Default for KernelDiskProvider {
 
 impl Provider for KernelDiskProvider {
     fn register(&self, b: &mut KernelRouterBuilder) -> Result<()> {
-        let mut pending: HashMap<u64, PendingIrp> = HashMap::new();
+        let mut pending: FxHashMap<u64, PendingIrp> = FxHashMap::default();
 
         b.kernel_flags(EVENT_TRACE_FLAG_DISK_IO)
             .on(&[DISK_IO_TASK_GUID], move |record, data| {

@@ -2,11 +2,11 @@ mod intrnl;
 mod vars;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use anyhow::Result;
 
 use crate::providers::provider::{LivePids, Provider};
+use crate::settings::{IDLE_MEMORY_INTERVAL_MS, PollInterval};
 use crate::sink::Sink;
 use crate::state::events::StateChange;
 use crate::providers::memory::intrnl::MemoryPoller;
@@ -16,17 +16,17 @@ pub struct MemoryPollerProvider {
 }
 
 impl MemoryPollerProvider {
-    pub fn new(interval_ms: Arc<AtomicU64>) -> Self {
+    pub fn new(interval: Arc<PollInterval>) -> Self {
         Self {
-            poller: MemoryPoller::new(interval_ms),
+            poller: MemoryPoller::new(interval),
         }
     }
 }
 
 impl Provider for MemoryPollerProvider {
     fn start(&self, live_pids: LivePids, sink: Sink) -> Result<()> {
-        self.poller.start(live_pids, move |snap| {
-            sink.emit(StateChange::Memory(snap));
+        self.poller.start(live_pids, move |snaps| {
+            sink.emit(StateChange::Memory(snaps));
         });
         Ok(())
     }
@@ -38,6 +38,6 @@ impl Provider for MemoryPollerProvider {
 
 impl Default for MemoryPollerProvider {
     fn default() -> Self {
-        Self::new(Arc::new(AtomicU64::new(crate::settings::DEFAULT_INTERVAL_MS)))
+        Self::new(Arc::new(PollInterval::new(IDLE_MEMORY_INTERVAL_MS)))
     }
 }
