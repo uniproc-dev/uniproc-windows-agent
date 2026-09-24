@@ -51,9 +51,15 @@ pub fn run(stop: impl FnOnce()) -> Result<()> {
     let tick_handle = std::thread::Builder::new()
         .name("supervisor-tick".into())
         .spawn(move || {
+            let mut last_tick = std::time::Instant::now();
             while tick_running_thread.load(Ordering::Relaxed) {
                 std::thread::park_timeout(tick_interval);
+                let since = last_tick.elapsed();
+                if since < crate::settings::START_REACTION_SPACING {
+                    std::thread::sleep(crate::settings::START_REACTION_SPACING - since);
+                }
                 tick_supervisor.lock().tick();
+                last_tick = std::time::Instant::now();
             }
         })?;
     supervisor.lock().set_drainer(tick_handle.thread().clone());

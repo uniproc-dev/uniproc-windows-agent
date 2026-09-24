@@ -35,16 +35,18 @@ impl Sink {
     }
 
     /// The thread that drains the channel between requests; it is woken as
-    /// soon as the channel is half full instead of waiting for its period.
+    /// soon as a process starts or the channel is half full, instead of
+    /// waiting for its period.
     pub fn set_drainer(&self, thread: Thread) {
         let _ = self.drainer.set(thread);
     }
 
     pub fn emit(&self, change: StateChange) {
+        let started = matches!(change, StateChange::ProcessStarted(_));
         if self.tx.try_send(change).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
-        if self.tx.len() >= self.high_water
+        if (started || self.tx.len() >= self.high_water)
             && let Some(drainer) = self.drainer.get()
         {
             drainer.unpark();
@@ -79,6 +81,22 @@ mod tests {
 
         sink.emit(StateChange::ProcessStopped(1));
         sink.emit(StateChange::ProcessStopped(2));
+
+        let parked = drainer.join().unwrap();
+        assert!(parked < Duration::from_secs(5), "parked {parked:?}");
+    }
+
+    #[test]
+    fn a_process_start_wakes_the_drainer_at_once() {
+        let (sink, _rx) = Sink::bounded(1024);
+        let drainer = std::thread::spawn(|| {
+            let started = Instant::now();
+            std::thread::park_timeout(Duration::from_secs(30));
+            started.elapsed()
+        });
+        sink.set_drainer(drainer.thread().clone());
+
+        sink.emit(StateChange::ProcessStarted(Box::default()));
 
         let parked = drainer.join().unwrap();
         assert!(parked < Duration::from_secs(5), "parked {parked:?}");

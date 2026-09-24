@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use fxhash::FxHashMap;
 use ntapi::ntpsapi::VM_COUNTERS_EX2;
@@ -9,7 +10,7 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFOR
 
 use crate::providers::memory::vars::PROCESS_VM_COUNTERS;
 use crate::providers::provider::LivePids;
-use crate::settings::PollInterval;
+use crate::settings::{PollInterval, START_REACTION_SPACING};
 use crate::state::events::MemorySnapshot;
 
 fn now_ms() -> u64 {
@@ -40,12 +41,16 @@ struct Opened {
 struct Handles {
     open: FxHashMap<u32, Opened>,
     live: Vec<(u32, u64)>,
+    fresh: Vec<u32>,
     pass: u64,
 }
 
 impl Handles {
+    /// Opens what is new to `live_pids`, reopens a pid that came back with a
+    /// new start, closes what left; `fresh` lists the pids opened this time.
     fn sync(&mut self, live_pids: &LivePids) {
         self.pass += 1;
+        self.fresh.clear();
         self.live.clear();
         self.live
             .extend(live_pids.iter().map(|entry| (*entry.key(), *entry.value())));
@@ -57,6 +62,9 @@ impl Handles {
                     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
                         .ok()
                         .map(ProcessHandle);
+                    if handle.is_some() {
+                        self.fresh.push(pid);
+                    }
                     self.open.insert(
                         pid,
                         Opened {
@@ -75,27 +83,39 @@ impl Handles {
 
     fn read(&self, now: u64, out: &mut Vec<MemorySnapshot>) {
         for (&pid, opened) in &self.open {
-            let Some(handle) = &opened.handle else {
-                continue;
-            };
-            let mut counters: VM_COUNTERS_EX2 = unsafe { std::mem::zeroed() };
-            let status = unsafe {
-                NtQueryInformationProcess(
-                    handle.0,
-                    PROCESSINFOCLASS(PROCESS_VM_COUNTERS),
-                    &mut counters as *mut VM_COUNTERS_EX2 as *mut _,
-                    size_of::<VM_COUNTERS_EX2>() as u32,
-                    std::ptr::null_mut(),
-                )
-            };
-            if status.is_ok() {
-                out.push(snapshot(pid, &counters, now));
+            read_one(pid, opened, now, out);
+        }
+    }
+
+    fn read_fresh(&self, now: u64, out: &mut Vec<MemorySnapshot>) {
+        for pid in &self.fresh {
+            if let Some(opened) = self.open.get(pid) {
+                read_one(*pid, opened, now, out);
             }
         }
     }
 
     fn unopened(&self) -> usize {
         self.open.values().filter(|o| o.handle.is_none()).count()
+    }
+}
+
+fn read_one(pid: u32, opened: &Opened, now: u64, out: &mut Vec<MemorySnapshot>) {
+    let Some(handle) = &opened.handle else {
+        return;
+    };
+    let mut counters: VM_COUNTERS_EX2 = unsafe { std::mem::zeroed() };
+    let status = unsafe {
+        NtQueryInformationProcess(
+            handle.0,
+            PROCESSINFOCLASS(PROCESS_VM_COUNTERS),
+            &mut counters as *mut VM_COUNTERS_EX2 as *mut _,
+            size_of::<VM_COUNTERS_EX2>() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+    if status.is_ok() {
+        out.push(snapshot(pid, &counters, now));
     }
 }
 
@@ -150,31 +170,49 @@ impl MemoryPoller {
                 let mut micros_total = 0u64;
                 let mut handles = Handles::default();
                 let mut snaps: Vec<MemorySnapshot> = Vec::new();
-                let started = std::time::Instant::now();
+                let started = Instant::now();
+                let mut last_full = started;
+                let mut next_full = started;
+                let mut last_fresh = started;
 
                 while running.load(Ordering::Relaxed) {
-                    let pass_start = std::time::Instant::now();
-                    handles.sync(&live_pids);
-                    handles.read(now_ms(), &mut snaps);
-                    let counted = snaps.len();
-                    on_pass(std::mem::replace(&mut snaps, Vec::with_capacity(counted)));
+                    let pass_start = Instant::now();
+                    if pass_start >= next_full {
+                        handles.sync(&live_pids);
+                        handles.read(now_ms(), &mut snaps);
+                        let counted = snaps.len();
+                        on_pass(std::mem::replace(&mut snaps, Vec::with_capacity(counted)));
 
-                    passes += 1;
-                    micros_total += pass_start.elapsed().as_micros() as u64;
-                    if passes % 20 == 0 {
-                        tracing::warn!(
-                            pids = counted,
-                            unopened = handles.unopened(),
-                            passes,
-                            avg_micros = micros_total / passes,
-                            busy_percent_of_core = format!(
-                                "{:.2}",
-                                micros_total as f64 / started.elapsed().as_micros().max(1) as f64 * 100.0
-                            ),
-                            "memory poller"
-                        );
+                        passes += 1;
+                        micros_total += pass_start.elapsed().as_micros() as u64;
+                        if passes % 20 == 0 {
+                            tracing::warn!(
+                                pids = counted,
+                                unopened = handles.unopened(),
+                                passes,
+                                avg_micros = micros_total / passes,
+                                busy_percent_of_core = format!(
+                                    "{:.2}",
+                                    micros_total as f64 / started.elapsed().as_micros().max(1) as f64 * 100.0
+                                ),
+                                "memory poller"
+                            );
+                        }
+                        last_full = pass_start;
+                    } else {
+                        let since = last_fresh.elapsed();
+                        if since < START_REACTION_SPACING {
+                            std::thread::sleep(START_REACTION_SPACING - since);
+                        }
+                        handles.sync(&live_pids);
+                        handles.read_fresh(now_ms(), &mut snaps);
+                        if !snaps.is_empty() {
+                            on_pass(std::mem::take(&mut snaps));
+                        }
+                        last_fresh = Instant::now();
                     }
-                    interval.wait();
+                    next_full = last_full + interval.period();
+                    interval.wait_until(next_full);
                 }
             })
             .expect("failed to spawn memory-poller thread");
@@ -229,6 +267,24 @@ mod tests {
 
         handles.sync(&live(&[]));
         assert!(handles.open.is_empty(), "a process that left the live set is closed");
+    }
+
+    #[test]
+    fn only_newly_opened_processes_are_fresh() {
+        let me = std::process::id();
+        let mut handles = Handles::default();
+
+        handles.sync(&live(&[(me, 1)]));
+        assert_eq!(handles.fresh, vec![me]);
+        let mut snaps = Vec::new();
+        handles.read_fresh(0, &mut snaps);
+        assert_eq!(snaps.len(), 1);
+
+        handles.sync(&live(&[(me, 1), (0, 1)]));
+        assert!(handles.fresh.is_empty(), "known or unopenable processes are not fresh");
+
+        handles.sync(&live(&[(me, 2)]));
+        assert_eq!(handles.fresh, vec![me], "a reused pid is fresh again");
     }
 
     #[test]

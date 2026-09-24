@@ -8,6 +8,11 @@ pub const DEFAULT_INTERVAL_MS: u64 = 1000;
 pub const ATTACHED_MEMORY_INTERVAL_MS: u64 = 1000;
 pub const IDLE_MEMORY_INTERVAL_MS: u64 = 2000;
 
+/// The shortest gap between two reactions to process starts, in the
+/// supervisor's tick and in the memory poller's reads of new processes, so a
+/// burst of starts costs a handful of passes rather than one each.
+pub const START_REACTION_SPACING: Duration = Duration::from_millis(50);
+
 /// A polling period whose waiter is woken as soon as the period changes.
 pub struct PollInterval {
     ms: AtomicU64,
@@ -34,10 +39,14 @@ impl PollInterval {
         let _ = self.wake_tx.try_send(());
     }
 
-    /// Waits one period, returning early when woken.
-    pub fn wait(&self) {
-        let period = Duration::from_millis(self.ms.load(Ordering::Relaxed));
-        let _ = self.wake_rx.recv_timeout(period);
+    pub fn period(&self) -> Duration {
+        Duration::from_millis(self.ms.load(Ordering::Relaxed))
+    }
+
+    /// Waits until `deadline`, returning early when woken; says which.
+    pub fn wait_until(&self, deadline: Instant) -> bool {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        self.wake_rx.recv_timeout(timeout).is_ok()
     }
 }
 
@@ -82,14 +91,9 @@ impl CollectorSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
-    #[test]
-    fn an_untouched_wait_lasts_the_whole_period() {
-        let interval = PollInterval::new(150);
-        let started = Instant::now();
-        interval.wait();
-        assert!(started.elapsed() >= Duration::from_millis(140));
+    fn wait_one_period(interval: &PollInterval) {
+        interval.wait_until(Instant::now() + interval.period());
     }
 
     #[test]
@@ -99,7 +103,7 @@ mod tests {
             let interval = interval.clone();
             std::thread::spawn(move || {
                 let started = Instant::now();
-                interval.wait();
+                wait_one_period(&interval);
                 started.elapsed()
             })
         };
@@ -119,15 +123,28 @@ mod tests {
         interval.wake();
 
         let started = Instant::now();
-        interval.wait();
+        wait_one_period(&interval);
         assert!(started.elapsed() < Duration::from_millis(100), "first wait was not woken");
 
         let started = Instant::now();
-        interval.wait();
+        wait_one_period(&interval);
         assert!(
             started.elapsed() >= Duration::from_millis(140),
             "a second early return means wakes were not coalesced"
         );
+    }
+
+    #[test]
+    fn a_wait_until_a_deadline_says_whether_it_was_woken() {
+        let interval = PollInterval::new(10_000);
+        let started = Instant::now();
+        assert!(!interval.wait_until(started + Duration::from_millis(80)));
+        assert!(started.elapsed() >= Duration::from_millis(70));
+
+        interval.wake();
+        let started = Instant::now();
+        assert!(interval.wait_until(started + Duration::from_secs(30)));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

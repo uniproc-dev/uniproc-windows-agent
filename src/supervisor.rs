@@ -32,6 +32,7 @@ pub struct Supervisor {
     state: Arc<Mutex<SystemState>>,
     live_pids: LivePids,
     starts: u64,
+    fresh_starts: bool,
     router: Option<KernelRouter>,
     sink: Option<Sink>,
     rx: Option<Receiver<StateChange>>,
@@ -51,6 +52,7 @@ impl Supervisor {
             state: Arc::new(Mutex::new(SystemState::new())),
             live_pids: Arc::new(DashMap::new()),
             starts: 0,
+            fresh_starts: false,
             router: None,
             sink: None,
             rx: None,
@@ -136,6 +138,9 @@ impl Supervisor {
         for change in rx.try_iter() {
             self.apply(change);
         }
+        if std::mem::take(&mut self.fresh_starts) {
+            self.settings.memory_interval.wake();
+        }
     }
 
     pub fn stop(&mut self) {
@@ -161,7 +166,12 @@ impl Supervisor {
 
     fn apply(&mut self, change: StateChange) {
         match &change {
-            StateChange::ProcessStarted(e) | StateChange::ProcessRundown(e) => {
+            StateChange::ProcessStarted(e) => {
+                self.starts += 1;
+                self.live_pids.insert(e.pid, self.starts);
+                self.fresh_starts = true;
+            }
+            StateChange::ProcessRundown(e) => {
                 self.starts += 1;
                 self.live_pids.insert(e.pid, self.starts);
             }
