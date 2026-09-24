@@ -5,10 +5,10 @@ mod vars;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
 use crate::commands::services::ScManager;
@@ -212,7 +212,7 @@ impl Provider for KernelProcessProvider {
                         // (provider shutting down) and command_line stays empty.
                         let _ = tx.send(hdr.process_id);
 
-                        StateChange::ProcessStarted(ProcessStarted {
+                        StateChange::ProcessStarted(Box::new(ProcessStarted {
                             pid: hdr.process_id,
                             parent_pid: hdr.parent_process_id,
                             session_id: hdr.session_id,
@@ -221,7 +221,7 @@ impl Provider for KernelProcessProvider {
                             package_relative_app_id: hdr.package_relative_app_id.to_string(),
                             command_line: Vec::new(),
                             is_kernel_process: false,
-                        })
+                        }))
                     }
                     EVENT_ID_PROCESS_STOP => {
                         let hdr = parse::<ProcessStopData>(data)?;
@@ -262,17 +262,13 @@ impl Provider for KernelProcessProvider {
                 std::thread::Builder::new()
                     .name("process-enrich".into())
                     .spawn(move || {
-                        // Timeout, not channel-disconnect: the router-held Sender
-                        // clone only drops when KernelRouter drops, which happens
-                        // *after* Supervisor::stop() has already called this stop().
-                        while running.load(Ordering::Relaxed) {
-                            match rx.recv_timeout(Duration::from_millis(200)) {
-                                Ok(pid) => sink.emit(StateChange::ProcessEnriched(enrich(
-                                    pid, &persisted,
-                                ))),
-                                Err(RecvTimeoutError::Timeout) => {}
-                                Err(RecvTimeoutError::Disconnected) => break,
+                        while let Ok(pid) = rx.recv() {
+                            if !running.load(Ordering::Relaxed) {
+                                break;
                             }
+                            sink.emit(StateChange::ProcessEnriched(Box::new(enrich(
+                                pid, &persisted,
+                            ))));
                         }
                     })?,
             );
@@ -287,28 +283,24 @@ impl Provider for KernelProcessProvider {
                     let mut services_buf = Vec::new();
                     let mut config_cache: std::collections::HashMap<String, _> =
                         std::collections::HashMap::new();
-                    let mut last_inventory = Instant::now() - INVENTORY_INTERVAL;
 
                     while running.load(Ordering::Relaxed) {
-                        if last_inventory.elapsed() >= INVENTORY_INTERVAL {
-                            last_inventory = Instant::now();
-                            if let Some(scm) = &scm {
-                                let mut services = enum_services(scm.handle(), &mut services_buf);
-                                for svc in &mut services {
-                                    let config =
-                                        config_cache.entry(svc.name.clone()).or_insert_with(|| {
-                                            query_service_config(scm.handle(), &svc.name)
-                                        });
-                                    svc.load_group = config.load_group.clone();
-                                    svc.description = config.description.clone();
-                                    svc.image_path = config.image_path.clone();
-                                }
-                                config_cache
-                                    .retain(|name, _| services.iter().any(|s| &s.name == name));
-                                sink.emit(StateChange::ServicesSnapshot(services));
+                        if let Some(scm) = &scm {
+                            let mut services = enum_services(scm.handle(), &mut services_buf);
+                            for svc in &mut services {
+                                let config =
+                                    config_cache.entry(svc.name.clone()).or_insert_with(|| {
+                                        query_service_config(scm.handle(), &svc.name)
+                                    });
+                                svc.load_group = config.load_group.clone();
+                                svc.description = config.description.clone();
+                                svc.image_path = config.image_path.clone();
                             }
+                            config_cache
+                                .retain(|name, _| services.iter().any(|s| &s.name == name));
+                            sink.emit(StateChange::ServicesSnapshot(services));
                         }
-                        std::thread::sleep(INVENTORY_POLL);
+                        crate::settings::park_while(&running, Instant::now() + INVENTORY_INTERVAL);
                     }
                 })?,
         );
@@ -319,11 +311,15 @@ impl Provider for KernelProcessProvider {
 
     fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
+        let _ = self.tx.send(WAKE_PID);
         for handle in self.worker.lock().drain(..) {
+            handle.thread().unpark();
             let _ = handle.join();
         }
     }
 }
+
+const WAKE_PID: u32 = u32::MAX;
 
 #[cfg(test)]
 mod tests {

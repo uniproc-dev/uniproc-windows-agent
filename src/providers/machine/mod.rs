@@ -50,13 +50,16 @@ impl Provider for MachineProvider {
                 let mut pdh = PdhProcessorPerformance::open();
                 let mut power_info = Vec::new();
                 while running.load(Ordering::Relaxed) {
-                    sink.emit(StateChange::Machine(sample_machine(
+                    sink.emit(StateChange::Machine(Box::new(sample_machine(
                         &mut prev_cpu_times,
                         pdh.as_mut(),
                         &mut power_info,
-                    )));
+                    ))));
                     let ms = interval_ms.load(Ordering::Relaxed);
-                    std::thread::sleep(Duration::from_millis(ms));
+                    crate::settings::park_while(
+                        &running,
+                        std::time::Instant::now() + Duration::from_millis(ms),
+                    );
                 }
             })
             .expect("failed to spawn machine-poller");

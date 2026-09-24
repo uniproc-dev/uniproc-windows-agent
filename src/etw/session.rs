@@ -86,7 +86,10 @@ fn start_raw(
         );
     } else if status == ERROR_ALREADY_EXISTS {
         warn!("Session '{displayed}' already exists, restarting...");
-        let _ = unsafe { StopTraceW(handle, pcwstr, props) };
+        let mut stop_buf = AlignedBuf::zeroed(props_size + 512);
+        let stop_props = unsafe { build_props(&mut stop_buf, None, 0, SessionMode::Normal) };
+        let _ = unsafe { StopTraceW(CONTROLTRACE_HANDLE::default(), pcwstr, stop_props) };
+        let props = unsafe { build_props(&mut buf, guid, flags, mode) };
         let status2 = unsafe { StartTraceW(&mut handle, pcwstr, props) };
         if status2 != ERROR_SUCCESS {
             bail!("StartTraceW after restart '{displayed}': {status2:?}");
@@ -125,6 +128,57 @@ unsafe fn build_props(
     props.FlushTimer = crate::etw::vars::FLUSH_TIMER_SEC;
     props.EnableFlags = EVENT_TRACE_FLAG(flags);
     props
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn enabled_flags(name: &str) -> u32 {
+        let w = session_name_wide(name);
+        let size = size_of::<EVENT_TRACE_PROPERTIES>() + 2048;
+        let mut buf = AlignedBuf::zeroed(size);
+        let props = unsafe { &mut *(buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES) };
+        props.Wnode.BufferSize = size as u32;
+        props.LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+        props.LogFileNameOffset = (size_of::<EVENT_TRACE_PROPERTIES>() + 1024) as u32;
+        let status = unsafe {
+            ControlTraceW(
+                CONTROLTRACE_HANDLE::default(),
+                PCWSTR(w.as_ptr()),
+                props,
+                EVENT_TRACE_CONTROL_QUERY,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS, "query '{name}'");
+        props.EnableFlags.0
+    }
+
+    fn stop(name: &str) {
+        let w = session_name_wide(name);
+        let size = size_of::<EVENT_TRACE_PROPERTIES>() + 2048;
+        let mut buf = AlignedBuf::zeroed(size);
+        let props = unsafe { build_props(&mut buf, None, 0, SessionMode::Normal) };
+        let _ = unsafe { StopTraceW(CONTROLTRACE_HANDLE::default(), PCWSTR(w.as_ptr()), props) };
+    }
+
+    #[test]
+    #[ignore = "requires admin and a real ETW session"]
+    fn a_leftover_session_is_restarted_with_its_flags() {
+        crate::privileges::enable(windows::core::w!("SeSystemProfilePrivilege")).unwrap();
+        let flags = EVENT_TRACE_FLAG_DISK_IO.0 | EVENT_TRACE_FLAG_PROFILE.0 | EVENT_TRACE_FLAG_NETWORK_TCPIP.0;
+        let name = "Uniproc-RestartTest";
+        stop(name);
+        let w = session_name_wide(name);
+
+        start_raw(w.as_ptr(), None, flags, SessionMode::SystemLogger).unwrap();
+        assert_eq!(enabled_flags(name), flags);
+
+        start_raw(w.as_ptr(), None, flags, SessionMode::SystemLogger).unwrap();
+        let after_restart = enabled_flags(name);
+        stop(name);
+        assert_eq!(after_restart, flags, "the restarted session lost its kernel flags");
+    }
 }
 
 fn enable_provider(handle: CONTROLTRACE_HANDLE, guid: &GUID) -> Result<()> {

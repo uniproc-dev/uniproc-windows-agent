@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossbeam_channel::Receiver;
-use dashmap::DashSet;
+use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use crate::etw::router::KernelRouter;
@@ -21,7 +21,7 @@ pub struct SupervisorConfig {
 impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
-            tick_interval: Duration::from_millis(100),
+            tick_interval: Duration::from_secs(1),
             session_namespace: None,
         }
     }
@@ -31,6 +31,7 @@ pub struct Supervisor {
     providers: Vec<Box<dyn Provider>>,
     state: Arc<Mutex<SystemState>>,
     live_pids: LivePids,
+    starts: u64,
     router: Option<KernelRouter>,
     sink: Option<Sink>,
     rx: Option<Receiver<StateChange>>,
@@ -48,7 +49,8 @@ impl Supervisor {
         Self {
             providers,
             state: Arc::new(Mutex::new(SystemState::new())),
-            live_pids: Arc::new(DashSet::new()),
+            live_pids: Arc::new(DashMap::new()),
+            starts: 0,
             router: None,
             sink: None,
             rx: None,
@@ -64,6 +66,12 @@ impl Supervisor {
 
     pub fn dropped(&self) -> u64 {
         self.sink.as_ref().map(|s| s.dropped()).unwrap_or(0)
+    }
+
+    pub fn set_drainer(&self, thread: std::thread::Thread) {
+        if let Some(sink) = &self.sink {
+            sink.set_drainer(thread);
+        }
     }
 
     pub fn state(&self) -> Arc<Mutex<SystemState>> {
@@ -107,9 +115,7 @@ impl Supervisor {
             }
         }
 
-        for change in rx.try_iter() {
-            self.apply(change);
-        }
+        self.drain_and_apply(&rx);
 
         self.router = Some(router);
         self.sink = Some(sink);
@@ -119,9 +125,14 @@ impl Supervisor {
     }
 
     pub fn tick(&mut self) {
-        let Some(rx) = self.rx.clone() else {
+        let Some(rx) = self.rx.take() else {
             return;
         };
+        self.drain_and_apply(&rx);
+        self.rx = Some(rx);
+    }
+
+    fn drain_and_apply(&mut self, rx: &Receiver<StateChange>) {
         for change in rx.try_iter() {
             self.apply(change);
         }
@@ -148,10 +159,11 @@ impl Supervisor {
         self.rx.take();
     }
 
-    fn apply(&self, change: StateChange) {
+    fn apply(&mut self, change: StateChange) {
         match &change {
             StateChange::ProcessStarted(e) | StateChange::ProcessRundown(e) => {
-                self.live_pids.insert(e.pid);
+                self.starts += 1;
+                self.live_pids.insert(e.pid, self.starts);
             }
             StateChange::ProcessStopped(pid) => {
                 self.live_pids.remove(pid);

@@ -2,10 +2,9 @@ pub mod counters;
 mod events;
 mod vars;
 
-use std::time::Instant;
-
 use anyhow::Result;
 use windows::Win32::System::Diagnostics::Etw::EVENT_TRACE_FLAG_PROFILE;
+use windows::Win32::System::Performance::QueryPerformanceFrequency;
 
 use crate::etw::router::KernelRouterBuilder;
 use crate::etw::signatures::utils::parse;
@@ -26,7 +25,10 @@ impl CpuSamplerProvider {
 
 impl Provider for CpuSamplerProvider {
     fn register(&self, b: &mut KernelRouterBuilder) -> Result<()> {
-        let mut batch = SampleBatch::new(FLUSH_ENTRIES, FLUSH_EVENTS, FLUSH_AGE);
+        let mut ticks_per_second = 0i64;
+        unsafe { QueryPerformanceFrequency(&mut ticks_per_second) }?;
+        let max_age = (FLUSH_AGE.as_secs_f64() * ticks_per_second as f64) as i64;
+        let mut batch = SampleBatch::new(FLUSH_ENTRIES, FLUSH_EVENTS, max_age);
 
         b.kernel_flags(EVENT_TRACE_FLAG_PROFILE).on(
             &[PERF_INFO_TASK_GUID],
@@ -43,7 +45,7 @@ impl Provider for CpuSamplerProvider {
                             pid_hint: record.EventHeader.ProcessId,
                         },
                         s.count.max(1) as u64,
-                        Instant::now(),
+                        record.EventHeader.TimeStamp,
                     )
                     .map(StateChange::CpuSamples)
             },

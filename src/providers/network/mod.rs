@@ -6,9 +6,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use anyhow::Result;
 use windows::Win32::System::Diagnostics::Etw::{EVENT_RECORD, EVENT_TRACE_FLAG_NETWORK_TCPIP};
 
-use crate::etw::router::KernelRouterBuilder;
+use crate::etw::router::{Batch, KernelRouterBuilder};
+use crate::etw::vars::BATCH_WINDOW;
 use crate::providers::provider::Provider;
-use crate::state::events::{NetworkEvent, NetworkEventType, NetworkProto, StateChange};
+use crate::state::events::{NetDeltas, NetworkEvent, NetworkEventType, NetworkProto, StateChange};
 use crate::etw::signatures::utils::{parse, to_ip4};
 use crate::providers::network::events::{Ipv4Flow, Ipv6Flow};
 use crate::providers::network::vars::*;
@@ -29,15 +30,33 @@ impl Default for KernelNetworkProvider {
 
 impl Provider for KernelNetworkProvider {
     fn register(&self, b: &mut KernelRouterBuilder) -> Result<()> {
-        b.kernel_flags(EVENT_TRACE_FLAG_NETWORK_TCPIP)
-            .on(&[TCPIP_TASK_GUID, UDPIP_TASK_GUID], handle);
+        b.kernel_flags(EVENT_TRACE_FLAG_NETWORK_TCPIP).batched(
+            &[TCPIP_TASK_GUID, UDPIP_TASK_GUID],
+            BATCH_WINDOW,
+            NetBatch::default(),
+        );
         Ok(())
     }
 
     fn stop(&self) {}
 }
 
-fn handle(record: &EVENT_RECORD, data: &[u8]) -> Option<StateChange> {
+#[derive(Default)]
+struct NetBatch(NetDeltas);
+
+impl Batch for NetBatch {
+    fn add(&mut self, record: &EVENT_RECORD, data: &[u8]) {
+        if let Some(e) = event(record, data) {
+            self.0.entry(e.pid).or_default().add(&e);
+        }
+    }
+
+    fn take(&mut self) -> Option<StateChange> {
+        (!self.0.is_empty()).then(|| StateChange::Network(std::mem::take(&mut self.0)))
+    }
+}
+
+fn event(record: &EVENT_RECORD, data: &[u8]) -> Option<NetworkEvent> {
     let is_tcp = record.EventHeader.ProviderId == TCPIP_TASK_GUID;
     let opcode = record.EventHeader.EventDescriptor.Opcode;
 
@@ -79,7 +98,7 @@ fn handle(record: &EVENT_RECORD, data: &[u8]) -> Option<StateChange> {
         )
     };
 
-    Some(StateChange::Network(NetworkEvent {
+    Some(NetworkEvent {
         pid,
         proto,
         event_type,
@@ -88,7 +107,7 @@ fn handle(record: &EVENT_RECORD, data: &[u8]) -> Option<StateChange> {
         dst_addr,
         src_port,
         dst_port,
-    }))
+    })
 }
 
 #[cfg(test)]
@@ -111,16 +130,32 @@ mod tests {
         }
     }
 
-    fn network_event(change: Option<StateChange>) -> NetworkEvent {
-        match change {
-            Some(StateChange::Network(e)) => e,
-            other => panic!("expected StateChange::Network, got {other:?}"),
-        }
+    fn network_event(parsed: Option<NetworkEvent>) -> NetworkEvent {
+        parsed.expect("a network event")
+    }
+
+    #[test]
+    fn a_batch_sums_traffic_per_process() {
+        let mut b = NetBatch::default();
+        b.add(&record(TCPIP_TASK_GUID, TCPIP_SEND_V4), &v4_dump());
+        b.add(&record(TCPIP_TASK_GUID, TCPIP_SEND_V4), &v4_dump());
+        b.add(&record(TCPIP_TASK_GUID, TCPIP_RECEIVE_V4), &v4_dump());
+        b.add(&record(UDPIP_TASK_GUID, UDPIP_RECEIVE_V6), &v6_dump());
+        b.add(&record(TCPIP_TASK_GUID, TCPIP_CONNECT_V6), &v6_dump());
+
+        let Some(StateChange::Network(deltas)) = b.take() else {
+            panic!("expected a network batch");
+        };
+        let tcp = deltas[&1234];
+        assert_eq!((tcp.tx_bytes, tcp.tx_packets, tcp.rx_bytes, tcp.rx_packets), (2920, 2, 1460, 1));
+        let udp = deltas[&4321];
+        assert_eq!((udp.tx_packets, udp.rx_packets), (0, 1), "a connect carries no traffic");
+        assert!(b.take().is_none(), "a handed over batch starts empty");
     }
 
     #[test]
     fn tcp_send_ipv4() {
-        let e = network_event(handle(&record(TCPIP_TASK_GUID, TCPIP_SEND_V4), &v4_dump()));
+        let e = network_event(event(&record(TCPIP_TASK_GUID, TCPIP_SEND_V4), &v4_dump()));
         assert!(matches!(e.proto, NetworkProto::Tcp));
         assert!(matches!(e.event_type, NetworkEventType::Send));
         assert_eq!(e.pid, 1234);
@@ -132,21 +167,21 @@ mod tests {
 
     #[test]
     fn tcp_recv_ipv4() {
-        let e = network_event(handle(&record(TCPIP_TASK_GUID, TCPIP_RECEIVE_V4), &v4_dump()));
+        let e = network_event(event(&record(TCPIP_TASK_GUID, TCPIP_RECEIVE_V4), &v4_dump()));
         assert!(matches!(e.event_type, NetworkEventType::Recv));
     }
 
     #[test]
     fn udp_send_ipv4_is_not_tcp() {
         // Opcode 10 on UDPIP_TASK_GUID must not be classified as TCP.
-        let e = network_event(handle(&record(UDPIP_TASK_GUID, UDPIP_SEND_V4), &v4_dump()));
+        let e = network_event(event(&record(UDPIP_TASK_GUID, UDPIP_SEND_V4), &v4_dump()));
         assert!(matches!(e.proto, NetworkProto::Udp));
         assert!(matches!(e.event_type, NetworkEventType::Send));
     }
 
     #[test]
     fn udp_recv_ipv6() {
-        let e = network_event(handle(&record(UDPIP_TASK_GUID, UDPIP_RECEIVE_V6), &v6_dump()));
+        let e = network_event(event(&record(UDPIP_TASK_GUID, UDPIP_RECEIVE_V6), &v6_dump()));
         assert!(matches!(e.proto, NetworkProto::Udp));
         assert!(matches!(e.event_type, NetworkEventType::Recv));
         assert_eq!(e.pid, 4321);
@@ -156,14 +191,14 @@ mod tests {
 
     #[test]
     fn tcp_connect_ipv6() {
-        let e = network_event(handle(&record(TCPIP_TASK_GUID, TCPIP_CONNECT_V6), &v6_dump()));
+        let e = network_event(event(&record(TCPIP_TASK_GUID, TCPIP_CONNECT_V6), &v6_dump()));
         assert!(matches!(e.proto, NetworkProto::Tcp));
         assert!(matches!(e.event_type, NetworkEventType::Connect));
     }
 
     #[test]
     fn unknown_opcode_is_none() {
-        assert!(handle(&record(TCPIP_TASK_GUID, 99), &v4_dump()).is_none());
+        assert!(event(&record(TCPIP_TASK_GUID, 99), &v4_dump()).is_none());
     }
 
     #[test]

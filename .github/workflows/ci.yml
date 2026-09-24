@@ -37,6 +37,9 @@ jobs:
         run: cargo build --workspace --all-targets
 
       # Tests that need admin rights and a live ETW session are `#[ignore]`d
-      # and stay skipped here.
+      # and run in the next step.
       - name: Test
         run: cargo test --workspace
+
+      - name: Test against live ETW
+        run: cargo test --workspace -- --ignored --test-threads=1

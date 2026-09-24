@@ -1,19 +1,16 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::aligned::AlignedBuf;
-use crate::settings::PollInterval;
-use crate::providers::bootstrap::vars::{INITIAL_BUFFER_SIZE, STATUS_INFO_LENGTH_MISMATCH};
-use crate::providers::provider::LivePids;
-use crate::state::events::MemorySnapshot;
-use ntapi::ntexapi::{
-    SYSTEM_EXTENDED_THREAD_INFORMATION, SYSTEM_PROCESS_INFORMATION,
-    SYSTEM_PROCESS_INFORMATION_EXTENSION,
-};
-use tracing::debug;
-use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS};
+use fxhash::FxHashMap;
+use ntapi::ntpsapi::VM_COUNTERS_EX2;
+use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
-const SYSTEM_FULL_PROCESS_INFORMATION: SYSTEM_INFORMATION_CLASS = SYSTEM_INFORMATION_CLASS(148);
+use crate::providers::memory::vars::PROCESS_VM_COUNTERS;
+use crate::providers::provider::LivePids;
+use crate::settings::PollInterval;
+use crate::state::events::MemorySnapshot;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -22,94 +19,103 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-unsafe fn shared_commit_of(start: *const u8, threads: usize, limit: usize) -> u64 {
-    let offset = size_of::<SYSTEM_PROCESS_INFORMATION>()
-        + threads * size_of::<SYSTEM_EXTENDED_THREAD_INFORMATION>();
+struct ProcessHandle(HANDLE);
 
-    if offset + size_of::<SYSTEM_PROCESS_INFORMATION_EXTENSION>() > limit {
-        return 0;
-    }
-
-    let ext = unsafe {
-        start
-            .add(offset)
-            .cast::<SYSTEM_PROCESS_INFORMATION_EXTENSION>()
-            .read_unaligned()
-    };
-    ext.SharedCommitCharge as u64
-}
-
-fn snap_from_entry(entry: &SYSTEM_PROCESS_INFORMATION, now: u64) -> MemorySnapshot {
-    MemorySnapshot {
-        pid: entry.UniqueProcessId as u32,
-        timestamp_ms: now,
-        virtual_size_bytes: entry.VirtualSize as u64,
-        peak_virtual_size_bytes: entry.PeakVirtualSize as u64,
-        working_set_bytes: entry.WorkingSetSize as u64,
-        peak_working_set_bytes: entry.PeakWorkingSetSize as u64,
-        private_working_set_bytes: unsafe { *entry.WorkingSetPrivateSize.QuadPart() } as u64,
-        private_bytes: entry.PagefileUsage as u64,
-        peak_private_bytes: entry.PeakPagefileUsage as u64,
-        paged_pool_bytes: entry.QuotaPagedPoolUsage as u64,
-        peak_paged_pool_bytes: entry.QuotaPeakPagedPoolUsage as u64,
-        nonpaged_pool_bytes: entry.QuotaNonPagedPoolUsage as u64,
-        peak_nonpaged_pool_bytes: entry.QuotaPeakNonPagedPoolUsage as u64,
-        page_fault_count: entry.PageFaultCount,
-        shared_commit_bytes: 0,
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
     }
 }
 
-fn query_all(buf: &mut AlignedBuf, out: &mut Vec<MemorySnapshot>) -> bool {
-    out.clear();
-    if buf.is_empty() {
-        buf.resize(INITIAL_BUFFER_SIZE);
-    }
+struct Opened {
+    generation: u64,
+    seen: u64,
+    handle: Option<ProcessHandle>,
+}
 
-    loop {
-        let mut return_length = 0u32;
-        let status = unsafe {
-            NtQuerySystemInformation(
-                SYSTEM_FULL_PROCESS_INFORMATION,
-                buf.as_mut_ptr() as *mut _,
-                buf.len() as u32,
-                &mut return_length,
-            )
-        };
+/// One handle per running process, kept across passes. A process that could
+/// not be opened is remembered as such and not retried until its pid comes
+/// back with a new start.
+#[derive(Default)]
+struct Handles {
+    open: FxHashMap<u32, Opened>,
+    live: Vec<(u32, u64)>,
+    pass: u64,
+}
 
-        if status.0 == STATUS_INFO_LENGTH_MISMATCH {
-            buf.resize(return_length as usize + 64 * 1024);
-            continue;
-        }
+impl Handles {
+    fn sync(&mut self, live_pids: &LivePids) {
+        self.pass += 1;
+        self.live.clear();
+        self.live
+            .extend(live_pids.iter().map(|entry| (*entry.key(), *entry.value())));
 
-        if status.is_err() {
-            debug!("memory poll: NtQuerySystemInformation failed: {status:?}");
-            return false;
-        }
-
-        let now = now_ms();
-        let total = return_length as usize;
-        let mut offset = 0usize;
-        loop {
-            let start = unsafe { buf.as_ptr().add(offset) };
-            let entry = unsafe { start.cast::<SYSTEM_PROCESS_INFORMATION>().read_unaligned() };
-
-            let limit = if entry.NextEntryOffset == 0 {
-                total.saturating_sub(offset)
-            } else {
-                entry.NextEntryOffset as usize
-            };
-
-            let mut snap = snap_from_entry(&entry, now);
-            snap.shared_commit_bytes =
-                unsafe { shared_commit_of(start, entry.NumberOfThreads as usize, limit) };
-            out.push(snap);
-
-            if entry.NextEntryOffset == 0 {
-                break;
+        for &(pid, generation) in &self.live {
+            match self.open.get_mut(&pid) {
+                Some(opened) if opened.generation == generation => opened.seen = self.pass,
+                _ => {
+                    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+                        .ok()
+                        .map(ProcessHandle);
+                    self.open.insert(
+                        pid,
+                        Opened {
+                            generation,
+                            seen: self.pass,
+                            handle,
+                        },
+                    );
+                }
             }
-            offset += entry.NextEntryOffset as usize;
         }
-        return true;
+
+        let pass = self.pass;
+        self.open.retain(|_, opened| opened.seen == pass);
+    }
+
+    fn read(&self, now: u64, out: &mut Vec<MemorySnapshot>) {
+        for (&pid, opened) in &self.open {
+            let Some(handle) = &opened.handle else {
+                continue;
+            };
+            let mut counters: VM_COUNTERS_EX2 = unsafe { std::mem::zeroed() };
+            let status = unsafe {
+                NtQueryInformationProcess(
+                    handle.0,
+                    PROCESSINFOCLASS(PROCESS_VM_COUNTERS),
+                    &mut counters as *mut VM_COUNTERS_EX2 as *mut _,
+                    size_of::<VM_COUNTERS_EX2>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if status.is_ok() {
+                out.push(snapshot(pid, &counters, now));
+            }
+        }
+    }
+
+    fn unopened(&self) -> usize {
+        self.open.values().filter(|o| o.handle.is_none()).count()
+    }
+}
+
+fn snapshot(pid: u32, c: &VM_COUNTERS_EX2, now: u64) -> MemorySnapshot {
+    let ex = &c.CountersEx;
+    MemorySnapshot {
+        pid,
+        timestamp_ms: now,
+        virtual_size_bytes: ex.VirtualSize as u64,
+        peak_virtual_size_bytes: ex.PeakVirtualSize as u64,
+        working_set_bytes: ex.WorkingSetSize as u64,
+        peak_working_set_bytes: ex.PeakWorkingSetSize as u64,
+        private_working_set_bytes: c.PrivateWorkingSetSize as u64,
+        private_bytes: ex.PagefileUsage as u64,
+        peak_private_bytes: ex.PeakPagefileUsage as u64,
+        paged_pool_bytes: ex.QuotaPagedPoolUsage as u64,
+        peak_paged_pool_bytes: ex.QuotaPeakPagedPoolUsage as u64,
+        nonpaged_pool_bytes: ex.QuotaNonPagedPoolUsage as u64,
+        peak_nonpaged_pool_bytes: ex.QuotaPeakNonPagedPoolUsage as u64,
+        page_fault_count: ex.PageFaultCount,
     }
 }
 
@@ -126,7 +132,7 @@ impl MemoryPoller {
         }
     }
 
-    pub fn start<F>(&self, _live_pids: LivePids, on_pass: F)
+    pub fn start<F>(&self, live_pids: LivePids, on_pass: F)
     where
         F: Fn(Vec<MemorySnapshot>) + Send + 'static,
     {
@@ -142,28 +148,29 @@ impl MemoryPoller {
             .spawn(move || {
                 let mut passes = 0u64;
                 let mut micros_total = 0u64;
-                let mut buf = AlignedBuf::zeroed(0);
+                let mut handles = Handles::default();
                 let mut snaps: Vec<MemorySnapshot> = Vec::new();
+                let started = std::time::Instant::now();
 
                 while running.load(Ordering::Relaxed) {
                     let pass_start = std::time::Instant::now();
-                    let mut counted = 0usize;
-                    let mut snaps_shared = 0usize;
-                    if query_all(&mut buf, &mut snaps) {
-                        counted = snaps.len();
-                        snaps_shared = snaps.iter().filter(|s| s.shared_commit_bytes > 0).count();
-                        on_pass(std::mem::take(&mut snaps));
-                    }
+                    handles.sync(&live_pids);
+                    handles.read(now_ms(), &mut snaps);
+                    let counted = snaps.len();
+                    on_pass(std::mem::replace(&mut snaps, Vec::with_capacity(counted)));
+
                     passes += 1;
                     micros_total += pass_start.elapsed().as_micros() as u64;
                     if passes % 20 == 0 {
                         tracing::warn!(
                             pids = counted,
-                            with_shared = snaps_shared,
+                            unopened = handles.unopened(),
                             passes,
                             avg_micros = micros_total / passes,
-                            busy_percent_of_core =
-                                format!("{:.2}", micros_total as f64 / (passes as f64 * 1000.0) * 100.0),
+                            busy_percent_of_core = format!(
+                                "{:.2}",
+                                micros_total as f64 / started.elapsed().as_micros().max(1) as f64 * 100.0
+                            ),
                             "memory poller"
                         );
                     }
@@ -179,3 +186,59 @@ impl MemoryPoller {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dashmap::DashMap;
+
+    fn live(entries: &[(u32, u64)]) -> LivePids {
+        let map = DashMap::new();
+        for &(pid, generation) in entries {
+            map.insert(pid, generation);
+        }
+        Arc::new(map)
+    }
+
+    #[test]
+    fn a_pass_reads_this_process_memory() {
+        let mut handles = Handles::default();
+        handles.sync(&live(&[(std::process::id(), 1)]));
+
+        let mut snaps = Vec::new();
+        handles.read(0, &mut snaps);
+        let me = snaps
+            .iter()
+            .find(|s| s.pid == std::process::id())
+            .expect("this process is read");
+        assert!(me.working_set_bytes > 0);
+        assert!(me.private_bytes > 0);
+        assert!(me.private_working_set_bytes > 0);
+        assert!(me.private_working_set_bytes <= me.working_set_bytes);
+    }
+
+    #[test]
+    fn a_reused_pid_is_opened_again_and_a_gone_one_is_closed() {
+        let me = std::process::id();
+        let mut handles = Handles::default();
+
+        handles.sync(&live(&[(me, 1)]));
+        assert_eq!(handles.open[&me].generation, 1);
+
+        handles.sync(&live(&[(me, 2)]));
+        assert_eq!(handles.open[&me].generation, 2, "a new start of the same pid reopens");
+
+        handles.sync(&live(&[]));
+        assert!(handles.open.is_empty(), "a process that left the live set is closed");
+    }
+
+    #[test]
+    fn a_process_that_cannot_be_opened_is_kept_without_a_handle() {
+        let mut handles = Handles::default();
+        handles.sync(&live(&[(0, 1)]));
+        assert_eq!(handles.unopened(), 1, "Idle has no process to open");
+
+        let mut snaps = Vec::new();
+        handles.read(0, &mut snaps);
+        assert!(snaps.is_empty());
+    }
+}

@@ -132,7 +132,11 @@ async fn snapshot(State(api): State<Api>) -> Json<Snapshot> {
     // Lock order matters: the tick thread holds the supervisor while it takes
     // the state, so this reads the supervisor first and lets it go before
     // taking the state. Nesting them the other way round would deadlock.
-    let dropped_by_sink = api.supervisor.lock().dropped();
+    let dropped_by_sink = {
+        let mut supervisor = api.supervisor.lock();
+        supervisor.tick();
+        supervisor.dropped()
+    };
 
     let state = api.state.lock();
     let now = now_ms();

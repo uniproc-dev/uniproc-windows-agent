@@ -3,7 +3,7 @@ pub mod process;
 
 use std::collections::HashSet;
 
-use crate::state::events::{DiskEventType, MachineSnapshot, NetworkEventType, StateChange};
+use crate::state::events::{MachineSnapshot, StateChange};
 use crate::state::process::{ProcessEntry, ProcessTable};
 
 /// Machine-wide cumulative counters. Monotonic by construction: they only
@@ -67,7 +67,7 @@ impl SystemState {
             StateChange::Machine(snap) => {
                 let attributable =
                     (snap.cpu_percent - snap.cpu_interrupt_percent - snap.cpu_dpc_percent).max(0.0);
-                self.machine = Some(snap.clone());
+                self.machine = Some(MachineSnapshot::clone(snap));
                 self.processes.fold_samples(attributable);
             }
             StateChange::ServicesSnapshot(services) => {
@@ -85,22 +85,20 @@ impl SystemState {
                     self.services_generation = self.services_generation.wrapping_add(1);
                 }
             }
-            StateChange::Disk(e) => match e.event_type {
-                DiskEventType::Read => {
-                    self.machine_totals.disk_read_bytes += e.transfer_size;
-                    self.machine_totals.disk_read_ops += 1;
+            StateChange::Disk(deltas) => {
+                for d in deltas.values() {
+                    self.machine_totals.disk_read_bytes += d.read_bytes;
+                    self.machine_totals.disk_read_ops += d.read_ops;
+                    self.machine_totals.disk_write_bytes += d.write_bytes;
+                    self.machine_totals.disk_write_ops += d.write_ops;
                 }
-                DiskEventType::Write => {
-                    self.machine_totals.disk_write_bytes += e.transfer_size;
-                    self.machine_totals.disk_write_ops += 1;
+            }
+            StateChange::Network(deltas) => {
+                for d in deltas.values() {
+                    self.machine_totals.net_rx_bytes += d.rx_bytes;
+                    self.machine_totals.net_tx_bytes += d.tx_bytes;
                 }
-                DiskEventType::Flush => {}
-            },
-            StateChange::Network(e) => match e.event_type {
-                NetworkEventType::Send => self.machine_totals.net_tx_bytes += e.size as u64,
-                NetworkEventType::Recv => self.machine_totals.net_rx_bytes += e.size as u64,
-                _ => {}
-            },
+            }
             _ => {}
         }
         self.processes.apply(change);
@@ -174,7 +172,7 @@ mod tests {
     }
 
     fn started(pid: u32) -> StateChange {
-        StateChange::ProcessStarted(ProcessStarted {
+        StateChange::ProcessStarted(Box::new(ProcessStarted {
             pid,
             parent_pid: 0,
             session_id: 0,
@@ -183,7 +181,7 @@ mod tests {
             package_full_name: String::new(),
             package_relative_app_id: String::new(),
             is_kernel_process: false,
-        })
+        }))
     }
 
     #[test]

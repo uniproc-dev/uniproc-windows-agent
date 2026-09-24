@@ -16,15 +16,6 @@ impl AlignedBuf {
         self.len
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn resize(&mut self, len: usize) {
-        self.words.resize(len.div_ceil(size_of::<u64>()), 0);
-        self.len = len;
-    }
-
     pub fn as_ptr(&self) -> *const u8 {
         self.words.as_ptr().cast()
     }
@@ -47,18 +38,6 @@ mod tests {
         for len in [0, 1, 7, 8, 9, 1023, 4096, 1 << 20] {
             let buf = AlignedBuf::zeroed(len);
             assert!(is_aligned(&buf), "misaligned at len {len}");
-            assert_eq!(buf.len(), len);
-        }
-    }
-
-    #[test]
-    fn a_resized_buffer_stays_aligned_and_reports_the_new_length() {
-        let mut buf = AlignedBuf::zeroed(0);
-        assert!(buf.is_empty());
-
-        for len in [13, 65_537, 3] {
-            buf.resize(len);
-            assert!(is_aligned(&buf), "misaligned after resize to {len}");
             assert_eq!(buf.len(), len);
         }
     }

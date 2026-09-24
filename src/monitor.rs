@@ -43,8 +43,8 @@ pub fn run(stop: impl FnOnce()) -> Result<()> {
             });
     });
 
-    // Drains the Sink independently of RPC traffic — GetReport alone isn't
-    // enough to keep the bounded channel from filling up under load.
+    // RPC and HTTP drain the Sink before they read; this drains it between
+    // requests, and at once when the Sink reports it half full.
     let tick_running = Arc::new(AtomicBool::new(true));
     let tick_supervisor = supervisor.clone();
     let tick_running_thread = tick_running.clone();
@@ -52,10 +52,11 @@ pub fn run(stop: impl FnOnce()) -> Result<()> {
         .name("supervisor-tick".into())
         .spawn(move || {
             while tick_running_thread.load(Ordering::Relaxed) {
-                std::thread::sleep(tick_interval);
+                std::thread::park_timeout(tick_interval);
                 tick_supervisor.lock().tick();
             }
         })?;
+    supervisor.lock().set_drainer(tick_handle.thread().clone());
 
     info!("Uniproc monitor running");
 
@@ -63,6 +64,7 @@ pub fn run(stop: impl FnOnce()) -> Result<()> {
 
     info!("Shutting down…");
     tick_running.store(false, Ordering::Relaxed);
+    tick_handle.thread().unpark();
     let _ = tick_handle.join();
     supervisor.lock().stop();
     Ok(())

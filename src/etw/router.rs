@@ -1,4 +1,3 @@
-use fxhash::FxHashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -22,7 +21,36 @@ fn manifest_session_name_in(prefix: &str, guid: &GUID) -> String {
     format!("{prefix}{guid:?}").replace(['{', '}'], "")
 }
 
+fn qpc_ticks(d: std::time::Duration) -> i64 {
+    let mut per_second = 0i64;
+    let _ = unsafe {
+        windows::Win32::System::Performance::QueryPerformanceFrequency(&mut per_second)
+    };
+    (d.as_secs_f64() * per_second as f64) as i64
+}
+
 type Handler = Box<dyn FnMut(&EVENT_RECORD, &[u8], &mut Vec<StateChange>) + Send>;
+
+/// Folds a provider's events into one change, handed over at most once per
+/// window instead of once per event.
+pub trait Batch: Send {
+    fn add(&mut self, record: &EVENT_RECORD, data: &[u8]);
+    /// The accumulated change, leaving the batch empty; `None` when nothing
+    /// was added since the last one.
+    fn take(&mut self) -> Option<StateChange>;
+}
+
+struct BatchSlot {
+    batch: Box<dyn Batch>,
+    window: i64,
+    since: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+enum Target {
+    Handler(usize),
+    Batch(usize),
+}
 
 // `From<EVENT_TRACE_FLAG> for u32` is blocked by the orphan rule, so the
 // boundary takes a local newtype instead.
@@ -44,7 +72,8 @@ pub struct KernelRouterBuilder {
     flags: u32,
     manifest: Vec<GUID>,
     handlers: Vec<Handler>,
-    routes: FxHashMap<GUID, Vec<usize>>,
+    batches: Vec<BatchSlot>,
+    routes: Vec<(u128, Vec<Target>)>,
     prefix: String,
     kernel_session: String,
 }
@@ -59,10 +88,38 @@ impl KernelRouterBuilder {
         self.handlers.push(Box::new(move |record, data, out| {
             out.extend(handler(record, data));
         }));
-        for guid in providers {
-            self.routes.entry(*guid).or_default().push(idx);
-        }
+        self.route(providers, Target::Handler(idx));
         self
+    }
+
+    /// Routes `providers` into `batch`, handed over once `window` has passed
+    /// since its first event. The deadline is checked on every event any
+    /// session delivers, so a quiet provider's batch does not wait for its
+    /// own next event.
+    pub fn batched(
+        &mut self,
+        providers: &'static [GUID],
+        window: std::time::Duration,
+        batch: impl Batch + 'static,
+    ) -> &mut Self {
+        let idx = self.batches.len();
+        self.batches.push(BatchSlot {
+            batch: Box::new(batch),
+            window: qpc_ticks(window),
+            since: None,
+        });
+        self.route(providers, Target::Batch(idx));
+        self
+    }
+
+    fn route(&mut self, providers: &'static [GUID], target: Target) {
+        for guid in providers {
+            let key = guid.to_u128();
+            match self.routes.iter_mut().find(|(g, _)| *g == key) {
+                Some((_, targets)) => targets.push(target),
+                None => self.routes.push((key, vec![target])),
+            }
+        }
     }
 
     /// Legacy MOF providers: NT Kernel Logger session, EnableFlags.
@@ -92,6 +149,7 @@ impl KernelRouterBuilder {
             flags,
             manifest,
             handlers,
+            batches,
             routes,
             prefix,
             kernel_session,
@@ -100,6 +158,7 @@ impl KernelRouterBuilder {
         let mut core = Box::new(parking_lot::Mutex::new(RouterCore {
             routes,
             handlers,
+            batches,
             sink,
             scratch: Vec::new(),
         }));
@@ -157,25 +216,59 @@ impl KernelRouterBuilder {
 }
 
 struct RouterCore {
-    routes: FxHashMap<GUID, Vec<usize>>,
+    routes: Vec<(u128, Vec<Target>)>,
     handlers: Vec<Handler>,
+    batches: Vec<BatchSlot>,
     sink: Sink,
     scratch: Vec<StateChange>,
 }
 
-impl EventSink for RouterCore {
-    fn on_event(&mut self, record: &EVENT_RECORD) {
-        let Some(indices) = self.routes.get(&record.EventHeader.ProviderId) else {
+impl RouterCore {
+    fn deliver(&mut self, record: &EVENT_RECORD, now: i64) {
+        let provider = record.EventHeader.ProviderId.to_u128();
+        let Some((_, targets)) = self.routes.iter().find(|(g, _)| *g == provider) else {
             return;
         };
         let Some(data) = to_user_data(record) else {
             return;
         };
-        for &idx in indices {
-            self.scratch.clear();
-            self.handlers[idx](record, data, &mut self.scratch);
-            self.sink.emit_all(self.scratch.drain(..));
+        for &target in targets {
+            match target {
+                Target::Handler(idx) => {
+                    self.scratch.clear();
+                    self.handlers[idx](record, data, &mut self.scratch);
+                    self.sink.emit_all(self.scratch.drain(..));
+                }
+                Target::Batch(idx) => {
+                    let slot = &mut self.batches[idx];
+                    slot.batch.add(record, data);
+                    slot.since.get_or_insert(now);
+                }
+            }
         }
+    }
+
+    fn hand_over_due(&mut self, now: i64) {
+        for slot in &mut self.batches {
+            let Some(since) = slot.since else {
+                continue;
+            };
+            if now - since < slot.window {
+                continue;
+            }
+            slot.since = None;
+            if let Some(change) = slot.batch.take() {
+                self.sink.emit(change);
+            }
+        }
+    }
+}
+
+impl EventSink for RouterCore {
+    fn on_event(&mut self, record: &EVENT_RECORD) {
+        let now = record.EventHeader.TimeStamp;
+        self.deliver(record, now);
+        self.hand_over_due(now);
     }
 }
 
@@ -195,7 +288,8 @@ impl KernelRouter {
             flags: 0,
             manifest: Vec::new(),
             handlers: Vec::new(),
-            routes: FxHashMap::default(),
+            batches: Vec::new(),
+            routes: Vec::new(),
             prefix: SESSION_NAME_PREFIX.to_string(),
             kernel_session: KERNEL_SESSION_NAME.to_string(),
         }
@@ -257,6 +351,59 @@ pub(crate) mod tests {
         false
     }
 
+    const QUIET: GUID = guid!("11111111-2222-3333-4444-555555555555");
+    const CHATTY: GUID = guid!("66666666-7777-8888-9999-aaaaaaaaaaaa");
+
+    struct Counting(u32);
+
+    impl Batch for Counting {
+        fn add(&mut self, _: &EVENT_RECORD, _: &[u8]) {
+            self.0 += 1;
+        }
+
+        fn take(&mut self) -> Option<StateChange> {
+            let n = std::mem::take(&mut self.0);
+            (n > 0).then_some(StateChange::ProcessStopped(n))
+        }
+    }
+
+    fn event_at(provider: GUID, timestamp: i64, payload: &[u8; 4]) -> EVENT_RECORD {
+        let mut record = EVENT_RECORD::default();
+        record.EventHeader.ProviderId = provider;
+        record.EventHeader.TimeStamp = timestamp;
+        record.UserData = payload.as_ptr() as *mut _;
+        record.UserDataLength = payload.len() as u16;
+        record
+    }
+
+    #[test]
+    fn a_quiet_batch_is_handed_over_on_anyone_elses_event_once_due() {
+        let (sink, rx) = Sink::bounded(16);
+        let mut core = RouterCore {
+            routes: vec![(QUIET.to_u128(), vec![Target::Batch(0)])],
+            handlers: Vec::new(),
+            batches: vec![BatchSlot {
+                batch: Box::new(Counting(0)),
+                window: 100,
+                since: None,
+            }],
+            sink,
+            scratch: Vec::new(),
+        };
+        let payload = [0u8; 4];
+
+        core.on_event(&event_at(QUIET, 1_000, &payload));
+        core.on_event(&event_at(QUIET, 1_050, &payload));
+        core.on_event(&event_at(CHATTY, 1_099, &payload));
+        assert!(rx.try_recv().is_err(), "not due before the window has passed");
+
+        core.on_event(&event_at(CHATTY, 1_100, &payload));
+        assert!(matches!(rx.try_recv(), Ok(StateChange::ProcessStopped(2))));
+
+        core.on_event(&event_at(CHATTY, 5_000, &payload));
+        assert!(rx.try_recv().is_err(), "an empty batch sends nothing");
+    }
+
     #[test]
     #[ignore = "requires admin and a real ETW session"]
     fn router_drop_leaves_no_session() {
@@ -289,6 +436,52 @@ pub(crate) mod tests {
             wait_session(&manifest_name, false),
             "manifest session should be gone after drop"
         );
+    }
+
+    #[test]
+    #[ignore = "requires admin and a real ETW session"]
+    fn a_session_left_behind_by_a_killed_agent_does_not_silence_disk_and_samples() {
+        let _guard = ETW_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::forget(
+            crate::etw::session::EtwSession::start(KERNEL_SESSION_NAME, 0, SessionMode::SystemLogger)
+                .expect("leftover session"),
+        );
+
+        let (sink, rx) = Sink::bounded(1 << 16);
+        let mut builder = KernelRouter::builder();
+        crate::providers::disk::KernelDiskProvider::new()
+            .register(&mut builder)
+            .unwrap();
+        crate::providers::cpu_sampler::CpuSamplerProvider::new()
+            .register(&mut builder)
+            .unwrap();
+        let router = builder.start(sink).expect("router start");
+
+        let path = std::env::temp_dir().join("uniproc-router-disk-test.bin");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let (mut disk, mut samples) = (false, false);
+        while std::time::Instant::now() < deadline && !(disk && samples) {
+            std::fs::write(&path, vec![7u8; 1 << 20]).unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .sync_all()
+                .unwrap();
+            for change in rx.try_iter() {
+                match change {
+                    StateChange::Disk(_) => disk = true,
+                    StateChange::CpuSamples(_) => samples = true,
+                    _ => {}
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        drop(router);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(disk, "no StateChange::Disk after taking over a leftover kernel session");
+        assert!(samples, "no StateChange::CpuSamples after taking over a leftover kernel session");
     }
 
     #[test]

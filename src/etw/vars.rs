@@ -38,6 +38,10 @@ macro_rules! guid {
 pub(crate) use guid;
 
 pub const KERNEL_SESSION_NAME: &str = "Uniproc-Kernel";
+
+/// How long disk and network events gather before they are handed over as
+/// one change.
+pub const BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(10);
 pub const SESSION_NAME_PREFIX: &str = "Uniproc-";
 
 // EVENT_TRACE_PROPERTIES tuning.

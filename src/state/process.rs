@@ -1,8 +1,6 @@
 use fxhash::FxHashMap;
 
-use crate::state::events::{
-    DiskEventType, MemorySnapshot, NetworkEventType, ProcessStarted, ProcessSignature, StateChange,
-};
+use crate::state::events::{MemorySnapshot, ProcessStarted, ProcessSignature, StateChange};
 
 #[derive(Default, Debug, Clone)]
 pub struct CpuStats {
@@ -153,10 +151,11 @@ impl ProcessTable {
     pub fn apply(&mut self, change: StateChange) {
         match change {
             StateChange::ProcessStarted(e) | StateChange::ProcessRundown(e) => {
-                self.processes.insert(e.pid, ProcessEntry::from(e));
+                self.processes.insert(e.pid, ProcessEntry::from(*e));
                 self.passport_changed();
             }
             StateChange::ProcessEnriched(e) => {
+                let e = *e;
                 let Some(entry) = self.processes.get_mut(&e.pid) else {
                     return;
                 };
@@ -212,33 +211,26 @@ impl ProcessTable {
                     entry.cpu.total_percent = percent;
                 }
             }
-            StateChange::Disk(e) => {
-                if let Some(entry) = self.processes.get_mut(&e.pid) {
-                    match e.event_type {
-                        DiskEventType::Read => {
-                            entry.disk.read_bytes += e.transfer_size;
-                            entry.disk.read_ops += 1;
-                        }
-                        DiskEventType::Write => {
-                            entry.disk.write_bytes += e.transfer_size;
-                            entry.disk.write_ops += 1;
-                        }
-                        DiskEventType::Flush => {}
+            StateChange::Disk(deltas) => {
+                for (tid, d) in deltas {
+                    let Some(pid) = self.resolve_pid(tid, NO_PROCESS_ID) else {
+                        continue;
+                    };
+                    if let Some(entry) = self.processes.get_mut(&pid) {
+                        entry.disk.read_bytes += d.read_bytes;
+                        entry.disk.read_ops += d.read_ops;
+                        entry.disk.write_bytes += d.write_bytes;
+                        entry.disk.write_ops += d.write_ops;
                     }
                 }
             }
-            StateChange::Network(e) => {
-                if let Some(entry) = self.processes.get_mut(&e.pid) {
-                    match e.event_type {
-                        NetworkEventType::Send => {
-                            entry.network.sent_bytes += e.size as u64;
-                            entry.network.sent_packets += 1;
-                        }
-                        NetworkEventType::Recv => {
-                            entry.network.recv_bytes += e.size as u64;
-                            entry.network.recv_packets += 1;
-                        }
-                        _ => {}
+            StateChange::Network(deltas) => {
+                for (pid, d) in deltas {
+                    if let Some(entry) = self.processes.get_mut(&pid) {
+                        entry.network.sent_bytes += d.tx_bytes;
+                        entry.network.sent_packets += d.tx_packets;
+                        entry.network.recv_bytes += d.rx_bytes;
+                        entry.network.recv_packets += d.rx_packets;
                     }
                 }
             }
@@ -251,19 +243,7 @@ impl ProcessTable {
             return;
         }
 
-        let resolved = self
-            .tid_to_pid
-            .get(&tid)
-            .or_else(|| self.recently_stopped.get(&tid))
-            .copied()
-            .or_else(|| {
-                (pid_hint != IDLE_PROCESS_ID
-                    && pid_hint != NO_PROCESS_ID
-                    && self.processes.contains_key(&pid_hint))
-                .then_some(pid_hint)
-            });
-
-        match resolved {
+        match self.resolve_pid(tid, pid_hint) {
             Some(pid) => *self.samples.entry(pid).or_default() += count,
             None => {
                 if pid_hint == IDLE_PROCESS_ID || pid_hint == NO_PROCESS_ID {
@@ -322,8 +302,17 @@ impl ProcessTable {
 
 
 
-    pub fn pid_for_tid(&self, tid: u32) -> Option<u32> {
-        self.tid_to_pid.get(&tid).copied()
+    fn resolve_pid(&self, tid: u32, pid_hint: u32) -> Option<u32> {
+        self.tid_to_pid
+            .get(&tid)
+            .or_else(|| self.recently_stopped.get(&tid))
+            .copied()
+            .or_else(|| {
+                (pid_hint != IDLE_PROCESS_ID
+                    && pid_hint != NO_PROCESS_ID
+                    && self.processes.contains_key(&pid_hint))
+                .then_some(pid_hint)
+            })
     }
 
     pub fn get(&self, pid: u32) -> Option<&ProcessEntry> {
@@ -350,7 +339,7 @@ mod tests {
     use super::*;
 
     fn started(pid: u32) -> StateChange {
-        StateChange::ProcessStarted(crate::state::events::ProcessStarted {
+        StateChange::ProcessStarted(Box::new(crate::state::events::ProcessStarted {
             pid,
             parent_pid: 0,
             session_id: 0,
@@ -359,7 +348,7 @@ mod tests {
             package_full_name: String::new(),
             package_relative_app_id: String::new(),
             is_kernel_process: false,
-        })
+        }))
     }
 
     fn sample(t: &mut ProcessTable, tid: u32, pid_hint: u32, count: u64) {
@@ -503,11 +492,78 @@ mod tests {
     }
 
     fn enriched(pid: u32, display_name: &str) -> StateChange {
-        StateChange::ProcessEnriched(crate::state::events::ProcessEnriched {
+        StateChange::ProcessEnriched(Box::new(crate::state::events::ProcessEnriched {
             pid,
             display_name: display_name.to_string(),
             ..Default::default()
-        })
+        }))
+    }
+
+    fn disk_by_thread(tid: u32, write_bytes: u64) -> StateChange {
+        let mut deltas = crate::state::events::DiskDeltas::default();
+        deltas.insert(
+            tid,
+            crate::state::events::DiskDelta {
+                write_bytes,
+                write_ops: 1,
+                ..Default::default()
+            },
+        );
+        StateChange::Disk(deltas)
+    }
+
+    #[test]
+    fn a_transfer_is_charged_to_the_process_of_the_issuing_thread() {
+        let mut t = table_with_threads();
+        t.apply(disk_by_thread(2, 4096));
+        t.apply(disk_by_thread(2, 4096));
+
+        assert_eq!(t.get(200).unwrap().disk.write_bytes, 8192);
+        assert_eq!(t.get(200).unwrap().disk.write_ops, 2);
+        assert_eq!(t.get(100).unwrap().disk.write_bytes, 0);
+    }
+
+    #[test]
+    fn a_transfer_from_a_thread_that_just_exited_still_finds_its_process() {
+        let mut t = table_with_threads();
+        t.apply(StateChange::ThreadStopped { tid: 1 });
+        t.apply(disk_by_thread(1, 512));
+        assert_eq!(t.get(100).unwrap().disk.write_bytes, 512);
+    }
+
+    #[test]
+    fn a_transfer_from_an_unknown_thread_is_charged_to_no_process() {
+        let mut t = table_with_threads();
+        t.apply(disk_by_thread(4242, 512));
+        assert_eq!(t.get(100).unwrap().disk.write_bytes, 0);
+        assert_eq!(t.get(200).unwrap().disk.write_bytes, 0);
+    }
+
+    #[test]
+    fn a_memory_pass_leaves_the_disk_figures_alone() {
+        let mut t = table_with_threads();
+        t.apply(disk_by_thread(1, 512));
+        t.apply(StateChange::Memory(vec![MemorySnapshot {
+            pid: 100,
+            working_set_bytes: 4096,
+            ..Default::default()
+        }]));
+        assert_eq!(t.get(100).unwrap().disk.write_bytes, 512);
+        assert_eq!(t.get(100).unwrap().memory.as_ref().unwrap().working_set_bytes, 4096);
+    }
+
+    #[test]
+    fn a_network_batch_is_charged_per_process() {
+        let mut t = table_with_threads();
+        let mut deltas = crate::state::events::NetDeltas::default();
+        deltas.insert(100, crate::state::events::NetDelta { rx_bytes: 10, tx_bytes: 20, rx_packets: 1, tx_packets: 2 });
+        deltas.insert(777, crate::state::events::NetDelta { rx_bytes: 5, ..Default::default() });
+        t.apply(StateChange::Network(deltas.clone()));
+        t.apply(StateChange::Network(deltas));
+
+        let n = &t.get(100).unwrap().network;
+        assert_eq!((n.recv_bytes, n.sent_bytes, n.recv_packets, n.sent_packets), (20, 40, 2, 4));
+        assert_eq!(t.get(200).unwrap().network.recv_bytes, 0);
     }
 
     #[test]
@@ -535,11 +591,11 @@ mod tests {
     fn a_console_host_arriving_moves_it() {
         let mut t = table_with_threads();
         let before = t.passport_generation();
-        t.apply(StateChange::ProcessEnriched(crate::state::events::ProcessEnriched {
+        t.apply(StateChange::ProcessEnriched(Box::new(crate::state::events::ProcessEnriched {
             pid: 100,
             console_host_pid: 4242,
             ..Default::default()
-        }));
+        })));
         assert_ne!(t.passport_generation(), before);
         assert_eq!(t.get(100).unwrap().console_host_pid, 4242);
     }

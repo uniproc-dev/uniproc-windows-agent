@@ -91,7 +91,7 @@ pub unsafe fn enum_processes() -> Result<Vec<StateChange>> {
             )
         };
 
-        changes.push(StateChange::ProcessRundown(ProcessStarted {
+        changes.push(StateChange::ProcessRundown(Box::new(ProcessStarted {
             pid,
             parent_pid,
             session_id: entry.SessionId,
@@ -100,7 +100,7 @@ pub unsafe fn enum_processes() -> Result<Vec<StateChange>> {
             package_full_name,
             package_relative_app_id,
             is_kernel_process,
-        }));
+        })));
 
         let threads_ptr = unsafe {
             start

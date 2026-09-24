@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 
@@ -38,6 +38,18 @@ impl PollInterval {
     pub fn wait(&self) {
         let period = Duration::from_millis(self.ms.load(Ordering::Relaxed));
         let _ = self.wake_rx.recv_timeout(period);
+    }
+}
+
+/// Parks until `deadline`, returning early once `running` is cleared and the
+/// thread is unparked.
+pub fn park_while(running: &AtomicBool, deadline: Instant) {
+    while running.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        std::thread::park_timeout(deadline - now);
     }
 }
 
@@ -116,6 +128,32 @@ mod tests {
             started.elapsed() >= Duration::from_millis(140),
             "a second early return means wakes were not coalesced"
         );
+    }
+
+    #[test]
+    fn a_park_lasts_until_the_deadline() {
+        let running = AtomicBool::new(true);
+        let started = Instant::now();
+        park_while(&running, started + Duration::from_millis(120));
+        assert!(started.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn a_stop_ends_a_park_at_once() {
+        let running = Arc::new(AtomicBool::new(true));
+        let parked = {
+            let running = running.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                park_while(&running, started + Duration::from_secs(30));
+                started.elapsed()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        running.store(false, Ordering::Relaxed);
+        parked.thread().unpark();
+        let waited = parked.join().unwrap();
+        assert!(waited < Duration::from_secs(2), "waited {waited:?}");
     }
 
     #[test]
