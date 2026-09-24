@@ -512,9 +512,10 @@ mod tests {
         // is asked with USEFILEATTRIBUTES, so it answers from the name alone
         // without touching the disk. Deliberate - it keeps the call cheap and
         // still names a process whose image has since been deleted.
-        assert_eq!(
-            resolve(r"C:\does\not\exist.exe", "", ""),
-            Some(String::from("exist.exe"))
+        let name = resolve(r"C:\does\not\exist.exe", "", "");
+        assert!(
+            matches!(name.as_deref(), Some("exist.exe") | Some("exist")),
+            "the shell names the file with or without its extension, as Explorer is set to show it; got {name:?}"
         );
     }
 }
