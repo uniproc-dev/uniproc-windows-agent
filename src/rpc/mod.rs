@@ -10,6 +10,8 @@ use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE, WINDOWS_SCHEMA_ID};
 
 use crate::embedded::Embedded;
 use crate::rpc::handler::AgentImpl;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +21,7 @@ pub async fn run(agent: Arc<Embedded>) -> Result<()> {
     let endpoint = Endpoint::for_service(APP_NAME, WINDOWS_AGENT_SERVICE)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let listener = endpoint.listen().await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let attached = Rc::new(Cell::new(0usize));
 
     loop {
         let session = match accept_session::<windows_agent::Client, _>(
@@ -35,13 +38,20 @@ pub async fn run(agent: Arc<Embedded>) -> Result<()> {
                 continue;
             }
         };
+        attached.set(attached.get() + 1);
         agent.set_memory_interval(Duration::from_millis(ATTACHED_MEMORY_INTERVAL_MS));
 
-        // One connection at a time; a disconnect must not kill the loop.
-        if let Err(e) = session.wait().await {
-            tracing::warn!("rpc session ended: {e:?}");
-        }
-
-        agent.set_memory_interval(Duration::from_millis(IDLE_MEMORY_INTERVAL_MS));
+        let agent = agent.clone();
+        let attached = attached.clone();
+        compio::runtime::spawn(async move {
+            if let Err(e) = session.wait().await {
+                tracing::warn!("rpc session ended: {e:?}");
+            }
+            attached.set(attached.get() - 1);
+            if attached.get() == 0 {
+                agent.set_memory_interval(Duration::from_millis(IDLE_MEMORY_INTERVAL_MS));
+            }
+        })
+        .detach();
     }
 }
