@@ -2,7 +2,7 @@ pub(crate) mod decode;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -42,9 +42,10 @@ struct Envelope {
 
 /// A connection to the agent service. Clones share it; it closes when the last one is dropped.
 ///
-/// The session lives on its own thread with its own compio runtime, so the
-/// calls work from any executor. A call that fails means the session is
-/// gone: connect again.
+/// Every session lives on one I/O thread with its own compio runtime,
+/// started on the first connect and kept for the process, so the calls
+/// work from any executor. A call that fails means the session is gone:
+/// connect again.
 #[derive(Clone)]
 pub struct Remote {
     tx: mpsc::UnboundedSender<Envelope>,
@@ -62,18 +63,13 @@ impl Remote {
         let (ready_tx, ready_rx) = oneshot::channel();
         let (tx, rx) = mpsc::unbounded();
 
-        std::thread::Builder::new()
-            .name("agent-remote".into())
-            .spawn(move || match compio::runtime::Runtime::new() {
-                Ok(runtime) => runtime.block_on(serve(service, give_up_after, ready_tx, rx)),
-                Err(error) => {
-                    let _ = ready_tx.send(Err(anyhow!("no compio runtime: {error}")));
-                }
-            })?;
+        submit(Box::new(move || {
+            compio::runtime::spawn(serve(service, give_up_after, ready_tx, rx)).detach();
+        }))?;
 
         ready_rx
             .await
-            .map_err(|_| anyhow!("the agent connection thread died before connecting"))??;
+            .map_err(|_| anyhow!("the agent I/O thread stopped before connecting"))??;
         Ok(Self { tx })
     }
 
@@ -121,6 +117,43 @@ impl Remote {
             _ => bail!("a command answered with something else"),
         }
     }
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+
+static IO: Mutex<Option<mpsc::UnboundedSender<Job>>> = Mutex::new(None);
+
+/// Runs `job` on the one thread whose compio runtime holds every session, starting it on first use.
+fn submit(job: Job) -> Result<()> {
+    let mut io = IO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let job = match io.as_ref() {
+        Some(jobs) => match jobs.unbounded_send(job) {
+            Ok(()) => return Ok(()),
+            Err(refused) => refused.into_inner(),
+        },
+        None => job,
+    };
+
+    let (jobs, queue) = mpsc::unbounded::<Job>();
+    std::thread::Builder::new()
+        .name("agent-remote-io".into())
+        .spawn(move || run_io(queue))?;
+    jobs.unbounded_send(job)
+        .map_err(|_| anyhow!("the agent I/O thread stopped at once"))?;
+    *io = Some(jobs);
+    Ok(())
+}
+
+fn run_io(mut queue: mpsc::UnboundedReceiver<Job>) {
+    let runtime = match compio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => return tracing::error!(%error, "the agent I/O thread has no compio runtime"),
+    };
+    runtime.block_on(async move {
+        while let Some(job) = queue.next().await {
+            job();
+        }
+    });
 }
 
 async fn serve(
@@ -347,5 +380,37 @@ impl Session {
             Command::ServiceRestart { name } => by_name!(service_restart_request, name),
         };
         Ok(if code == 0 { Ok(()) } else { Err(code) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn io_thread() -> std::thread::ThreadId {
+        let (tx, rx) = std::sync::mpsc::channel();
+        submit(Box::new(move || {
+            let _ = tx.send(std::thread::current().id());
+        }))
+        .unwrap();
+        rx.recv_timeout(Duration::from_secs(5)).expect("the job ran")
+    }
+
+    #[test]
+    fn every_connection_shares_one_io_thread() {
+        let first = io_thread();
+        assert_ne!(first, std::thread::current().id());
+        assert_eq!(io_thread(), first);
+    }
+
+    #[test]
+    fn a_pipe_nobody_serves_is_an_error_every_time() {
+        for _ in 0..2 {
+            let connected = futures::executor::block_on(Remote::connect_to(
+                "uniproc.no-agent-serves-this",
+                Duration::from_millis(200),
+            ));
+            assert!(connected.is_err());
+        }
     }
 }
