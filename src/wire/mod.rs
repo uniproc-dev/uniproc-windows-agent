@@ -5,13 +5,13 @@ pub mod encode;
 
 #[cfg(test)]
 mod tests {
-    use uniproc_protocol::windows_capnp::{machine_stats, windows_agent};
+    use uniproc_protocol::windows_capnp::{machine_stats, service_status, windows_agent};
     use windows_agent::{get_process_metrics_results, get_processes_results, get_services_results};
 
     use super::{decode, encode};
     use crate::api::{
         MachineStats, ProcessInfo, ProcessMetrics, ProcessMetricsSnapshot, ProcessPriority,
-        ServiceState, ServiceStats, SignatureStatus,
+        ServiceState, ServiceStats, ServiceStatus, SignatureStatus,
     };
 
     fn process(pid: u32) -> ProcessInfo {
@@ -107,6 +107,22 @@ mod tests {
         encode::machine(&sent, message.init_root::<machine_stats::Builder>());
         let reader = message.get_root_as_reader::<machine_stats::Reader>().unwrap();
         assert_eq!(decode::machine(reader), sent);
+    }
+
+    #[test]
+    fn a_service_status_survives_the_wire() {
+        let sent = ServiceStatus {
+            state: ServiceState::StartPending,
+            pid: 42,
+            exit_code: 1066,
+            service_exit_code: 7,
+            checkpoint: 3,
+            wait_hint_ms: 5000,
+        };
+        let mut message = capnp::message::Builder::new_default();
+        encode::service_status(&sent, message.init_root::<service_status::Builder>());
+        let reader = message.get_root_as_reader::<service_status::Reader>().unwrap();
+        assert_eq!(decode::service_status(reader), sent);
     }
 
     #[test]

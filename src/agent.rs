@@ -2,8 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use futures::StreamExt;
+use futures::stream::BoxStream;
 
-use crate::api::{Command, CommandResult, Snapshot};
+use crate::api::{Command, CommandResult, ServiceStatus, Snapshot};
 use crate::local::{Local, StartError};
 use crate::remote::Remote;
 
@@ -66,6 +68,15 @@ impl Agent {
             Self::Remote(remote) => remote.run(command).await,
         }
     }
+
+    /// The service's status now, then every change until the stream is dropped.
+    /// Ends when the service is gone, cannot be opened, monitoring stops, or the session ends.
+    pub async fn watch_service(&self, name: &str) -> Result<BoxStream<'static, ServiceStatus>> {
+        match self {
+            Self::Local(agent) => Ok(agent.watch_service(name).boxed()),
+            Self::Remote(remote) => Ok(remote.watch_service(name).await?.boxed()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -81,6 +92,7 @@ mod tests {
             send(agent.snapshot());
             send(agent.set_intervals(None, None));
             send(agent.run(Command::Kill { pid: 0 }));
+            send(agent.watch_service("svc"));
         }
         let _ = calls;
     }

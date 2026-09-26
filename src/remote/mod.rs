@@ -1,20 +1,24 @@
 use std::cell::{Cell, RefCell};
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use capnp::capability::Response;
-use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
+use futures::{Stream, StreamExt};
 use ogurpchik::auth::handshake::{HandshakeMode, SchemaId, authenticate_client};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::{RpcSession, Side, spawn_session};
 use uniproc_protocol::meta_capnp::{ResponseStatus, response_meta};
-use uniproc_protocol::windows_capnp::windows_agent;
+use uniproc_protocol::windows_capnp::{service_watcher, windows_agent};
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE, WINDOWS_SCHEMA_ID};
 
-use crate::api::{Command, CommandResult, ProcessInfo, ServiceStats, Snapshot, Tagged};
+use crate::api::{
+    Command, CommandResult, ProcessInfo, ServiceStats, ServiceStatus, Snapshot, Tagged,
+};
 use crate::wire::{decode, encode};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
@@ -25,6 +29,11 @@ enum Request {
     Snapshot,
     SetIntervals { memory_ms: u64, cpu_ms: u64 },
     Run(Command),
+    Watch {
+        name: String,
+        statuses: mpsc::UnboundedSender<ServiceStatus>,
+        released: oneshot::Receiver<()>,
+    },
 }
 
 enum Reply {
@@ -32,6 +41,7 @@ enum Reply {
     Snapshot(Option<Snapshot>),
     Done,
     Code(CommandResult),
+    Watching,
 }
 
 struct Envelope {
@@ -116,6 +126,35 @@ impl Remote {
             _ => bail!("a command answered with something else"),
         }
     }
+
+    /// The service's status now, then every change; ends when the service
+    /// is gone, cannot be opened, or the session ends.
+    pub async fn watch_service(&self, name: &str) -> Result<impl Stream<Item = ServiceStatus> + Send + Unpin + 'static> {
+        let (statuses, rx) = mpsc::unbounded();
+        let (release, released) = oneshot::channel();
+        let request = Request::Watch {
+            name: name.to_string(),
+            statuses,
+            released,
+        };
+        match self.call(request).await? {
+            Reply::Watching => Ok(Watch { rx, _release: release }),
+            _ => bail!("a watch answered with something else"),
+        }
+    }
+}
+
+struct Watch {
+    rx: mpsc::UnboundedReceiver<ServiceStatus>,
+    _release: oneshot::Sender<()>,
+}
+
+impl Stream for Watch {
+    type Item = ServiceStatus;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<ServiceStatus>> {
+        Pin::new(&mut self.rx).poll_next(cx)
+    }
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -187,6 +226,39 @@ async fn serve(
 struct ClientStub;
 impl windows_agent::Server for ClientStub {}
 
+struct WatcherImpl {
+    statuses: RefCell<Option<mpsc::UnboundedSender<ServiceStatus>>>,
+}
+
+impl service_watcher::Server for WatcherImpl {
+    async fn changed(
+        self: Rc<Self>,
+        params: service_watcher::ChangedParams,
+        _: service_watcher::ChangedResults,
+    ) -> Result<(), capnp::Error> {
+        let status = decode::service_status(params.get()?.get_status()?);
+        let delivered = self
+            .statuses
+            .borrow()
+            .as_ref()
+            .is_some_and(|statuses| statuses.unbounded_send(status).is_ok());
+        if delivered {
+            Ok(())
+        } else {
+            Err(capnp::Error::failed("nobody watches this service any more".into()))
+        }
+    }
+
+    async fn ended(
+        self: Rc<Self>,
+        _: service_watcher::EndedParams,
+        _: service_watcher::EndedResults,
+    ) -> Result<(), capnp::Error> {
+        self.statuses.borrow_mut().take();
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct Cache {
     services: Option<Tagged<Arc<[ServiceStats]>>>,
@@ -240,6 +312,25 @@ impl Session {
                 Ok(Reply::Done)
             }
             Request::Run(command) => self.run(command).await.map(Reply::Code),
+            Request::Watch {
+                name,
+                statuses,
+                released,
+            } => {
+                let watcher = WatcherImpl {
+                    statuses: RefCell::new(Some(statuses)),
+                };
+                let mut request = self.client().watch_service_request();
+                request.get().set_name(&name);
+                request.get().set_watcher(capnp_rpc::new_client(watcher));
+                let handle = request.send().promise.await?.get()?.get_handle()?;
+                compio::runtime::spawn(async move {
+                    let _handle = handle;
+                    let _ = released.await;
+                })
+                .detach();
+                Ok(Reply::Watching)
+            }
         }
     }
 

@@ -5,8 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use uniproc_windows_agent::agent::Agent;
-use uniproc_windows_agent::api::{Command, ProcessPriority, Snapshot};
+use uniproc_windows_agent::api::{Command, ProcessPriority, ServiceState, Snapshot};
 
 fn main() -> anyhow::Result<()> {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "remote".into());
@@ -36,6 +37,7 @@ async fn run(mode: &str) -> anyhow::Result<()> {
     let first = snapshot(&agent).await?;
     assert_eq!(first.metrics.len(), first.processes.value.len(), "metrics cover the list");
     assert!(first.metrics.iter().zip(first.processes.value.iter()).all(|(m, p)| m.pid == p.pid));
+    assert!(first.machine.used_physical_kb > 0, "the first snapshot has the machine's memory");
     println!(
         "{mode}: {} processes, {} services, cpu {:.1}%, used {} kb",
         first.processes.value.len(),
@@ -77,5 +79,13 @@ async fn run(mode: &str) -> anyhow::Result<()> {
     println!("{mode}: set_priority {priority:?}, kill {killed:?}, kill again {again:?}");
     assert_eq!((priority, killed), (Ok(()), Ok(())));
     assert!(again.is_err(), "a gone process cannot be killed");
+
+    let mut watch = agent.watch_service("EventLog").await?;
+    let status = watch.next().await.expect("EventLog is there");
+    assert_eq!(status.state, ServiceState::Running);
+    drop(watch);
+    let mut gone = agent.watch_service("uniproc-no-such-service").await?;
+    assert!(gone.next().await.is_none(), "a watch on no service ends");
+    println!("{mode}: watch EventLog {:?} pid {}, a watch on no service ended", status.state, status.pid);
     Ok(())
 }

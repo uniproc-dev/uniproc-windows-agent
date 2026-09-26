@@ -3,12 +3,12 @@ use std::sync::Arc;
 use capnp::struct_list;
 use uniproc_protocol::windows_capnp::{
     ProcessPriority as WirePriority, ServiceState as WireServiceState, SignatureStatus as WireSignature,
-    machine_stats, process_info, process_metrics, service_stats,
+    machine_stats, process_info, process_metrics, service_stats, service_status,
 };
 
 use crate::api::{
     MachineStats, ProcessInfo, ProcessMetrics, ProcessPriority, ServiceState, ServiceStats,
-    SignatureStatus,
+    ServiceStatus, SignatureStatus,
 };
 
 fn text(reader: capnp::Result<capnp::text::Reader<'_>>) -> capnp::Result<String> {
@@ -45,6 +45,17 @@ pub fn priority(p: WirePriority) -> ProcessPriority {
         WirePriority::AboveNormal => ProcessPriority::AboveNormal,
         WirePriority::High => ProcessPriority::High,
         WirePriority::Realtime => ProcessPriority::Realtime,
+    }
+}
+
+pub fn service_status(s: service_status::Reader<'_>) -> ServiceStatus {
+    ServiceStatus {
+        state: service_state(s.get_state()),
+        pid: s.get_pid(),
+        exit_code: s.get_exit_code(),
+        service_exit_code: s.get_service_exit_code(),
+        checkpoint: s.get_checkpoint(),
+        wait_hint_ms: s.get_wait_hint_ms(),
     }
 }
 

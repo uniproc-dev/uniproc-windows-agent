@@ -1,11 +1,11 @@
 use uniproc_protocol::windows_capnp::{
     ProcessPriority as WirePriority, ServiceState as WireServiceState, SignatureStatus as WireSignature,
-    machine_stats, windows_agent,
+    machine_stats, service_status, windows_agent,
 };
 
 use crate::api::{
     MachineStats, ProcessInfo, ProcessMetricsSnapshot, ProcessPriority, ServiceState, ServiceStats,
-    SignatureStatus,
+    ServiceStatus, SignatureStatus,
 };
 
 fn signature(s: SignatureStatus) -> WireSignature {
@@ -104,6 +104,15 @@ pub fn services(services: &[ServiceStats], mut out: windows_agent::get_services_
         s.set_description(&svc.description);
         s.set_image_path(&svc.image_path);
     }
+}
+
+pub fn service_status(s: &ServiceStatus, mut out: service_status::Builder) {
+    out.set_state(service_state(s.state));
+    out.set_pid(s.pid);
+    out.set_exit_code(s.exit_code);
+    out.set_service_exit_code(s.service_exit_code);
+    out.set_checkpoint(s.checkpoint);
+    out.set_wait_hint_ms(s.wait_hint_ms);
 }
 
 pub fn machine(m: &MachineStats, mut out: machine_stats::Builder) {
