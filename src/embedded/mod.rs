@@ -7,12 +7,10 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use crate::api::{
-    Command, CommandResult, MachineStats, ProcessInfo, ProcessMetricsSnapshot, ProcessPriority,
-    ServiceStats, Snapshot, Tagged,
+    Command, CommandResult, MachineStats, ProcessInfo, ProcessMetricsSnapshot, ServiceStats,
+    Snapshot, Tagged,
 };
 use crate::commands::Commands;
-use crate::commands::process;
-use crate::commands::services::ServiceAction;
 use crate::monitor::Monitor;
 use crate::providers::{EMBEDDED, supervisor};
 use crate::settings::ATTACHED_MEMORY_INTERVAL_MS;
@@ -118,63 +116,7 @@ impl Embedded {
 
     /// Blocks for as long as the command takes; a service restart up to half a minute.
     pub fn run(&self, command: Command) -> CommandResult {
-        match command {
-            Command::Kill { pid } => self.kill(pid),
-            Command::Suspend { pid } => self.suspend(pid),
-            Command::Resume { pid } => self.resume(pid),
-            Command::SetPriority { pid, priority } => self.set_priority(pid, priority),
-            Command::SetAffinity { pid, mask } => self.set_affinity(pid, mask),
-            Command::ServiceStart { name } => self.service_start(&name),
-            Command::ServiceStop { name } => self.service_stop(&name),
-            Command::ServicePause { name } => self.service_pause(&name),
-            Command::ServiceResume { name } => self.service_resume(&name),
-            Command::ServiceRestart { name } => self.service_restart(&name),
-        }
-    }
-
-    pub fn kill(&self, pid: u32) -> CommandResult {
-        process::kill(pid)
-    }
-
-    pub fn suspend(&self, pid: u32) -> CommandResult {
-        process::suspend(pid)
-    }
-
-    pub fn resume(&self, pid: u32) -> CommandResult {
-        process::resume(pid)
-    }
-
-    pub fn set_priority(&self, pid: u32, priority: ProcessPriority) -> CommandResult {
-        process::set_priority(pid, priority)
-    }
-
-    pub fn set_affinity(&self, pid: u32, mask: u64) -> CommandResult {
-        process::set_affinity(pid, mask)
-    }
-
-    /// Blocks until the SCM has taken the control.
-    pub fn service_start(&self, name: &str) -> CommandResult {
-        self.commands.control_service(name, ServiceAction::Start)
-    }
-
-    /// Blocks until the SCM has taken the control.
-    pub fn service_stop(&self, name: &str) -> CommandResult {
-        self.commands.control_service(name, ServiceAction::Stop)
-    }
-
-    /// Blocks until the SCM has taken the control.
-    pub fn service_pause(&self, name: &str) -> CommandResult {
-        self.commands.control_service(name, ServiceAction::Pause)
-    }
-
-    /// Blocks until the SCM has taken the control.
-    pub fn service_resume(&self, name: &str) -> CommandResult {
-        self.commands.control_service(name, ServiceAction::Resume)
-    }
-
-    /// Blocks until the service has stopped and been started again, up to half a minute.
-    pub fn service_restart(&self, name: &str) -> CommandResult {
-        self.commands.restart_service(name)
+        self.commands.run(command)
     }
 }
 

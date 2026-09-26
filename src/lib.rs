@@ -8,6 +8,8 @@ pub mod remote;
 
 mod aligned;
 mod commands;
+#[cfg(feature = "service")]
+mod cpu_report;
 mod etw;
 #[cfg(feature = "service")]
 mod http;
@@ -27,7 +29,7 @@ mod supervisor;
 mod win;
 
 #[cfg(feature = "service")]
-pub use commands::cpu::run as print_cpu;
+pub use cpu_report::run as print_cpu;
 #[cfg(feature = "service")]
 pub use logger::init_console;
 #[cfg(feature = "service")]

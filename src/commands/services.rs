@@ -11,7 +11,7 @@ use windows::Win32::{
 };
 use windows::core::PCWSTR;
 
-use crate::commands::Outcome;
+use crate::api::CommandResult;
 use crate::commands::vars::{ERROR_SERVICE_NOT_ACTIVE, ERROR_TIMEOUT};
 use crate::win::service_handle;
 
@@ -85,7 +85,7 @@ pub enum ServiceAction {
     Resume,
 }
 
-pub fn control(scm: ScHandle, name: &str, action: ServiceAction) -> Outcome {
+pub fn control(scm: ScHandle, name: &str, action: ServiceAction) -> CommandResult {
     let access = match action {
         ServiceAction::Start => SERVICE_START,
         ServiceAction::Stop => SERVICE_STOP | SERVICE_QUERY_STATUS,
@@ -109,7 +109,7 @@ pub fn control(scm: ScHandle, name: &str, action: ServiceAction) -> Outcome {
     result.ok().map_err(|e| win32_code(&e))
 }
 
-pub fn restart(scm: ScHandle, name: &str) -> Outcome {
+pub fn restart(scm: ScHandle, name: &str) -> CommandResult {
     match control(scm, name, ServiceAction::Stop) {
         Err(code) if code != ERROR_SERVICE_NOT_ACTIVE => return Err(code),
         _ => {}
@@ -118,7 +118,7 @@ pub fn restart(scm: ScHandle, name: &str) -> Outcome {
     control(scm, name, ServiceAction::Start)
 }
 
-fn wait_for_status(scm: ScHandle, name: &str, desired: u32) -> Outcome {
+fn wait_for_status(scm: ScHandle, name: &str, desired: u32) -> CommandResult {
     let service = ServiceHandleGuard::open(scm, name, SERVICE_QUERY_STATUS)?;
 
     let mut status = SERVICE_STATUS_PROCESS::default();

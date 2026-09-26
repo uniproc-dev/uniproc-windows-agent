@@ -5,7 +5,7 @@ use std::time::Duration;
 use uniproc_protocol::meta_capnp::{self, ResponseStatus};
 use uniproc_protocol::windows_capnp::windows_agent;
 
-use crate::api::CommandResult;
+use crate::api::{Command, CommandResult};
 use crate::embedded::Embedded;
 use crate::rpc::mapping;
 
@@ -19,13 +19,10 @@ impl AgentImpl {
         Self { agent }
     }
 
-    /// Runs a blocking command on compio's pool; a panic in it is resumed here, not swallowed.
-    async fn command(
-        &self,
-        f: impl FnOnce(&Embedded) -> CommandResult + Send + 'static,
-    ) -> CommandResult {
+    /// Runs a command on compio's blocking pool; a panic in it is resumed here, not swallowed.
+    async fn run(&self, command: Command) -> CommandResult {
         let agent = self.agent.clone();
-        compio::runtime::spawn_blocking(move || f(&agent))
+        compio::runtime::spawn_blocking(move || agent.run(command))
             .await
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
@@ -56,14 +53,14 @@ fn name(params: capnp::text::Reader) -> Result<String, capnp::Error> {
 }
 
 macro_rules! service_method {
-    ($method:ident, $params:ident, $results:ident, $call:ident) => {
+    ($method:ident, $params:ident, $results:ident, $command:ident) => {
         async fn $method(
             self: Rc<Self>,
             params: windows_agent::$params,
             mut results: windows_agent::$results,
         ) -> Result<(), capnp::Error> {
-            let service_name = name(params.get()?.get_name()?)?;
-            let outcome = self.command(move |agent| agent.$call(&service_name)).await;
+            let name = name(params.get()?.get_name()?)?;
+            let outcome = self.run(Command::$command { name }).await;
             unconditional(results.get().init_meta());
             results.get().set_code(code(outcome));
             Ok(())
@@ -157,7 +154,7 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::KillResults,
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
-        let outcome = self.command(move |agent| agent.kill(pid)).await;
+        let outcome = self.run(Command::Kill { pid }).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -169,7 +166,7 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::SuspendResults,
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
-        let outcome = self.command(move |agent| agent.suspend(pid)).await;
+        let outcome = self.run(Command::Suspend { pid }).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -181,7 +178,7 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::ResumeResults,
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
-        let outcome = self.command(move |agent| agent.resume(pid)).await;
+        let outcome = self.run(Command::Resume { pid }).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -195,7 +192,7 @@ impl windows_agent::Server for AgentImpl {
         let params = params.get()?;
         let pid = params.get_pid();
         let priority = mapping::priority(params.get_priority()?);
-        let outcome = self.command(move |agent| agent.set_priority(pid, priority)).await;
+        let outcome = self.run(Command::SetPriority { pid, priority }).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -209,15 +206,15 @@ impl windows_agent::Server for AgentImpl {
         let params = params.get()?;
         let pid = params.get_pid();
         let mask = params.get_mask();
-        let outcome = self.command(move |agent| agent.set_affinity(pid, mask)).await;
+        let outcome = self.run(Command::SetAffinity { pid, mask }).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
     }
 
-    service_method!(service_start, ServiceStartParams, ServiceStartResults, service_start);
-    service_method!(service_stop, ServiceStopParams, ServiceStopResults, service_stop);
-    service_method!(service_pause, ServicePauseParams, ServicePauseResults, service_pause);
-    service_method!(service_resume, ServiceResumeParams, ServiceResumeResults, service_resume);
-    service_method!(service_restart, ServiceRestartParams, ServiceRestartResults, service_restart);
+    service_method!(service_start, ServiceStartParams, ServiceStartResults, ServiceStart);
+    service_method!(service_stop, ServiceStopParams, ServiceStopResults, ServiceStop);
+    service_method!(service_pause, ServicePauseParams, ServicePauseResults, ServicePause);
+    service_method!(service_resume, ServiceResumeParams, ServiceResumeResults, ServiceResume);
+    service_method!(service_restart, ServiceRestartParams, ServiceRestartResults, ServiceRestart);
 }

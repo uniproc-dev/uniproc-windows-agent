@@ -5,8 +5,7 @@ use windows::Win32::{
     SetProcessAffinityMask, TerminateProcess,
 };
 
-use crate::api::ProcessPriority;
-use crate::commands::Outcome;
+use crate::api::{CommandResult, ProcessPriority};
 use crate::commands::services::win32_code;
 use crate::win::open_process;
 
@@ -36,31 +35,31 @@ impl Drop for HandleGuard {
     }
 }
 
-pub fn kill(pid: u32) -> Outcome {
+pub fn kill(pid: u32) -> CommandResult {
     let handle = HandleGuard::open(PROCESS_TERMINATE, pid)?;
     unsafe { TerminateProcess(handle.0, 1) }.ok().map_err(|e| win32_code(&e))
 }
 
-pub fn suspend(pid: u32) -> Outcome {
+pub fn suspend(pid: u32) -> CommandResult {
     let handle = HandleGuard::open(PROCESS_SUSPEND_RESUME, pid)?;
     // NTSTATUS, not a Win32 code.
     let status = unsafe { ntapi::ntpsapi::NtSuspendProcess(handle.0.0 as _) };
     if status >= 0 { Ok(()) } else { Err(status as u32) }
 }
 
-pub fn resume(pid: u32) -> Outcome {
+pub fn resume(pid: u32) -> CommandResult {
     let handle = HandleGuard::open(PROCESS_SUSPEND_RESUME, pid)?;
     // NTSTATUS, not a Win32 code.
     let status = unsafe { ntapi::ntpsapi::NtResumeProcess(handle.0.0 as _) };
     if status >= 0 { Ok(()) } else { Err(status as u32) }
 }
 
-pub fn set_priority(pid: u32, priority: ProcessPriority) -> Outcome {
+pub fn set_priority(pid: u32, priority: ProcessPriority) -> CommandResult {
     let handle = HandleGuard::open(PROCESS_SET_INFORMATION, pid)?;
     unsafe { SetPriorityClass(handle.0, class(priority) as u32) }.ok().map_err(|e| win32_code(&e))
 }
 
-pub fn set_affinity(pid: u32, mask: u64) -> Outcome {
+pub fn set_affinity(pid: u32, mask: u64) -> CommandResult {
     let handle = HandleGuard::open(PROCESS_SET_INFORMATION, pid)?;
     unsafe { SetProcessAffinityMask(handle.0, mask as usize) }.ok().map_err(|e| win32_code(&e))
 }

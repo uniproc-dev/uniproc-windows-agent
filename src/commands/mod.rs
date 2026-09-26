@@ -1,5 +1,3 @@
-#[cfg(feature = "service")]
-pub mod cpu;
 pub mod process;
 pub mod services;
 mod vars;
@@ -9,11 +7,11 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::api::{Command, CommandResult};
 use crate::commands::services::{ScHandle, ScManager, ServiceAction};
 use crate::commands::vars::ERROR_BUSY;
 
-pub type Outcome = Result<(), u32>;
-
+/// Runs commands; holds the SCM connection and the services a command is running for.
 #[derive(Clone, Default)]
 pub struct Commands {
     state: Arc<Mutex<CommandState>>,
@@ -30,16 +28,28 @@ impl Commands {
         Self::default()
     }
 
-    /// Blocks until the SCM has taken the control; `ERROR_BUSY` while another one runs for the same service.
-    pub fn control_service(&self, name: &str, action: ServiceAction) -> Outcome {
-        let _guard = self.acquire(name)?;
-        services::control(self.scm()?, name, action)
+    /// Blocks until done; `ERROR_BUSY` while another command runs for the same service.
+    pub fn run(&self, command: Command) -> CommandResult {
+        match command {
+            Command::Kill { pid } => process::kill(pid),
+            Command::Suspend { pid } => process::suspend(pid),
+            Command::Resume { pid } => process::resume(pid),
+            Command::SetPriority { pid, priority } => process::set_priority(pid, priority),
+            Command::SetAffinity { pid, mask } => process::set_affinity(pid, mask),
+            Command::ServiceStart { name } => self.control(&name, ServiceAction::Start),
+            Command::ServiceStop { name } => self.control(&name, ServiceAction::Stop),
+            Command::ServicePause { name } => self.control(&name, ServiceAction::Pause),
+            Command::ServiceResume { name } => self.control(&name, ServiceAction::Resume),
+            Command::ServiceRestart { name } => {
+                let _guard = self.acquire(&name)?;
+                services::restart(self.scm()?, &name)
+            }
+        }
     }
 
-    /// Blocks until the service has stopped and been started again.
-    pub fn restart_service(&self, name: &str) -> Outcome {
+    fn control(&self, name: &str, action: ServiceAction) -> CommandResult {
         let _guard = self.acquire(name)?;
-        services::restart(self.scm()?, name)
+        services::control(self.scm()?, name, action)
     }
 
     fn scm(&self) -> Result<ScHandle, u32> {
