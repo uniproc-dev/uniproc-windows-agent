@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::state::SystemState;
 use crate::state::events::ProcessSignature;
@@ -13,6 +14,30 @@ pub struct Report {
     pub metrics: Vec<ProcessMetrics>,
     pub samples: Samples,
     pub dropped_by_sink: u64,
+    pub sessions: Vec<SessionHealth>,
+    pub taken_at: Instant,
+}
+
+/// One of the core's ETW sessions. Losses count from the session's start.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionHealth {
+    pub name: String,
+    /// ETW still has the session; false once someone stopped it from outside.
+    pub running: bool,
+    /// Its events are still being read.
+    pub pumping: bool,
+    pub events_lost: u32,
+    pub realtime_buffers_lost: u32,
+    pub log_buffers_lost: u32,
+    pub buffers_written: u32,
+    pub buffers: u32,
+    pub free_buffers: u32,
+}
+
+impl SessionHealth {
+    pub fn is_healthy(&self) -> bool {
+        self.running && self.pumping
+    }
 }
 
 /// Profile samples folded at the last machine snapshot.
@@ -100,7 +125,12 @@ pub struct ProcessMetrics {
 
 impl Report {
     /// The process list is taken from `previous` while its etag holds, not rebuilt.
-    pub(crate) fn build(state: &SystemState, previous: Option<&Report>, dropped_by_sink: u64) -> Self {
+    pub(crate) fn build(
+        state: &SystemState,
+        previous: Option<&Report>,
+        dropped_by_sink: u64,
+        sessions: Vec<SessionHealth>,
+    ) -> Self {
         let etag = state.processes_etag();
         let processes = match previous {
             Some(previous) if previous.processes.etag == etag => previous.processes.clone(),
@@ -120,6 +150,8 @@ impl Report {
                 idle,
             },
             dropped_by_sink,
+            sessions,
+            taken_at: Instant::now(),
         }
     }
 }
@@ -240,7 +272,7 @@ mod tests {
     #[test]
     fn metrics_are_in_kilobytes_and_cover_the_list() {
         let s = state();
-        let report = Report::build(&s, None, 0);
+        let report = Report::build(&s, None, 0, Vec::new());
         assert_eq!(report.processes.etag, s.processes_etag());
         assert_eq!(report.metrics.len(), report.processes.value.len());
         assert_eq!(report.metrics[0].working_set_kb, 8);
@@ -250,21 +282,21 @@ mod tests {
     #[test]
     fn an_unchanged_list_is_taken_from_the_previous_report() {
         let s = state();
-        let first = Report::build(&s, None, 0);
-        let again = Report::build(&s, Some(&first), 0);
+        let first = Report::build(&s, None, 0, Vec::new());
+        let again = Report::build(&s, Some(&first), 0, Vec::new());
         assert!(Arc::ptr_eq(&first.processes.value, &again.processes.value));
     }
 
     #[test]
     fn a_moved_tag_builds_the_list_again() {
         let mut s = state();
-        let first = Report::build(&s, None, 0);
+        let first = Report::build(&s, None, 0, Vec::new());
         s.apply(StateChange::ProcessStarted(Box::new(ProcessStarted {
             pid: 200,
             image_name: "b.exe".to_string(),
             ..Default::default()
         })));
-        let next = Report::build(&s, Some(&first), 0);
+        let next = Report::build(&s, Some(&first), 0, Vec::new());
         assert_ne!(next.processes.etag, first.processes.etag);
         assert_eq!(next.processes.value.len(), 2);
     }

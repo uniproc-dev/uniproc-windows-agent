@@ -106,7 +106,8 @@ impl Supervisor {
             self.rx = Some(rx);
         }
         let dropped = self.sink.as_ref().map_or(0, Sink::dropped);
-        let report = Arc::new(Report::build(&self.state, self.last.as_deref(), dropped));
+        let sessions = self.router.as_ref().map_or_else(Vec::new, KernelRouter::health);
+        let report = Arc::new(Report::build(&self.state, self.last.as_deref(), dropped, sessions));
         self.last = Some(report.clone());
         report
     }

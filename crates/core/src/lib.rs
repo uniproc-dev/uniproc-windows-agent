@@ -13,7 +13,9 @@ mod supervisor;
 mod tag;
 mod win;
 
-pub use report::{MachineStats, Process, ProcessMetrics, Report, Samples, SignatureStatus};
+pub use report::{
+    MachineStats, Process, ProcessMetrics, Report, Samples, SessionHealth, SignatureStatus,
+};
 pub use settings::CollectorSettings;
 pub use supervisor::{Supervisor, SupervisorConfig};
 pub use tag::{Epoch, Tagged};

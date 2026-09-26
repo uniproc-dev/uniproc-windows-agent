@@ -5,6 +5,7 @@ use std::io;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Request, State};
@@ -173,8 +174,58 @@ async fn snapshot(State(agent): State<Arc<Embedded>>) -> Json<Snapshot> {
     })
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": true }))
+/// The core reports at least once a second; a report older than this means it stalled.
+const STALE: Duration = Duration::from_secs(5);
+
+#[derive(Serialize)]
+struct Health {
+    ok: bool,
+    report_age_ms: Option<u64>,
+    dropped_by_sink: u64,
+    sessions: Vec<Session>,
+}
+
+#[derive(Serialize)]
+struct Session {
+    name: String,
+    running: bool,
+    pumping: bool,
+    events_lost: u32,
+    realtime_buffers_lost: u32,
+    log_buffers_lost: u32,
+    buffers_written: u32,
+    buffers: u32,
+    free_buffers: u32,
+}
+
+async fn health(State(agent): State<Arc<Embedded>>) -> (StatusCode, Json<Health>) {
+    let latest = agent.latest();
+    let age = latest.reported_at.map(|at| at.elapsed());
+    let ok = age.is_some_and(|age| age < STALE)
+        && !latest.sessions.is_empty()
+        && latest.sessions.iter().all(|s| s.is_healthy());
+    let health = Health {
+        ok,
+        report_age_ms: age.map(|age| age.as_millis() as u64),
+        dropped_by_sink: latest.dropped_by_sink,
+        sessions: latest
+            .sessions
+            .iter()
+            .map(|s| Session {
+                name: s.name.clone(),
+                running: s.running,
+                pumping: s.pumping,
+                events_lost: s.events_lost,
+                realtime_buffers_lost: s.realtime_buffers_lost,
+                log_buffers_lost: s.log_buffers_lost,
+                buffers_written: s.buffers_written,
+                buffers: s.buffers,
+                free_buffers: s.free_buffers,
+            })
+            .collect(),
+    };
+    let status = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (status, Json(health))
 }
 
 fn token() -> io::Result<String> {

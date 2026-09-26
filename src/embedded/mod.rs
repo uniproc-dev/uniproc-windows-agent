@@ -13,7 +13,7 @@ use crate::commands::Commands;
 use crate::feed::Feed;
 
 pub use crate::feed::Published;
-pub use uniproc_windows_core::Samples;
+pub use uniproc_windows_core::{Samples, SessionHealth};
 use crate::monitor::Monitor;
 use crate::profile;
 use crate::scm::{Inventory, Scm};

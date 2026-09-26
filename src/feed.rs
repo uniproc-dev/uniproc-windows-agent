@@ -1,8 +1,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
-use uniproc_windows_core::{Epoch, MachineStats, Process, Report, Samples, Tagged};
+use uniproc_windows_core::{
+    Epoch, MachineStats, Process, Report, Samples, SessionHealth, Tagged,
+};
 
 use crate::api::{ProcessInfo, ServiceStats, Snapshot};
 
@@ -14,6 +17,9 @@ pub struct Published {
     pub samples: Samples,
     /// Events the core lost to a full channel since it started.
     pub dropped_by_sink: u64,
+    pub sessions: Vec<SessionHealth>,
+    /// When the core took its report; None before the first.
+    pub reported_at: Option<Instant>,
 }
 
 /// The core's latest report joined with the latest service inventory,
@@ -136,6 +142,8 @@ impl Join {
             },
             samples: report.map_or_else(Samples::default, |r| r.samples),
             dropped_by_sink: report.map_or(0, |r| r.dropped_by_sink),
+            sessions: report.map_or_else(Vec::new, |r| r.sessions.clone()),
+            reported_at: report.map(|r| r.taken_at),
         }
     }
 }
@@ -186,6 +194,8 @@ mod tests {
                 .collect(),
             samples: Samples::default(),
             dropped_by_sink: 0,
+            sessions: Vec::new(),
+            taken_at: Instant::now(),
         })
     }
 

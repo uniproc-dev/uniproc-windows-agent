@@ -10,6 +10,7 @@ use windows::core::{GUID, w};
 use crate::etw::consumer::{EventSink, TraceConsumer};
 use crate::etw::session::{EtwSession, SessionMode};
 use crate::etw::vars::{KERNEL_SESSION_NAME, SESSION_NAME_PREFIX};
+use crate::report::SessionHealth;
 use crate::sink::Sink;
 use crate::state::events::StateChange;
 
@@ -270,7 +271,6 @@ impl EventSink for RouterCore {
 }
 
 pub struct KernelRouter {
-    #[allow(dead_code)] // held for Drop (StopTrace after the pumps are joined)
     sessions: Vec<EtwSession>,
     consumers: Vec<TraceConsumer>,
     pumps: Vec<JoinHandle<()>>,
@@ -290,6 +290,28 @@ impl KernelRouter {
             prefix: SESSION_NAME_PREFIX.to_string(),
             kernel_session: KERNEL_SESSION_NAME.to_string(),
         }
+    }
+
+    /// Each session as ETW sees it and whether its pump still reads it.
+    pub fn health(&self) -> Vec<SessionHealth> {
+        self.sessions
+            .iter()
+            .zip(&self.pumps)
+            .map(|(session, pump)| {
+                let counters = session.query();
+                SessionHealth {
+                    name: session.name().to_string(),
+                    running: counters.is_some(),
+                    pumping: !pump.is_finished(),
+                    events_lost: counters.map_or(0, |c| c.events_lost),
+                    realtime_buffers_lost: counters.map_or(0, |c| c.realtime_buffers_lost),
+                    log_buffers_lost: counters.map_or(0, |c| c.log_buffers_lost),
+                    buffers_written: counters.map_or(0, |c| c.buffers_written),
+                    buffers: counters.map_or(0, |c| c.buffers),
+                    free_buffers: counters.map_or(0, |c| c.free_buffers),
+                }
+            })
+            .collect()
     }
 }
 
@@ -399,6 +421,39 @@ pub(crate) mod tests {
 
         core.on_event(&event_at(CHATTY, 5_000, &payload));
         assert!(rx.try_recv().is_err(), "an empty batch sends nothing");
+    }
+
+    #[test]
+    #[ignore = "requires admin and a real ETW session"]
+    fn a_session_stopped_from_outside_shows_in_the_health() {
+        let (sink, _rx) = Sink::bounded(1024);
+        let mut builder = KernelRouter::builder();
+        builder
+            .session_namespace("Uniproc-HealthTest-")
+            .manifest(KERNEL_PROCESS_PROVIDER)
+            .on(&[KERNEL_PROCESS_PROVIDER], |_, _| None);
+        let router = builder.start(sink).expect("router start");
+
+        let health = router.health();
+        assert_eq!(health.len(), 1);
+        assert!(health[0].is_healthy(), "{health:?}");
+        assert_eq!(health[0].name, manifest_session_name_in("Uniproc-HealthTest-", &KERNEL_PROCESS_PROVIDER));
+
+        let stopped = std::process::Command::new("logman")
+            .args(["stop", &health[0].name, "-ets"])
+            .output()
+            .expect("logman stop");
+        assert!(stopped.status.success(), "{stopped:?}");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut after = router.health();
+        while (after[0].running || after[0].pumping) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            after = router.health();
+        }
+        assert!(!after[0].running, "ETW no longer has it: {after:?}");
+        assert!(!after[0].pumping, "its pump has ended: {after:?}");
+        drop(router);
     }
 
     #[test]

@@ -3,10 +3,11 @@ use std::mem::size_of;
 use anyhow::{Result, bail};
 use tracing::{info, warn};
 use windows::Win32::{
-    CONTROLTRACE_ID, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION_2,
+    CONTROLTRACE_ID, ControlTraceW, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION_2,
     ERROR_ALREADY_EXISTS, ERROR_SUCCESS, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-    EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, EVENT_TRACE_SYSTEM_LOGGER_MODE,
-    EnableTraceEx2, StartTraceW, StopTraceW, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
+    EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
+    EVENT_TRACE_SYSTEM_LOGGER_MODE, EnableTraceEx2, StartTraceW, StopTraceW,
+    TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
 };
 use windows::core::{GUID, PCWSTR};
 
@@ -39,6 +40,41 @@ impl EtwSession {
     pub fn enable(&self, guid: &GUID) -> Result<()> {
         enable_provider(self.handle, guid)
     }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// What ETW says about the session now; None when ETW no longer has it.
+    pub fn query(&self) -> Option<SessionCounters> {
+        let size = size_of::<EVENT_TRACE_PROPERTIES>() + 2048;
+        let mut buf = AlignedBuf::zeroed(size);
+        let props = unsafe { &mut *(buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES) };
+        props.Wnode.BufferSize = size as u32;
+        props.LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+        props.LogFileNameOffset = (size_of::<EVENT_TRACE_PROPERTIES>() + 1024) as u32;
+        let status = unsafe {
+            ControlTraceW(self.handle, PCWSTR::null(), props, EVENT_TRACE_CONTROL_QUERY as u32)
+        };
+        (status == ERROR_SUCCESS as u32).then(|| SessionCounters {
+            events_lost: props.EventsLost,
+            realtime_buffers_lost: props.RealTimeBuffersLost,
+            log_buffers_lost: props.LogBuffersLost,
+            buffers_written: props.BuffersWritten,
+            buffers: props.NumberOfBuffers,
+            free_buffers: props.FreeBuffers,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionCounters {
+    pub events_lost: u32,
+    pub realtime_buffers_lost: u32,
+    pub log_buffers_lost: u32,
+    pub buffers_written: u32,
+    pub buffers: u32,
+    pub free_buffers: u32,
 }
 
 impl Drop for EtwSession {
@@ -122,8 +158,7 @@ unsafe fn build_props(
 mod tests {
     use super::*;
     use windows::Win32::{
-        ControlTraceW, EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_FLAG_DISK_IO,
-        EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROFILE,
+        EVENT_TRACE_FLAG_DISK_IO, EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROFILE,
     };
 
     fn enabled_flags(name: &str) -> u32 {
