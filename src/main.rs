@@ -1,28 +1,8 @@
-#![allow(unsafe_op_in_unsafe_fn)]
-#![allow(non_snake_case, non_camel_case_types)]
-
-mod aligned;
-mod commands;
-pub mod etw;
-mod http;
-mod privileges;
-mod logger;
-mod monitor;
-mod providers;
-mod rpc;
-mod service;
-mod settings;
-mod sink;
-mod state;
-mod supervisor;
-mod win;
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
+use uniproc_windows_agent::api::{SERVICE_DISPLAY_NAME, SERVICE_NAME};
 
-const SERVICE_NAME: &str = "UniprocProcessMonitor";
-const SERVICE_DISPLAY: &str = "Uniproc Process Monitor";
 const SERVICE_DESC: &str = "Provides system monitoring (processes, disk I/O, network, CPU) \
                                and exposes control primitives for process and Windows management \
                                on behalf of the Uniproc application";
@@ -67,24 +47,25 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Install) => {
-            service::install(SERVICE_NAME, SERVICE_DISPLAY, SERVICE_DESC)
+            uniproc_windows_agent::install(SERVICE_NAME, SERVICE_DISPLAY_NAME, SERVICE_DESC)
                 .context("Failed to install service")?;
             info!("[+] Service installed successfully.");
         }
         Some(Command::Uninstall) => {
-            service::uninstall(SERVICE_NAME).context("Failed to uninstall service")?;
+            uniproc_windows_agent::uninstall(SERVICE_NAME)
+                .context("Failed to uninstall service")?;
             info!("[+] Service uninstalled successfully.");
         }
         Some(Command::Run) => {
-            logger::init_console();
-            service::run_direct()?;
+            uniproc_windows_agent::init_console();
+            uniproc_windows_agent::run_direct()?;
         }
         Some(Command::Cpu { iterations, top }) => {
-            logger::init_console();
-            commands::cpu::run(iterations, top)?;
+            uniproc_windows_agent::init_console();
+            uniproc_windows_agent::print_cpu(iterations, top)?;
         }
         None => {
-            service::run_as_service(SERVICE_NAME)?;
+            uniproc_windows_agent::run_as_service(SERVICE_NAME)?;
         }
     }
 
