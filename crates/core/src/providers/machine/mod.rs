@@ -14,6 +14,8 @@ use crate::providers::provider::{LivePids, Provider};
 use crate::sink::Sink;
 use crate::state::events::StateChange;
 
+const FIRST_SAMPLE_WAIT: Duration = Duration::from_secs(2);
+
 pub struct MachineProvider {
     running: Arc<AtomicBool>,
     interval_ms: Arc<AtomicU64>,
@@ -42,6 +44,7 @@ impl Provider for MachineProvider {
 
         let running = self.running.clone();
         let interval_ms = self.interval_ms.clone();
+        let (sampled, first) = std::sync::mpsc::sync_channel(1);
 
         std::thread::Builder::new()
             .name("machine-poller".into())
@@ -55,6 +58,7 @@ impl Provider for MachineProvider {
                         pdh.as_mut(),
                         &mut power_info,
                     ))));
+                    let _ = sampled.try_send(());
                     let ms = interval_ms.load(Ordering::Relaxed);
                     crate::settings::park_while(
                         &running,
@@ -64,6 +68,7 @@ impl Provider for MachineProvider {
             })
             .expect("failed to spawn machine-poller");
 
+        let _ = first.recv_timeout(FIRST_SAMPLE_WAIT);
         Ok(())
     }
 
