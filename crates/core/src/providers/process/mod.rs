@@ -5,13 +5,11 @@ mod vars;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Instant;
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
-use crate::commands::services::ScManager;
 use crate::etw::router::KernelRouterBuilder;
 use crate::etw::signatures::utils::parse;
 use crate::providers::process::events::{ProcessStartV4Header, ProcessStopData, ThreadTypeGroup1};
@@ -19,9 +17,8 @@ use crate::providers::process::vars::*;
 use crate::providers::provider::{LivePids, Provider};
 use crate::providers::display_name;
 use crate::providers::utils::{
-    check_signature, enum_services, is_windows_process, query_service_config,
-    get_process_package_info, parse_cmd_line, query_command_line, query_console_host_pid,
-    query_image_path,
+    check_signature, get_process_package_info, is_windows_process, parse_cmd_line,
+    query_command_line, query_console_host_pid, query_image_path,
 };
 use crate::sink::Sink;
 use crate::state::events::{ProcessEnriched, ProcessSignature, ProcessStarted, StateChange};
@@ -36,34 +33,21 @@ pub use vars::KERNEL_PROCESS_PROVIDER;
 pub struct KernelProcessProvider {
     tx: Sender<u32>,
     rx: Receiver<u32>,
-    signature_store: &'static str,
+    signature_store: String,
     running: Arc<AtomicBool>,
-    worker: Mutex<Vec<JoinHandle<()>>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl KernelProcessProvider {
-    pub fn new() -> Self {
-        Self::with_queue(crossbeam_channel::unbounded(), crate::providers::SERVICE.signature_store)
-    }
-
     /// Shared enrichment queue: bootstrap also feeds pids into it.
-    pub fn with_queue(
-        (tx, rx): (Sender<u32>, Receiver<u32>),
-        signature_store: &'static str,
-    ) -> Self {
+    pub fn with_queue((tx, rx): (Sender<u32>, Receiver<u32>), signature_store: String) -> Self {
         Self {
             tx,
             rx,
             signature_store,
             running: Arc::new(AtomicBool::new(false)),
-            worker: Mutex::new(Vec::new()),
+            worker: Mutex::new(None),
         }
-    }
-}
-
-impl Default for KernelProcessProvider {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -256,70 +240,28 @@ impl Provider for KernelProcessProvider {
         }
         let rx = self.rx.clone();
 
-        let persisted = signature_cache::open(self.signature_store);
-        let mut handles = Vec::with_capacity(2);
-
-        {
-            let running = self.running.clone();
-            let sink = sink.clone();
-
-            handles.push(
-                std::thread::Builder::new()
-                    .name("process-enrich".into())
-                    .spawn(move || {
-                        while let Ok(pid) = rx.recv() {
-                            if !running.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            sink.emit(StateChange::ProcessEnriched(Box::new(enrich(
-                                pid, &persisted,
-                            ))));
-                        }
-                    })?,
-            );
-        }
-
+        let persisted = signature_cache::open(&self.signature_store);
         let running = self.running.clone();
-        handles.push(
-            std::thread::Builder::new()
-                .name("service-inventory".into())
-                .spawn(move || {
-                    let scm = ScManager::open().ok();
-                    let mut services_buf = Vec::new();
-                    let mut config_cache: std::collections::HashMap<String, _> =
-                        std::collections::HashMap::new();
-
-                    while running.load(Ordering::Relaxed) {
-                        if let Some(scm) = &scm {
-                            let mut services = enum_services(scm.handle(), &mut services_buf);
-                            for svc in &mut services {
-                                let config =
-                                    config_cache.entry(svc.name.clone()).or_insert_with(|| {
-                                        query_service_config(scm.handle(), &svc.name)
-                                    });
-                                svc.load_group = config.load_group.clone();
-                                svc.description = config.description.clone();
-                                svc.image_path = config.image_path.clone();
-                            }
-                            config_cache
-                                .retain(|name, _| services.iter().any(|s| &s.name == name));
-                            sink.emit(StateChange::ServicesSnapshot(services));
-                        }
-                        crate::settings::park_while(&running, Instant::now() + INVENTORY_INTERVAL);
+        let worker = std::thread::Builder::new()
+            .name("process-enrich".into())
+            .spawn(move || {
+                while let Ok(pid) = rx.recv() {
+                    if !running.load(Ordering::Relaxed) {
+                        break;
                     }
-                })?,
-        );
+                    sink.emit(StateChange::ProcessEnriched(Box::new(enrich(pid, &persisted))));
+                }
+            })?;
 
-        *self.worker.lock() = handles;
+        *self.worker.lock() = Some(worker);
         Ok(())
     }
 
     fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         let _ = self.tx.send(WAKE_PID);
-        for handle in self.worker.lock().drain(..) {
-            handle.thread().unpark();
-            let _ = handle.join();
+        if let Some(worker) = self.worker.lock().take() {
+            let _ = worker.join();
         }
     }
 }
@@ -344,7 +286,7 @@ mod tests {
 
         let (sink, rx) = Sink::bounded(1024);
         let mut builder = KernelRouter::builder();
-        KernelProcessProvider::new()
+        KernelProcessProvider::with_queue(crossbeam_channel::unbounded(), String::new())
             .register(&mut builder)
             .unwrap();
         let router = builder.start(sink).expect("router start");

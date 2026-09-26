@@ -1,19 +1,22 @@
-mod snapshot;
-
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use uniproc_windows_core::{CollectorSettings, SupervisorConfig};
 
 use crate::api::{
     Command, CommandResult, MachineStats, ProcessInfo, ProcessMetricsSnapshot, ServiceStats,
     Snapshot, Tagged,
 };
 use crate::commands::Commands;
+use crate::feed::Feed;
+
+pub use crate::feed::Published;
+pub use uniproc_windows_core::Samples;
 use crate::monitor::Monitor;
-use crate::providers::{EMBEDDED, supervisor};
-use crate::settings::ATTACHED_MEMORY_INTERVAL_MS;
+use crate::profile;
+use crate::scm::{Inventory, Scm};
 
 #[derive(Debug)]
 pub enum StartError {
@@ -38,10 +41,10 @@ impl std::error::Error for StartError {}
 /// signature store are its own, so it runs beside the service without
 /// touching it. Monitoring stops when this is dropped.
 pub struct Embedded {
-    monitor: Monitor,
+    feed: Arc<Feed>,
+    settings: CollectorSettings,
     commands: Commands,
-    processes: Mutex<Option<Tagged<Arc<[ProcessInfo]>>>>,
-    services: Mutex<Option<Tagged<Arc<[ServiceStats]>>>>,
+    running: Mutex<Option<(Monitor, Inventory)>>,
 }
 
 impl Embedded {
@@ -50,91 +53,81 @@ impl Embedded {
         if !crate::privileges::is_elevated().map_err(StartError::Failed)? {
             return Err(StartError::NotElevated);
         }
-        let monitor = Monitor::start(supervisor(&EMBEDDED)).map_err(StartError::Failed)?;
-        monitor
-            .settings()
-            .set_memory_interval(Duration::from_millis(ATTACHED_MEMORY_INTERVAL_MS));
-        Ok(Self::from_monitor(monitor))
+        let agent = Self::launch(profile::embedded()).map_err(StartError::Failed)?;
+        agent.set_memory_interval(profile::ATTACHED_MEMORY_INTERVAL);
+        Ok(agent)
     }
 
-    pub(crate) fn from_monitor(monitor: Monitor) -> Self {
-        Self {
-            monitor,
-            commands: Commands::new(),
-            processes: Mutex::new(None),
-            services: Mutex::new(None),
-        }
-    }
-
-    #[cfg(feature = "service")]
-    pub(crate) fn monitor(&self) -> &Monitor {
-        &self.monitor
-    }
-
-    /// Everything under one lock, so the metrics always join the process list.
-    pub fn snapshot(&self) -> Snapshot {
-        self.monitor.read(|state| Snapshot {
-            machine: snapshot::machine(state),
-            services: cached(&self.services, state.services_etag(), || snapshot::services(state)),
-            processes: cached(&self.processes, state.processes_etag(), || {
-                snapshot::processes(state)
-            }),
-            metrics: snapshot::process_metrics(state).metrics,
+    pub(crate) fn launch(config: SupervisorConfig) -> anyhow::Result<Self> {
+        let feed = Arc::new(Feed::new());
+        let settings = CollectorSettings::default();
+        let monitor = Monitor::start(config, settings.clone(), {
+            let feed = feed.clone();
+            move |report| feed.report(report)
+        })?;
+        let scm = Scm::new();
+        let inventory = Inventory::start(scm.clone(), {
+            let feed = feed.clone();
+            move |services| feed.services(services)
+        })?;
+        Ok(Self {
+            feed,
+            settings,
+            commands: Commands::new(scm),
+            running: Mutex::new(Some((monitor, inventory))),
         })
     }
 
+    /// Stops monitoring while others still hold the agent; reads after it see the last report.
+    pub fn stop(&self) {
+        self.running.lock().take();
+    }
+
+    /// The latest snapshot with what the core says about itself.
+    pub fn latest(&self) -> Arc<Published> {
+        self.feed.latest()
+    }
+
+    /// The metrics always join the process list.
+    pub fn snapshot(&self) -> Snapshot {
+        self.latest().snapshot.clone()
+    }
+
     pub fn machine(&self) -> MachineStats {
-        self.monitor.read(snapshot::machine)
+        self.latest().snapshot.machine.clone()
     }
 
     /// The same `Arc` for as long as the tag holds.
     pub fn processes(&self) -> Tagged<Arc<[ProcessInfo]>> {
-        self.monitor.read(|state| {
-            cached(&self.processes, state.processes_etag(), || snapshot::processes(state))
-        })
+        self.latest().snapshot.processes.clone()
     }
 
-    /// Always fresh; a `processes_etag` other than the one held means the list must be read again before joining by pid.
+    /// A `processes_etag` other than the one held means the list must be read again before joining by pid.
     pub fn process_metrics(&self) -> ProcessMetricsSnapshot {
-        self.monitor.read(snapshot::process_metrics)
+        let latest = self.latest();
+        ProcessMetricsSnapshot {
+            processes_etag: latest.snapshot.processes.etag,
+            metrics: latest.snapshot.metrics.clone(),
+        }
     }
 
     /// The same `Arc` for as long as the tag holds.
     pub fn services(&self) -> Tagged<Arc<[ServiceStats]>> {
-        self.monitor.read(|state| {
-            cached(&self.services, state.services_etag(), || snapshot::services(state))
-        })
+        self.latest().snapshot.services.clone()
     }
 
     pub fn set_memory_interval(&self, interval: Duration) {
-        self.monitor.settings().set_memory_interval(interval);
+        self.settings.set_memory_interval(interval);
     }
 
     pub fn set_cpu_interval(&self, interval: Duration) {
-        self.monitor.settings().set_cpu_interval(interval);
+        self.settings.set_cpu_interval(interval);
     }
 
     /// Blocks for as long as the command takes; a service restart up to half a minute.
     pub fn run(&self, command: Command) -> CommandResult {
         self.commands.run(command)
     }
-}
-
-fn cached<T: ?Sized>(
-    slot: &Mutex<Option<Tagged<Arc<T>>>>,
-    etag: u64,
-    build: impl FnOnce() -> Arc<T>,
-) -> Tagged<Arc<T>> {
-    let mut slot = slot.lock();
-    if let Some(hit) = slot.as_ref().filter(|held| held.etag == etag) {
-        return hit.clone();
-    }
-    let fresh = Tagged {
-        etag,
-        value: build(),
-    };
-    *slot = Some(fresh.clone());
-    fresh
 }
 
 #[cfg(test)]
@@ -148,28 +141,8 @@ mod tests {
     }
 
     #[test]
-    fn an_unchanged_tag_hands_back_the_same_list() {
-        let slot: Mutex<Option<Tagged<Arc<[u32]>>>> = Mutex::new(None);
-        let first = cached(&slot, 7, || Arc::from([1u32, 2]));
-        let again = cached(&slot, 7, || unreachable!("the tag has not moved"));
-        assert!(Arc::ptr_eq(&first.value, &again.value));
-    }
-
-    #[test]
-    fn a_new_tag_builds_the_list_again() {
-        let slot: Mutex<Option<Tagged<Arc<[u32]>>>> = Mutex::new(None);
-        let first = cached(&slot, 7, || Arc::from([1u32]));
-        let next = cached(&slot, 8, || Arc::from([1u32, 2]));
-        assert!(!Arc::ptr_eq(&first.value, &next.value));
-        assert_eq!((next.etag, next.value.len()), (8, 2));
-    }
-
-    #[test]
     #[ignore = "requires admin and a real ETW session"]
     fn an_elevated_process_sees_the_machine() {
-        let _guard = crate::etw::router::tests::ETW_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let agent = Embedded::start().expect("elevated");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -190,5 +163,6 @@ mod tests {
         let machine = agent.machine();
         assert!(machine.total_physical_kb > 0);
         assert!(!agent.services().value.is_empty());
+        assert!(agent.processes().value.iter().any(|p| p.is_service));
     }
 }

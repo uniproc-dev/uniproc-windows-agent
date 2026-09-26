@@ -26,13 +26,6 @@ enum Command {
     Uninstall,
     /// Run directly in the console
     Run,
-    /// Print the cpu breakdown and the top consumers, once a second
-    Cpu {
-        #[arg(long, default_value_t = 5)]
-        iterations: u32,
-        #[arg(long, default_value_t = 10)]
-        top: usize,
-    },
 }
 
 #[cfg(debug_assertions)]
@@ -59,10 +52,6 @@ fn main() -> Result<()> {
         Some(Command::Run) => {
             uniproc_windows_agent::init_console();
             uniproc_windows_agent::run_direct()?;
-        }
-        Some(Command::Cpu { iterations, top }) => {
-            uniproc_windows_agent::init_console();
-            uniproc_windows_agent::print_cpu(iterations, top)?;
         }
         None => {
             uniproc_windows_agent::run_as_service(SERVICE_NAME)?;

@@ -6,8 +6,7 @@ use windows::Win32::{
 };
 
 use crate::api::{CommandResult, ProcessPriority};
-use crate::commands::services::win32_code;
-use crate::win::open_process;
+use crate::win::{open_process, win32_code};
 
 fn class(priority: ProcessPriority) -> i32 {
     match priority {

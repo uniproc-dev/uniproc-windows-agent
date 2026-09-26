@@ -34,19 +34,25 @@ impl Sink {
         )
     }
 
-    /// The thread that drains the channel between requests; it is woken as
-    /// soon as a process starts or the channel is half full, instead of
+    /// The thread that drains the channel; it is woken by every change a
+    /// report shows at once, and when the channel is half full, instead of
     /// waiting for its period.
     pub fn set_drainer(&self, thread: Thread) {
         let _ = self.drainer.set(thread);
     }
 
     pub fn emit(&self, change: StateChange) {
-        let started = matches!(change, StateChange::ProcessStarted(_));
+        let reported = matches!(
+            change,
+            StateChange::ProcessStarted(_)
+                | StateChange::ProcessEnriched(_)
+                | StateChange::Machine(_)
+                | StateChange::Memory(_)
+        );
         if self.tx.try_send(change).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
-        if (started || self.tx.len() >= self.high_water)
+        if (reported || self.tx.len() >= self.high_water)
             && let Some(drainer) = self.drainer.get()
         {
             drainer.unpark();

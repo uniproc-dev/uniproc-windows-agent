@@ -1,9 +1,5 @@
-//! A read-only window into what the agent holds.
-//!
-//! The RPC report says what a client is meant to see; this says what the
-//! state actually contains, which is what tells a wrong report from an empty
-//! one. Serving it costs one thread with its own tokio runtime - the capnp
-//! side keeps compio and the two share nothing but the state behind its lock.
+//! A read-only window into what the agent publishes, for people rather than clients.
+//! One thread with its own tokio runtime; it shares nothing with the capnp side but the feed.
 
 use std::io;
 use std::net::{SocketAddr, TcpListener};
@@ -16,11 +12,9 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::monitor::SharedSupervisor;
-use crate::state::SystemState;
+use crate::embedded::Embedded;
 
 /// Where it listens unless `UNIPROC_AGENT_HTTP` says otherwise; any free port
 /// when this one is taken.
@@ -52,19 +46,15 @@ impl Access {
     }
 }
 
-#[derive(Clone)]
-struct Api {
-    state: Arc<Mutex<SystemState>>,
-    supervisor: SharedSupervisor,
-}
-
 #[derive(Serialize)]
 struct Snapshot {
     processes: usize,
     services: usize,
+    processes_etag: u64,
+    services_etag: u64,
     dropped_by_sink: u64,
     samples: Samples,
-    machine: Option<Machine>,
+    machine: Machine,
     totals: Totals,
     rows: Vec<Row>,
 }
@@ -106,78 +96,62 @@ struct Row {
     display_name: String,
     image_path: String,
     cmdline_args: usize,
-    cpu_percent: f64,
+    cpu_percent: f32,
     working_set_kb: u64,
     private_bytes_kb: u64,
-    memory_age_ms: Option<u64>,
     disk_read_bytes: u64,
     disk_write_bytes: u64,
     net_rx_bytes: u64,
     net_tx_bytes: u64,
-    exited: bool,
     is_service: bool,
     is_kernel_process: bool,
     is_windows_process: bool,
     signature: String,
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+async fn snapshot(State(agent): State<Arc<Embedded>>) -> Json<Snapshot> {
+    let latest = agent.latest();
+    let s = &latest.snapshot;
+    let m = &s.machine;
 
-async fn snapshot(State(api): State<Api>) -> Json<Snapshot> {
-    // Lock order matters: the tick thread holds the supervisor while it takes
-    // the state, so this reads the supervisor first and lets it go before
-    // taking the state. Nesting them the other way round would deadlock.
-    let dropped_by_sink = {
-        let mut supervisor = api.supervisor.lock();
-        supervisor.tick();
-        supervisor.dropped()
-    };
-
-    let state = api.state.lock();
-    let now = now_ms();
-    let (attributed, unattributed, idle) = state.sample_counts();
-
-    let rows = state
-        .entries()
-        .map(|e| Row {
-            pid: e.pid,
-            parent_pid: e.parent_pid,
-            name: e.image_name.clone(),
-            display_name: e.display_name.clone(),
-            image_path: e.image_path.clone(),
-            cmdline_args: e.command_line.len(),
-            cpu_percent: e.cpu.total_percent,
-            working_set_kb: e.memory.as_ref().map(|m| m.working_set_bytes / 1024).unwrap_or(0),
-            private_bytes_kb: e.memory.as_ref().map(|m| m.private_bytes / 1024).unwrap_or(0),
-            memory_age_ms: e.memory.as_ref().map(|m| now.saturating_sub(m.timestamp_ms)),
-            disk_read_bytes: e.disk.read_bytes,
-            disk_write_bytes: e.disk.write_bytes,
-            net_rx_bytes: e.network.recv_bytes,
-            net_tx_bytes: e.network.sent_bytes,
-            exited: e.exited,
-            is_service: state.is_service(e.pid),
-            is_kernel_process: e.is_kernel_process,
-            is_windows_process: e.is_windows_process,
-            signature: format!("{:?}", e.signature),
+    let rows = s
+        .processes
+        .value
+        .iter()
+        .zip(&s.metrics)
+        .map(|(p, metrics)| Row {
+            pid: p.pid,
+            parent_pid: p.parent_pid,
+            name: p.name.clone(),
+            display_name: p.display_name.clone(),
+            image_path: p.image_path.clone(),
+            cmdline_args: p.cmdline.len(),
+            cpu_percent: metrics.cpu_percent,
+            working_set_kb: metrics.working_set_kb,
+            private_bytes_kb: metrics.private_bytes_kb,
+            disk_read_bytes: metrics.disk_read_bytes,
+            disk_write_bytes: metrics.disk_write_bytes,
+            net_rx_bytes: metrics.net_rx_bytes,
+            net_tx_bytes: metrics.net_tx_bytes,
+            is_service: p.is_service,
+            is_kernel_process: p.is_kernel_process,
+            is_windows_process: p.is_windows_process,
+            signature: format!("{:?}", p.signature),
         })
         .collect();
 
-    let totals = state.machine_totals();
-    let snapshot = Snapshot {
-        processes: state.len(),
-        services: state.services().len(),
-        dropped_by_sink,
+    Json(Snapshot {
+        processes: s.processes.value.len(),
+        services: s.services.value.len(),
+        processes_etag: s.processes.etag,
+        services_etag: s.services.etag,
+        dropped_by_sink: latest.dropped_by_sink,
         samples: Samples {
-            attributed,
-            unattributed,
-            idle,
+            attributed: latest.samples.attributed,
+            unattributed: latest.samples.unattributed,
+            idle: latest.samples.idle,
         },
-        machine: state.machine().map(|m| Machine {
+        machine: Machine {
             total_physical_kb: m.total_physical_kb,
             available_physical_kb: m.available_physical_kb,
             used_physical_kb: m.used_physical_kb,
@@ -186,20 +160,17 @@ async fn snapshot(State(api): State<Api>) -> Json<Snapshot> {
             cpu_current_mhz: m.cpu_current_mhz,
             cpu_interrupt_percent: m.cpu_interrupt_percent,
             cpu_dpc_percent: m.cpu_dpc_percent,
-        }),
+        },
         totals: Totals {
-            disk_read_bytes: totals.disk_read_bytes,
-            disk_write_bytes: totals.disk_write_bytes,
-            disk_read_ops: totals.disk_read_ops,
-            disk_write_ops: totals.disk_write_ops,
-            net_rx_bytes: totals.net_rx_bytes,
-            net_tx_bytes: totals.net_tx_bytes,
+            disk_read_bytes: m.disk_read_bytes,
+            disk_write_bytes: m.disk_write_bytes,
+            disk_read_ops: m.disk_read_iops,
+            disk_write_ops: m.disk_write_iops,
+            net_rx_bytes: m.net_rx_bytes,
+            net_tx_bytes: m.net_tx_bytes,
         },
         rows,
-    };
-    drop(state);
-
-    Json(snapshot)
+    })
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -233,7 +204,7 @@ async fn authorized(expected: Arc<str>, request: Request, next: Next) -> Respons
     next.run(request).await
 }
 
-pub fn serve(state: Arc<Mutex<SystemState>>, supervisor: SharedSupervisor) -> io::Result<Access> {
+pub fn serve(agent: Arc<Embedded>) -> io::Result<Access> {
     let (listener, addr) = bind()?;
     listener.set_nonblocking(true)?;
 
@@ -250,7 +221,7 @@ pub fn serve(state: Arc<Mutex<SystemState>>, supervisor: SharedSupervisor) -> io
         .layer(axum::middleware::from_fn(move |request, next| {
             authorized(expected.clone(), request, next)
         }))
-        .with_state(Api { state, supervisor });
+        .with_state(agent);
 
     std::thread::Builder::new()
         .name("agent-http".into())

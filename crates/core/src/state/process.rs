@@ -179,7 +179,6 @@ impl ProcessTable {
                 entry.console_host_pid = e.console_host_pid;
                 self.passport_changed();
             }
-            StateChange::ServicesSnapshot(_) => {}
             StateChange::ProcessStopped(pid) => {
                 if let Some(entry) = self.processes.get_mut(&pid) {
                     entry.exited = true;
@@ -291,12 +290,9 @@ impl ProcessTable {
         self.recently_stopped.clear();
     }
 
-    #[cfg(feature = "service")]
     pub fn sample_counts(&self) -> (u64, u64, u64) {
         self.last_fold
     }
-
-
 
     fn resolve_pid(&self, tid: u32, pid_hint: u32) -> Option<u32> {
         self.tid_to_pid
@@ -314,11 +310,6 @@ impl ProcessTable {
     #[cfg(test)]
     pub fn get(&self, pid: u32) -> Option<&ProcessEntry> {
         self.processes.get(&pid)
-    }
-
-    #[cfg(feature = "service")]
-    pub fn len(&self) -> usize {
-        self.processes.len()
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &ProcessEntry> {

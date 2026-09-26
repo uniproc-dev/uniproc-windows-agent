@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 
 pub const DEFAULT_INTERVAL_MS: u64 = 1000;
-pub const ATTACHED_MEMORY_INTERVAL_MS: u64 = 1000;
 pub const IDLE_MEMORY_INTERVAL_MS: u64 = 2000;
 
 /// The shortest gap between two reactions to process starts, in the

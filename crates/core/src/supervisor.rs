@@ -1,35 +1,32 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use crossbeam_channel::Receiver;
 use dashmap::DashMap;
-use parking_lot::Mutex;
 
 use crate::etw::router::KernelRouter;
 use crate::providers::provider::{LivePids, Provider};
+use crate::report::Report;
 use crate::settings::CollectorSettings;
 use crate::sink::Sink;
 use crate::state::SystemState;
 use crate::state::events::StateChange;
 
+/// What one running core names on the machine. Two cores with different
+/// configs do not touch each other; a second one with the same config takes
+/// the first one's sessions.
+#[derive(Clone, Debug)]
 pub struct SupervisorConfig {
-    pub tick_interval: Duration,
+    /// Prefix of its ETW sessions' names; None for the plain names.
     pub session_namespace: Option<String>,
+    /// Name of the store signature verdicts persist in.
+    pub signature_store: String,
 }
 
-impl Default for SupervisorConfig {
-    fn default() -> Self {
-        Self {
-            tick_interval: Duration::from_secs(1),
-            session_namespace: None,
-        }
-    }
-}
-
+/// Owns the machine's state; the providers feed it and every tick reports on it.
 pub struct Supervisor {
     providers: Vec<Box<dyn Provider>>,
-    state: Arc<Mutex<SystemState>>,
+    state: SystemState,
     live_pids: LivePids,
     starts: u64,
     fresh_starts: bool,
@@ -38,18 +35,17 @@ pub struct Supervisor {
     rx: Option<Receiver<StateChange>>,
     config: SupervisorConfig,
     settings: CollectorSettings,
+    last: Option<Arc<Report>>,
     running: bool,
 }
 
 impl Supervisor {
-    pub fn new(
-        providers: Vec<Box<dyn Provider>>,
-        config: SupervisorConfig,
-        settings: CollectorSettings,
-    ) -> Self {
+    /// Nothing runs until [`start`](Self::start); `settings` stay live, the
+    /// caller keeps a clone to change the intervals.
+    pub fn new(config: SupervisorConfig, settings: CollectorSettings) -> Self {
         Self {
-            providers,
-            state: Arc::new(Mutex::new(SystemState::new())),
+            providers: crate::providers::all(config.signature_store.clone(), &settings),
+            state: SystemState::new(),
             live_pids: Arc::new(DashMap::new()),
             starts: 0,
             fresh_starts: false,
@@ -58,35 +54,20 @@ impl Supervisor {
             rx: None,
             config,
             settings,
+            last: None,
             running: false,
         }
     }
 
-    #[cfg(feature = "service")]
-    pub fn dropped(&self) -> u64 {
-        self.sink.as_ref().map(|s| s.dropped()).unwrap_or(0)
-    }
-
-    pub fn set_drainer(&self, thread: std::thread::Thread) {
-        if let Some(sink) = &self.sink {
-            sink.set_drainer(thread);
-        }
-    }
-
-    pub fn state(&self) -> Arc<Mutex<SystemState>> {
-        self.state.clone()
-    }
-
-    pub fn settings(&self) -> CollectorSettings {
-        self.settings.clone()
-    }
-
-    pub fn tick_interval(&self) -> Duration {
-        self.config.tick_interval
-    }
-
+    /// Starts the sessions and providers. The calling thread is the one woken
+    /// to tick when events pile up, so it should be the one that ticks.
     pub fn start(&mut self) -> Result<()> {
+        if let Err(error) = crate::privileges::enable(windows::core::w!("SeDebugPrivilege")) {
+            tracing::warn!(%error, "running without SeDebugPrivilege: other accounts' processes stay opaque");
+        }
+
         let (sink, rx) = Sink::bounded(crate::sink::DEFAULT_CAPACITY);
+        sink.set_drainer(std::thread::current());
 
         let mut builder = KernelRouter::builder();
         if let Some(prefix) = &self.config.session_namespace {
@@ -96,15 +77,10 @@ impl Supervisor {
             p.register(&mut builder)?;
         }
 
-        // `router` is a local: if any provider below fails, `?` drops it
-        // right here, running `KernelRouter::Drop` (join pump, close
-        // consumers, stop sessions) before the error propagates.
         let router = builder.start(sink.clone())?;
 
         for (started, p) in self.providers.iter().enumerate() {
             if let Err(e) = p.start(self.live_pids.clone(), sink.clone()) {
-                // Providers before this one may have already spawned poller
-                // threads; the router's own cleanup above doesn't reach them.
                 for already_started in self.providers[..started].iter().rev() {
                     if !already_started.is_oneshot() {
                         already_started.stop();
@@ -123,12 +99,16 @@ impl Supervisor {
         Ok(())
     }
 
-    pub fn tick(&mut self) {
-        let Some(rx) = self.rx.take() else {
-            return;
-        };
-        self.drain_and_apply(&rx);
-        self.rx = Some(rx);
+    /// Applies what the providers sent since the last tick and reports the result.
+    pub fn tick(&mut self) -> Arc<Report> {
+        if let Some(rx) = self.rx.take() {
+            self.drain_and_apply(&rx);
+            self.rx = Some(rx);
+        }
+        let dropped = self.sink.as_ref().map_or(0, Sink::dropped);
+        let report = Arc::new(Report::build(&self.state, self.last.as_deref(), dropped));
+        self.last = Some(report.clone());
+        report
     }
 
     fn drain_and_apply(&mut self, rx: &Receiver<StateChange>) {
@@ -140,7 +120,7 @@ impl Supervisor {
         }
     }
 
-    pub fn stop(&mut self) {
+    fn stop(&mut self) {
         if !self.running {
             return;
         }
@@ -177,7 +157,7 @@ impl Supervisor {
             }
             _ => {}
         }
-        self.state.lock().apply(change);
+        self.state.apply(change);
     }
 }
 

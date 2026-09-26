@@ -44,8 +44,6 @@ pub struct MemorySnapshot {
     pub peak_working_set_bytes: u64,
     pub private_working_set_bytes: u64,
     pub private_bytes: u64,
-    #[cfg_attr(not(feature = "service"), allow(dead_code))]
-    pub timestamp_ms: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -152,9 +150,6 @@ pub enum StateChange {
     ProcessStopped(u32),
     ThreadStarted { pid: u32, tid: u32 },
     ThreadStopped { tid: u32 },
-    /// Whole-set snapshots from the periodic inventory; they replace the
-    /// previous sets instead of diffing per process.
-    ServicesSnapshot(Vec<crate::providers::utils::ServiceInfo>),
     Memory(Vec<MemorySnapshot>),
     Machine(Box<MachineSnapshot>),
     Disk(DiskDeltas),

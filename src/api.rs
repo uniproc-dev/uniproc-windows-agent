@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+pub use uniproc_windows_core::{MachineStats, ProcessMetrics, SignatureStatus, Tagged};
+
 /// Name the agent's Windows service is registered under.
 pub const SERVICE_NAME: &str = "UniprocProcessMonitor";
 
@@ -8,13 +10,6 @@ pub const SERVICE_DISPLAY_NAME: &str = "Uniproc Process Monitor";
 
 /// Ok, or the Win32 error code; an NTSTATUS for suspend and resume.
 pub type CommandResult = Result<(), u32>;
-
-/// A value and the tag it was taken under: an unchanged tag means an unchanged value.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Tagged<T> {
-    pub etag: u64,
-    pub value: T,
-}
 
 /// Metrics for exactly the processes listed under `processes_etag`.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -48,16 +43,6 @@ pub enum Command {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum SignatureStatus {
-    /// Not checked yet, or the check itself failed.
-    #[default]
-    Unknown,
-    Unsigned,
-    Microsoft,
-    ThirdParty,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ServiceState {
     #[default]
     Unknown,
@@ -78,27 +63,6 @@ pub enum ProcessPriority {
     AboveNormal,
     High,
     Realtime,
-}
-
-/// The machine as a whole. Disk and network are running totals since the agent started.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MachineStats {
-    pub total_physical_kb: u64,
-    pub available_physical_kb: u64,
-    pub used_physical_kb: u64,
-    pub cpu_percent: f32,
-    pub cpu_max_mhz: u64,
-    pub cpu_current_mhz: u64,
-    pub cpu_interrupt_percent: f32,
-    pub cpu_dpc_percent: f32,
-
-    pub disk_read_bytes: u64,
-    pub disk_write_bytes: u64,
-    pub disk_read_iops: u64,
-    pub disk_write_iops: u64,
-
-    pub net_rx_bytes: u64,
-    pub net_tx_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -136,24 +100,4 @@ pub struct ProcessInfo {
 
     /// Pid of the conhost serving the process's console, or 0.
     pub console_host_pid: u32,
-}
-
-/// What a process is doing right now, joined to [`ProcessInfo`] by pid.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ProcessMetrics {
-    pub pid: u32,
-    pub cpu_percent: f32,
-    pub working_set_kb: u64,
-    pub private_bytes_kb: u64,
-    pub peak_working_set_kb: u64,
-    /// Resident pages no one else shares; the only memory figure that sums across processes.
-    pub private_working_set_kb: u64,
-
-    pub disk_read_bytes: u64,
-    pub disk_write_bytes: u64,
-    pub disk_read_iops: u64,
-    pub disk_write_iops: u64,
-
-    pub net_rx_bytes: u64,
-    pub net_tx_bytes: u64,
 }

@@ -13,13 +13,6 @@ use crate::providers::provider::LivePids;
 use crate::settings::{PollInterval, START_REACTION_SPACING};
 use crate::state::events::MemorySnapshot;
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 struct ProcessHandle(HANDLE);
 
 impl Drop for ProcessHandle {
@@ -81,16 +74,16 @@ impl Handles {
         self.open.retain(|_, opened| opened.seen == pass);
     }
 
-    fn read(&self, now: u64, out: &mut Vec<MemorySnapshot>) {
+    fn read(&self, out: &mut Vec<MemorySnapshot>) {
         for (&pid, opened) in &self.open {
-            read_one(pid, opened, now, out);
+            read_one(pid, opened, out);
         }
     }
 
-    fn read_fresh(&self, now: u64, out: &mut Vec<MemorySnapshot>) {
+    fn read_fresh(&self, out: &mut Vec<MemorySnapshot>) {
         for pid in &self.fresh {
             if let Some(opened) = self.open.get(pid) {
-                read_one(*pid, opened, now, out);
+                read_one(*pid, opened, out);
             }
         }
     }
@@ -100,7 +93,7 @@ impl Handles {
     }
 }
 
-fn read_one(pid: u32, opened: &Opened, now: u64, out: &mut Vec<MemorySnapshot>) {
+fn read_one(pid: u32, opened: &Opened, out: &mut Vec<MemorySnapshot>) {
     let Some(handle) = &opened.handle else {
         return;
     };
@@ -115,15 +108,14 @@ fn read_one(pid: u32, opened: &Opened, now: u64, out: &mut Vec<MemorySnapshot>) 
         )
     };
     if status.is_ok() {
-        out.push(snapshot(pid, &counters, now));
+        out.push(snapshot(pid, &counters));
     }
 }
 
-fn snapshot(pid: u32, c: &VM_COUNTERS_EX2, now: u64) -> MemorySnapshot {
+fn snapshot(pid: u32, c: &VM_COUNTERS_EX2) -> MemorySnapshot {
     let ex = &c.CountersEx;
     MemorySnapshot {
         pid,
-        timestamp_ms: now,
         working_set_bytes: ex.WorkingSetSize as u64,
         peak_working_set_bytes: ex.PeakWorkingSetSize as u64,
         private_working_set_bytes: c.PrivateWorkingSetSize as u64,
@@ -171,7 +163,7 @@ impl MemoryPoller {
                     let pass_start = Instant::now();
                     if pass_start >= next_full {
                         handles.sync(&live_pids);
-                        handles.read(now_ms(), &mut snaps);
+                        handles.read(&mut snaps);
                         let counted = snaps.len();
                         on_pass(std::mem::replace(&mut snaps, Vec::with_capacity(counted)));
 
@@ -197,7 +189,7 @@ impl MemoryPoller {
                             std::thread::sleep(START_REACTION_SPACING - since);
                         }
                         handles.sync(&live_pids);
-                        handles.read_fresh(now_ms(), &mut snaps);
+                        handles.read_fresh(&mut snaps);
                         if !snaps.is_empty() {
                             on_pass(std::mem::take(&mut snaps));
                         }
@@ -235,7 +227,7 @@ mod tests {
         handles.sync(&live(&[(std::process::id(), 1)]));
 
         let mut snaps = Vec::new();
-        handles.read(0, &mut snaps);
+        handles.read(&mut snaps);
         let me = snaps
             .iter()
             .find(|s| s.pid == std::process::id())
@@ -269,7 +261,7 @@ mod tests {
         handles.sync(&live(&[(me, 1)]));
         assert_eq!(handles.fresh, vec![me]);
         let mut snaps = Vec::new();
-        handles.read_fresh(0, &mut snaps);
+        handles.read_fresh(&mut snaps);
         assert_eq!(snaps.len(), 1);
 
         handles.sync(&live(&[(me, 1), (0, 1)]));
@@ -286,7 +278,7 @@ mod tests {
         assert_eq!(handles.unopened(), 1, "Idle has no process to open");
 
         let mut snaps = Vec::new();
-        handles.read(0, &mut snaps);
+        handles.read(&mut snaps);
         assert!(snaps.is_empty());
     }
 }

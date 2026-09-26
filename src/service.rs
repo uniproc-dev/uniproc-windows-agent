@@ -9,10 +9,44 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
+use crate::embedded::Embedded;
 use crate::logger;
-use crate::monitor;
+use crate::profile;
 
 define_windows_service!(ffi_service_main, service_main);
+
+fn run(stop: impl FnOnce()) -> Result<()> {
+    let agent = std::sync::Arc::new(Embedded::launch(profile::service())?);
+    agent.set_memory_interval(profile::IDLE_MEMORY_INTERVAL);
+
+    match crate::http::serve(agent.clone()) {
+        Ok(access) => info!(
+            url = access.url,
+            access = %crate::http::access_path().display(),
+            "state API listening"
+        ),
+        Err(error) => tracing::warn!(%error, "the state API did not start"),
+    }
+
+    let node_agent = agent.clone();
+    std::thread::spawn(move || {
+        compio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                if let Err(e) = crate::rpc::run(node_agent).await {
+                    error!("node error: {e:#}");
+                }
+            });
+    });
+
+    info!("Uniproc monitor running");
+
+    stop();
+
+    info!("Shutting down…");
+    agent.stop();
+    Ok(())
+}
 
 std::thread_local! {
     static SERVICE_NAME_TL: std::cell::RefCell<String> = Default::default();
@@ -47,7 +81,7 @@ fn run_service(service_name: &str) -> Result<()> {
 
     set_status(&status_handle, ServiceState::StartPending)?;
 
-    monitor::run(|| {
+    run(|| {
         set_status(&status_handle, ServiceState::Running).ok();
         stop_rx.recv().ok();
     })?;
@@ -81,8 +115,7 @@ fn set_status(
 
 pub fn run_direct() -> Result<()> {
     info!("Starting monitoring (press Ctrl+C to stop).");
-    monitor::run(|| {
-        // thread::park may wake spuriously, so gate on a flag, not on the park.
+    run(|| {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_handler = stop.clone();
         let main_thread = std::thread::current();
@@ -92,7 +125,6 @@ pub fn run_direct() -> Result<()> {
             main_thread.unpark();
         })
         .ok();
-        // Dev-only profiling knob: graceful self-stop after N seconds.
         let deadline = std::env::var("UNIPROC_STOP_AFTER_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())

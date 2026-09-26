@@ -6,30 +6,22 @@ pub mod api;
 pub mod embedded;
 pub mod remote;
 
-mod aligned;
 mod commands;
-#[cfg(feature = "service")]
-mod cpu_report;
-mod etw;
+mod feed;
 #[cfg(feature = "service")]
 mod http;
 #[cfg(feature = "service")]
 mod logger;
 mod monitor;
 mod privileges;
-mod providers;
+mod profile;
 #[cfg(feature = "service")]
 mod rpc;
+mod scm;
 #[cfg(feature = "service")]
 mod service;
-mod settings;
-mod sink;
-mod state;
-mod supervisor;
 mod win;
 
-#[cfg(feature = "service")]
-pub use cpu_report::run as print_cpu;
 #[cfg(feature = "service")]
 pub use logger::init_console;
 #[cfg(feature = "service")]

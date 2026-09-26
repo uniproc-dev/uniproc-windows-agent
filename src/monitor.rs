@@ -1,140 +1,86 @@
-use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread::JoinHandle;
-use parking_lot::Mutex;
-#[cfg(feature = "service")]
-use tracing::info;
+use std::time::{Duration, Instant};
 
-#[cfg(feature = "service")]
-use crate::embedded::Embedded;
-use crate::settings::CollectorSettings;
-use crate::state::SystemState;
-use crate::supervisor::Supervisor;
+use anyhow::{Result, anyhow};
+use uniproc_windows_core::{CollectorSettings, Report, Supervisor, SupervisorConfig};
 
-pub type SharedSupervisor = Arc<Mutex<Supervisor>>;
+/// The longest a report waits when the core has nothing new.
+const PERIOD: Duration = Duration::from_secs(1);
 
-/// A started supervisor and the thread that drains it; stops both when dropped.
+/// The shortest gap between two reports, so a burst of changes costs a handful.
+const SPACING: Duration = Duration::from_millis(50);
+
+/// The core on a thread of its own: it reports as soon as the core has
+/// something new, at least once a period, and hands every report over.
+/// Stops the core when dropped.
 pub struct Monitor {
-    supervisor: SharedSupervisor,
-    state: Arc<Mutex<SystemState>>,
-    settings: CollectorSettings,
-    tick_running: Arc<AtomicBool>,
-    tick_handle: Mutex<Option<JoinHandle<()>>>,
+    running: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Monitor {
-    pub fn start(mut supervisor: Supervisor) -> Result<Self> {
-        // Without it, processes of other accounts (SYSTEM, DWM, UMFD, Hyper-V)
-        // refuse even a limited query handle: no image path, signature or icon.
-        // LocalSystem holds it enabled already; an elevated console must ask.
-        if let Err(error) = crate::privileges::enable(windows::core::w!("SeDebugPrivilege")) {
-            tracing::warn!(%error, "running without SeDebugPrivilege: other accounts' processes stay opaque");
-        }
-
-        supervisor.start()?;
-        let tick_interval = supervisor.tick_interval();
-        let state = supervisor.state();
-        let settings = supervisor.settings();
-        let supervisor: SharedSupervisor = Arc::new(Mutex::new(supervisor));
-
-        // RPC and HTTP drain the Sink before they read; this drains it between
-        // requests, and at once when the Sink reports it half full.
-        let tick_running = Arc::new(AtomicBool::new(true));
-        let tick_supervisor = supervisor.clone();
-        let tick_running_thread = tick_running.clone();
-        let tick_handle = std::thread::Builder::new()
-            .name("supervisor-tick".into())
-            .spawn(move || {
-                let mut last_tick = std::time::Instant::now();
-                while tick_running_thread.load(Ordering::Relaxed) {
-                    std::thread::park_timeout(tick_interval);
-                    let since = last_tick.elapsed();
-                    if since < crate::settings::START_REACTION_SPACING {
-                        std::thread::sleep(crate::settings::START_REACTION_SPACING - since);
+    /// Returns once the core runs and its first report has been handed over.
+    pub fn start(
+        config: SupervisorConfig,
+        settings: CollectorSettings,
+        mut publish: impl FnMut(Arc<Report>) + Send + 'static,
+    ) -> Result<Self> {
+        let running = Arc::new(AtomicBool::new(true));
+        let (started, outcome) = mpsc::sync_channel(1);
+        let thread = std::thread::Builder::new()
+            .name("core".into())
+            .spawn({
+                let running = running.clone();
+                move || {
+                    let mut supervisor = Supervisor::new(config, settings);
+                    if let Err(error) = supervisor.start() {
+                        let _ = started.send(Err(error));
+                        return;
                     }
-                    tick_supervisor.lock().tick();
-                    last_tick = std::time::Instant::now();
+                    publish(supervisor.tick());
+                    let _ = started.send(Ok(()));
+
+                    let mut last = Instant::now();
+                    loop {
+                        std::thread::park_timeout(PERIOD);
+                        if !running.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let since = last.elapsed();
+                        if since < SPACING {
+                            std::thread::sleep(SPACING - since);
+                        }
+                        publish(supervisor.tick());
+                        last = Instant::now();
+                    }
                 }
             })?;
-        supervisor.lock().set_drainer(tick_handle.thread().clone());
 
-        Ok(Self {
-            supervisor,
-            state,
-            settings,
-            tick_running,
-            tick_handle: Mutex::new(Some(tick_handle)),
-        })
-    }
-
-    /// Stops the tick thread and the providers; reads after it see the last state.
-    pub fn stop(&self) {
-        self.tick_running.store(false, Ordering::Relaxed);
-        if let Some(tick_handle) = self.tick_handle.lock().take() {
-            tick_handle.thread().unpark();
-            let _ = tick_handle.join();
+        let outcome = outcome
+            .recv()
+            .unwrap_or_else(|_| Err(anyhow!("the core's thread ended before it started")));
+        match outcome {
+            Ok(()) => Ok(Self {
+                running,
+                thread: Some(thread),
+            }),
+            Err(error) => {
+                let _ = thread.join();
+                Err(error)
+            }
         }
-        self.supervisor.lock().stop();
-    }
-
-    #[cfg(feature = "service")]
-    pub fn supervisor(&self) -> &SharedSupervisor {
-        &self.supervisor
-    }
-
-    #[cfg(feature = "service")]
-    pub fn state(&self) -> &Arc<Mutex<SystemState>> {
-        &self.state
-    }
-
-    pub fn settings(&self) -> &CollectorSettings {
-        &self.settings
-    }
-
-    /// Applies what the providers sent since the last tick, then hands over the state.
-    pub fn read<R>(&self, f: impl FnOnce(&SystemState) -> R) -> R {
-        self.supervisor.lock().tick();
-        f(&self.state.lock())
     }
 }
 
 impl Drop for Monitor {
     fn drop(&mut self) {
-        self.stop();
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
     }
-}
-
-#[cfg(feature = "service")]
-pub fn run(stop: impl FnOnce()) -> Result<()> {
-    let agent = Arc::new(Embedded::from_monitor(Monitor::start(Supervisor::default())?));
-    let monitor = agent.monitor();
-
-    match crate::http::serve(monitor.state().clone(), monitor.supervisor().clone()) {
-        Ok(access) => info!(
-            url = access.url,
-            access = %crate::http::access_path().display(),
-            "state API listening"
-        ),
-        Err(error) => tracing::warn!(%error, "the state API did not start"),
-    }
-
-    let node_agent = agent.clone();
-    std::thread::spawn(move || {
-        compio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(async move {
-                if let Err(e) = crate::rpc::run(node_agent).await {
-                    tracing::error!("node error: {e:#}");
-                }
-            });
-    });
-
-    info!("Uniproc monitor running");
-
-    stop();
-
-    info!("Shutting down…");
-    agent.monitor().stop();
-    Ok(())
 }

@@ -1,0 +1,28 @@
+[package]
+name = "uniproc-windows-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", features = [
+    "evntrace", "evntcons", "evntprov", "wmistr", "minwinbase", "timezoneapi",
+    "winerror", "ntstatus", "minwindef", "winnt", "windef", "handleapi", "errhandlingapi",
+    "processthreadsapi", "winbase", "securitybaseapi", "winternl", "ntddk", "memoryapi",
+    "profileapi", "pdh", "powerbase", "sysinfoapi",
+    "winver", "fileapi", "appmodel", "shellapi", "shlwapi",
+    "mscat", "mssip", "wincrypt", "wintrust", "ntsecapi"] }
+ntapi = "0.4.3"
+fxhash = "0.2.1"
+binrw = "0.15.0"
+amethystate = { version = "0.22", default-features = false, features = ["redb"] }
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+getrandom = "0.3"
+roxmltree = "0.20"
+dashmap = "6.1.0"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

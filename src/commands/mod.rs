@@ -1,6 +1,4 @@
 pub mod process;
-pub mod services;
-mod vars;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -8,24 +6,24 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::api::{Command, CommandResult};
-use crate::commands::services::{ScHandle, ScManager, ServiceAction};
-use crate::commands::vars::ERROR_BUSY;
+use crate::scm::{self, Scm, ServiceAction};
 
-/// Runs commands; holds the SCM connection and the services a command is running for.
-#[derive(Clone, Default)]
+/// Win32 ERROR_BUSY: an operation on this target is already in flight.
+const ERROR_BUSY: u32 = 170;
+
+/// Runs commands; knows which services a command is running for.
+#[derive(Clone)]
 pub struct Commands {
-    state: Arc<Mutex<CommandState>>,
-}
-
-#[derive(Default)]
-struct CommandState {
-    scm: Option<ScManager>,
-    inflight: HashSet<String>,
+    scm: Scm,
+    inflight: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Commands {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(scm: Scm) -> Self {
+        Self {
+            scm,
+            inflight: Arc::default(),
+        }
     }
 
     /// Blocks until done; `ERROR_BUSY` while another command runs for the same service.
@@ -42,45 +40,34 @@ impl Commands {
             Command::ServiceResume { name } => self.control(&name, ServiceAction::Resume),
             Command::ServiceRestart { name } => {
                 let _guard = self.acquire(&name)?;
-                services::restart(self.scm()?, &name)
+                scm::restart(self.scm.connection()?.handle(), &name)
             }
         }
     }
 
     fn control(&self, name: &str, action: ServiceAction) -> CommandResult {
         let _guard = self.acquire(name)?;
-        services::control(self.scm()?, name, action)
-    }
-
-    fn scm(&self) -> Result<ScHandle, u32> {
-        let mut state = self.state.lock();
-        if let Some(scm) = &state.scm {
-            return Ok(scm.handle());
-        }
-        let scm = ScManager::open()?;
-        let handle = scm.handle();
-        state.scm = Some(scm);
-        Ok(handle)
+        scm::control(self.scm.connection()?.handle(), name, action)
     }
 
     fn acquire(&self, name: &str) -> Result<InflightGuard, u32> {
-        if !self.state.lock().inflight.insert(name.to_string()) {
+        if !self.inflight.lock().insert(name.to_string()) {
             return Err(ERROR_BUSY);
         }
         Ok(InflightGuard {
-            state: self.state.clone(),
+            inflight: self.inflight.clone(),
             name: name.to_string(),
         })
     }
 }
 
 struct InflightGuard {
-    state: Arc<Mutex<CommandState>>,
+    inflight: Arc<Mutex<HashSet<String>>>,
     name: String,
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.state.lock().inflight.remove(&self.name);
+        self.inflight.lock().remove(&self.name);
     }
 }

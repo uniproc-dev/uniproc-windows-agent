@@ -1,28 +1,21 @@
 use ntapi::ntrtl::RTL_USER_PROCESS_PARAMETERS;
-use ntapi::winapi::um::winbase::LocalFree;
 use windows::Win32::{
-    CATALOG_INFO, CERT_NAME_SIMPLE_DISPLAY_TYPE, CloseHandle, CloseServiceHandle,
-    CommandLineToArgvW, CreateFileW, CertGetNameStringW, CryptCATAdminAcquireContext2,
-    CryptCATAdminCalcHashFromFileHandle2, CryptCATAdminEnumCatalogFromHash,
-    CryptCATAdminReleaseCatalogContext, CryptCATAdminReleaseContext,
-    CryptCATCatalogInfoFromContext, ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, GENERIC_READ, GetApplicationUserModelId,
-    GetPackageFullName, HANDLE, HCATADMIN, HCATINFO, HWND, NtQueryInformationProcess,
-    OPEN_EXISTING, OpenServiceW, PEB, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, PROCESSINFOCLASS, ProcessBasicInformation,
-    QUERY_SERVICE_CONFIGW, QueryFullProcessImageNameW, QueryServiceConfig2W, QueryServiceConfigW,
-    ReadProcessMemory, SC_ENUM_PROCESS_INFO, SC_HANDLE, SERVICE_CONFIG_DESCRIPTION,
-    SERVICE_CONTINUE_PENDING, SERVICE_DESCRIPTIONW, SERVICE_PAUSE_PENDING, SERVICE_PAUSED,
-    SERVICE_QUERY_CONFIG, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATE_ALL,
-    SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_WIN32, TRUST_E_NOSIGNATURE,
-    TRUST_E_SUBJECT_FORM_UNKNOWN, WINTRUST_CATALOG_INFO, WINTRUST_DATA, WINTRUST_FILE_INFO,
-    WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_CATALOG, WTD_CHOICE_FILE, WTD_REVOKE_NONE,
-    WTD_SAFER_FLAG, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
-    WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
+    CATALOG_INFO, LocalFree, CERT_NAME_SIMPLE_DISPLAY_TYPE, CloseHandle, CommandLineToArgvW, CreateFileW,
+    CertGetNameStringW, CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
+    CryptCATAdminEnumCatalogFromHash, CryptCATAdminReleaseCatalogContext,
+    CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, GENERIC_READ, GetApplicationUserModelId, GetPackageFullName, HANDLE,
+    HCATADMIN, HCATINFO, HWND, NtQueryInformationProcess, OPEN_EXISTING, PEB,
+    PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_VM_READ, PROCESSINFOCLASS, ProcessBasicInformation, QueryFullProcessImageNameW,
+    ReadProcessMemory, TRUST_E_NOSIGNATURE, TRUST_E_SUBJECT_FORM_UNKNOWN, WINTRUST_CATALOG_INFO,
+    WINTRUST_DATA, WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_CATALOG,
+    WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_SAFER_FLAG, WTD_STATEACTION_CLOSE,
+    WTD_STATEACTION_VERIFY, WTD_UI_NONE, WTHelperGetProvSignerFromChain,
+    WTHelperProvDataFromStateData, WinVerifyTrust,
 };
 use windows::core::{PCWSTR, PWSTR};
 
-use crate::commands::services::ScHandle;
 use crate::state::events::ProcessSignature;
 use crate::win::{PROCESS_NAME_WIN32, WINTRUST_ACTION_GENERIC_VERIFY_V2, open_process};
 
@@ -109,7 +102,7 @@ pub unsafe fn parse_cmd_line(cmd_line: &str) -> Vec<String> {
             args.push(arg_str);
         }
 
-        LocalFree(argv_ptr as _);
+        let _ = LocalFree(HANDLE(argv_ptr as _));
         args
     })
 }
@@ -471,190 +464,6 @@ pub fn is_windows_process(is_kernel: bool, signature: ProcessSignature) -> bool 
     // Deliberately no path heuristics: third-party software (and malware)
     // can live under SystemRoot, so a path prefix proves nothing.
     is_kernel || signature == ProcessSignature::Microsoft
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ServiceInfo {
-    pub name: String,
-    pub display_name: String,
-    pub pid: u32,
-    pub state: ServiceState,
-    pub load_group: String,
-    pub description: String,
-    pub image_path: String,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ServiceState {
-    #[default]
-    Unknown,
-    Stopped,
-    StartPending,
-    StopPending,
-    Running,
-    ContinuePending,
-    PausePending,
-    Paused,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ServiceConfig {
-    pub load_group: String,
-    pub description: String,
-    pub image_path: String,
-}
-
-struct ServiceHandle(SC_HANDLE);
-
-impl Drop for ServiceHandle {
-    fn drop(&mut self) {
-        if !self.0.0.is_null() {
-            unsafe {
-                let _ = CloseServiceHandle(self.0);
-            }
-        }
-    }
-}
-
-fn aligned_bytes(len: u32) -> Vec<u64> {
-    vec![0u64; (len.div_ceil(8) as usize).max(1)]
-}
-
-unsafe fn as_byte_slice(buf: &mut [u64], len: u32) -> &mut [u8] {
-    unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, len as usize) }
-}
-
-fn service_state(raw: u32) -> ServiceState {
-    match raw as i32 {
-        SERVICE_STOPPED => ServiceState::Stopped,
-        SERVICE_START_PENDING => ServiceState::StartPending,
-        SERVICE_STOP_PENDING => ServiceState::StopPending,
-        SERVICE_RUNNING => ServiceState::Running,
-        SERVICE_CONTINUE_PENDING => ServiceState::ContinuePending,
-        SERVICE_PAUSE_PENDING => ServiceState::PausePending,
-        SERVICE_PAUSED => ServiceState::Paused,
-        _ => ServiceState::Unknown,
-    }
-}
-
-/// Reads the parts of a service's configuration that never change while it
-/// exists. Callers cache this by service name: it costs three SCM round
-/// trips and the app asks for it on every scan.
-pub fn query_service_config(scm: ScHandle, name: &str) -> ServiceConfig {
-    let mut out = ServiceConfig::default();
-
-    unsafe {
-        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        let Ok(handle) = crate::win::service_handle(OpenServiceW(
-            scm.0,
-            PCWSTR(wide.as_ptr()),
-            SERVICE_QUERY_CONFIG as u32,
-        )) else {
-            return out;
-        };
-        let service = ServiceHandle(handle);
-
-        let mut size = 0u32;
-        let _ = QueryServiceConfigW(service.0, None, 0, &mut size);
-        if size > 0 {
-            let mut storage = aligned_bytes(size);
-            let config = storage.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
-            if QueryServiceConfigW(service.0, Some(config), size, &mut size).as_bool() {
-                out.load_group = (*config).lpLoadOrderGroup.to_string().unwrap_or_default();
-                out.image_path = (*config).lpBinaryPathName.to_string().unwrap_or_default();
-            }
-        }
-
-        let level = SERVICE_CONFIG_DESCRIPTION as u32;
-        let mut size = 0u32;
-        let _ = QueryServiceConfig2W(service.0, level, None, 0, &mut size);
-        if size > 0 {
-            let mut storage = aligned_bytes(size);
-            if QueryServiceConfig2W(
-                service.0,
-                level,
-                Some(as_byte_slice(&mut storage, size).as_mut_ptr()),
-                size,
-                &mut size,
-            )
-            .as_bool()
-            {
-                let desc = storage.as_ptr() as *const SERVICE_DESCRIPTIONW;
-                let ptr = (*desc).lpDescription;
-                if !ptr.is_null() {
-                    out.description = ptr.to_string().unwrap_or_default();
-                }
-            }
-        }
-    }
-
-    out
-}
-
-/// Enumerates every Win32 service with its current state. Configuration is
-/// left to [`query_service_config`] so the caller can cache it.
-pub fn enum_services(scm: ScHandle, buf: &mut Vec<u64>) -> Vec<ServiceInfo> {
-    unsafe {
-        let mut bytes_needed = 0u32;
-        let mut services_returned = 0u32;
-        let mut resume = 0u32;
-
-        let _ = EnumServicesStatusExW(
-            scm.0,
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32 as u32,
-            SERVICE_STATE_ALL as u32,
-            None,
-            0,
-            &mut bytes_needed,
-            &mut services_returned,
-            Some(&mut resume),
-            PCWSTR::null(),
-        );
-
-        if bytes_needed == 0 {
-            return Vec::new();
-        }
-
-        // Caller-owned buffer: capacity stays at the high-water mark, no
-        // per-call allocation. `u64` so the ENUM_SERVICE_STATUS_PROCESSW
-        // array it is reinterpreted as is properly aligned.
-        buf.clear();
-        buf.resize(bytes_needed.div_ceil(8) as usize, 0);
-        resume = 0;
-        let size = bytes_needed;
-        if !EnumServicesStatusExW(
-            scm.0,
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32 as u32,
-            SERVICE_STATE_ALL as u32,
-            Some(as_byte_slice(buf, size).as_mut_ptr()),
-            size,
-            &mut bytes_needed,
-            &mut services_returned,
-            Some(&mut resume),
-            PCWSTR::null(),
-        )
-        .as_bool()
-        {
-            return Vec::new();
-        }
-
-        let entries = std::slice::from_raw_parts(
-            buf.as_ptr() as *const ENUM_SERVICE_STATUS_PROCESSW,
-            services_returned as usize,
-        );
-        entries
-            .iter()
-            .map(|e| ServiceInfo {
-                name: e.lpServiceName.to_string().unwrap_or_default(),
-                display_name: e.lpDisplayName.to_string().unwrap_or_default(),
-                pid: e.ServiceStatusProcess.dwProcessId,
-                state: service_state(e.ServiceStatusProcess.dwCurrentState),
-                ..Default::default()
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]

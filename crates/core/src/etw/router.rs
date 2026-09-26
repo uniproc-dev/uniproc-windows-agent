@@ -494,9 +494,12 @@ pub(crate) mod tests {
         crate::providers::network::KernelNetworkProvider::new()
             .register(&mut builder)
             .unwrap();
-        crate::providers::process::KernelProcessProvider::new()
-            .register(&mut builder)
-            .unwrap();
+        crate::providers::process::KernelProcessProvider::with_queue(
+            crossbeam_channel::unbounded(),
+            String::new(),
+        )
+        .register(&mut builder)
+        .unwrap();
         let router = builder.start(sink).expect("router start");
 
         let sock = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();

@@ -9,13 +9,11 @@ use uniproc_protocol::windows_capnp::windows_agent;
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE, WINDOWS_SCHEMA_ID};
 
 use crate::embedded::Embedded;
+use crate::profile::{ATTACHED_MEMORY_INTERVAL, IDLE_MEMORY_INTERVAL};
 use crate::rpc::handler::AgentImpl;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
-
-use crate::settings::{ATTACHED_MEMORY_INTERVAL_MS, IDLE_MEMORY_INTERVAL_MS};
 
 pub async fn run(agent: Arc<Embedded>) -> Result<()> {
     let endpoint = Endpoint::for_service(APP_NAME, WINDOWS_AGENT_SERVICE)
@@ -39,7 +37,7 @@ pub async fn run(agent: Arc<Embedded>) -> Result<()> {
             }
         };
         attached.set(attached.get() + 1);
-        agent.set_memory_interval(Duration::from_millis(ATTACHED_MEMORY_INTERVAL_MS));
+        agent.set_memory_interval(ATTACHED_MEMORY_INTERVAL);
 
         let agent = agent.clone();
         let attached = attached.clone();
@@ -49,7 +47,7 @@ pub async fn run(agent: Arc<Embedded>) -> Result<()> {
             }
             attached.set(attached.get() - 1);
             if attached.get() == 0 {
-                agent.set_memory_interval(Duration::from_millis(IDLE_MEMORY_INTERVAL_MS));
+                agent.set_memory_interval(IDLE_MEMORY_INTERVAL);
             }
         })
         .detach();
