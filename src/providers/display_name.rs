@@ -43,9 +43,15 @@ use crate::aligned::AlignedBuf;
 /// device path: the version-resource APIs cannot open `\Device\...`.
 /// `app_id` is the part of the process's AUMID after `!`: one package can hold
 /// several applications, each with a name of its own.
+///
+/// The package's name is taken only for an executable the package ships. A
+/// system binary such as `RuntimeBroker.exe` runs under the identity of the
+/// app it serves, and is named by its own file instead.
 pub fn resolve(image_path: &str, package_full_name: &str, app_id: &str) -> Option<String> {
     if !package_full_name.is_empty()
-        && let Some(name) = package_display_name(package_full_name, app_id)
+        && let Some(dir) = package_path(package_full_name)
+        && is_inside(image_path, &dir.to_string_lossy())
+        && let Some(name) = package_display_name(package_full_name, &dir, app_id)
     {
         return Some(name);
     }
@@ -114,11 +120,15 @@ pub fn package_publisher(package_full_name: &str) -> Option<String> {
 /// literal or an `ms-resource:` reference to a key of the package's own
 /// choosing. Only when the manifest cannot be read does this fall back to the
 /// conventional `AppName` key.
-fn package_display_name(package_full_name: &str, app_id: &str) -> Option<String> {
+fn package_display_name(
+    package_full_name: &str,
+    package_dir: &std::path::Path,
+    app_id: &str,
+) -> Option<String> {
     let base_name = package_base_name(package_full_name)?;
 
-    let declared = package_path(package_full_name)
-        .and_then(|dir| std::fs::read_to_string(dir.join("AppxManifest.xml")).ok())
+    let declared = std::fs::read_to_string(package_dir.join("AppxManifest.xml"))
+        .ok()
         .and_then(|xml| manifest_display_name(&xml, app_id));
 
     match declared {
@@ -156,6 +166,15 @@ fn package_path(package_full_name: &str) -> Option<std::path::PathBuf> {
 
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..end])))
+}
+
+fn is_inside(path: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches(['\\', '/']);
+    if dir.is_empty() || path.len() <= dir.len() || !path.is_char_boundary(dir.len()) {
+        return false;
+    }
+    let (head, rest) = path.split_at(dir.len());
+    head.eq_ignore_ascii_case(dir) && rest.starts_with(['\\', '/'])
 }
 
 /// The raw `DisplayName` a manifest declares for `app_id`: the application's
@@ -368,7 +387,7 @@ fn shell_display_name(image_path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_display_name, package_publisher, resolve, resource_uris};
+    use super::{is_inside, manifest_display_name, package_publisher, resolve, resource_uris};
 
     const GALLERY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -398,6 +417,18 @@ mod tests {
     <Application Id="Headless" />
   </Applications>
 </Package>"#;
+
+    #[test]
+    fn only_an_executable_the_package_ships_is_inside_it() {
+        let dir = r"C:\Program Files\WindowsApps\Claude_2.9939.2.0_x64__pzs8sxrjxfjjc";
+        assert!(is_inside(&format!(r"{dir}\app\claude.exe"), dir));
+        assert!(is_inside(&format!(r"{}\app\claude.exe", dir.to_uppercase()), dir));
+        assert!(is_inside(&format!(r"{dir}\claude.exe"), &format!(r"{dir}\")));
+        assert!(!is_inside(r"C:\Windows\System32\RuntimeBroker.exe", dir));
+        assert!(!is_inside(&format!(r"{dir}x\app\claude.exe"), dir));
+        assert!(!is_inside(dir, dir));
+        assert!(!is_inside(r"C:\Windows\System32\RuntimeBroker.exe", ""));
+    }
 
     #[test]
     fn a_literal_display_name_is_read_as_written() {
@@ -489,13 +520,20 @@ mod tests {
             return;
         };
 
+        let broker = r"C:\Windows\System32\RuntimeBroker.exe";
+        let broker_name = resolve(broker, "", "");
         let mut checked = 0usize;
         for entry in entries.flatten().take(200) {
             let Some(full_name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
             let _ = package_publisher(&full_name);
-            let _ = resolve("", &full_name, "App");
+            let _ = resolve(&entry.path().join("app.exe").to_string_lossy(), &full_name, "App");
+            assert_eq!(
+                resolve(broker, &full_name, "App"),
+                broker_name,
+                "a broker serving {full_name} took the package's name"
+            );
             checked += 1;
         }
         eprintln!("checked {checked} packages");
