@@ -36,18 +36,8 @@ impl EtwSession {
         })
     }
 
-    pub fn handle(&self) -> CONTROLTRACE_ID {
-        self.handle
-    }
-
     pub fn enable(&self, guid: &GUID) -> Result<()> {
         enable_provider(self.handle, guid)
-    }
-
-    pub fn enable_soft(&self, guid: &GUID, label: &str) {
-        if let Err(e) = self.enable(guid) {
-            warn!("enable {label}: {e:#}");
-        }
     }
 }
 

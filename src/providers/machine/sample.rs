@@ -11,13 +11,6 @@ use crate::providers::machine::processor_times::{ProcessorTimes, sample_processo
 use crate::providers::machine::vars::{PDH_CSTATUS_VALID_DATA, PDH_PROCESSOR_PERFORMANCE};
 use crate::state::events::MachineSnapshot;
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 pub struct PdhProcessorPerformance {
     query: PDH_HQUERY,
     counter: PDH_HCOUNTER,
@@ -112,7 +105,6 @@ pub fn sample_machine(
         cpu_percent: cpu.busy_percent,
         cpu_interrupt_percent: cpu.interrupt_percent,
         cpu_dpc_percent: cpu.dpc_percent,
-        timestamp_ms: now_ms(),
         ..Default::default()
     };
 

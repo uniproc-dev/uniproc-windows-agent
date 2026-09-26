@@ -124,18 +124,10 @@ fn snapshot(pid: u32, c: &VM_COUNTERS_EX2, now: u64) -> MemorySnapshot {
     MemorySnapshot {
         pid,
         timestamp_ms: now,
-        virtual_size_bytes: ex.VirtualSize as u64,
-        peak_virtual_size_bytes: ex.PeakVirtualSize as u64,
         working_set_bytes: ex.WorkingSetSize as u64,
         peak_working_set_bytes: ex.PeakWorkingSetSize as u64,
         private_working_set_bytes: c.PrivateWorkingSetSize as u64,
         private_bytes: ex.PagefileUsage as u64,
-        peak_private_bytes: ex.PeakPagefileUsage as u64,
-        paged_pool_bytes: ex.QuotaPagedPoolUsage as u64,
-        peak_paged_pool_bytes: ex.QuotaPeakPagedPoolUsage as u64,
-        nonpaged_pool_bytes: ex.QuotaNonPagedPoolUsage as u64,
-        peak_nonpaged_pool_bytes: ex.QuotaPeakNonPagedPoolUsage as u64,
-        page_fault_count: ex.PageFaultCount,
     }
 }
 

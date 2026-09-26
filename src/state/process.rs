@@ -206,11 +206,6 @@ impl ProcessTable {
                     self.record_sample(key.tid, key.pid_hint, count);
                 }
             }
-            StateChange::CpuUsage { pid, percent } => {
-                if let Some(entry) = self.processes.get_mut(&pid) {
-                    entry.cpu.total_percent = percent;
-                }
-            }
             StateChange::Disk(deltas) => {
                 for (tid, d) in deltas {
                     let Some(pid) = self.resolve_pid(tid, NO_PROCESS_ID) else {
@@ -315,6 +310,7 @@ impl ProcessTable {
             })
     }
 
+    #[cfg(test)]
     pub fn get(&self, pid: u32) -> Option<&ProcessEntry> {
         self.processes.get(&pid)
     }

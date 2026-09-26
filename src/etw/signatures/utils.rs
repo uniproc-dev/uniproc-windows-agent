@@ -1,5 +1,4 @@
 use std::io::{Cursor, Read, Seek};
-use std::net::{IpAddr, Ipv6Addr};
 
 use binrw::BinRead;
 use tracing::warn;
@@ -25,12 +24,4 @@ pub fn skip_sid<R: Read + Seek>(reader: &mut R, _: binrw::Endian, _: ()) -> binr
     reader.read_exact(&mut sub_authorities)?;
 
     Ok(())
-}
-
-pub fn to_ip4(bytes: [u8; 16]) -> IpAddr {
-    let v6 = Ipv6Addr::from(bytes);
-    match v6.to_ipv4_mapped() {
-        Some(v4) => IpAddr::V4(v4),
-        None => IpAddr::V6(v6),
-    }
 }

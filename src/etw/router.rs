@@ -13,7 +13,8 @@ use crate::etw::vars::{KERNEL_SESSION_NAME, SESSION_NAME_PREFIX};
 use crate::sink::Sink;
 use crate::state::events::StateChange;
 
-pub(crate) fn manifest_session_name(guid: &GUID) -> String {
+#[cfg(test)]
+fn manifest_session_name(guid: &GUID) -> String {
     manifest_session_name_in(SESSION_NAME_PREFIX, guid)
 }
 

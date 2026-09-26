@@ -22,12 +22,8 @@ fn event(record: &EVENT_RECORD, data: &[u8]) -> Option<(u32, DiskEvent)> {
     Some((
         g.issuing_thread_id,
         DiskEvent {
-            pid: record.EventHeader.ProcessId,
             event_type,
             transfer_size: g.transfer_size as u64,
-            byte_offset: g.byte_offset,
-            disk_number: g.disk_number,
-            elapsed_time: g.high_res_response_time,
         },
     ))
 }

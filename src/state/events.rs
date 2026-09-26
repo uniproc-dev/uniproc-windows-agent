@@ -40,18 +40,10 @@ pub struct ProcessEnriched {
 #[derive(Clone, Debug, Default)]
 pub struct MemorySnapshot {
     pub pid: u32,
-    pub virtual_size_bytes: u64,
-    pub peak_virtual_size_bytes: u64,
     pub working_set_bytes: u64,
     pub peak_working_set_bytes: u64,
     pub private_working_set_bytes: u64,
     pub private_bytes: u64,
-    pub peak_private_bytes: u64,
-    pub paged_pool_bytes: u64,
-    pub peak_paged_pool_bytes: u64,
-    pub nonpaged_pool_bytes: u64,
-    pub peak_nonpaged_pool_bytes: u64,
-    pub page_fault_count: u32,
     pub timestamp_ms: u64,
 }
 
@@ -65,24 +57,18 @@ pub struct MachineSnapshot {
     pub cpu_dpc_percent: f32,
     pub cpu_max_mhz: u64,
     pub cpu_current_mhz: u64,
-    pub timestamp_ms: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct DiskEvent {
-    pub pid: u32,
     pub event_type: DiskEventType,
     pub transfer_size: u64,
-    pub byte_offset: i64,
-    pub disk_number: u32,
-    pub elapsed_time: u64,
 }
 
 #[derive(Clone, Debug)]
 pub enum DiskEventType {
     Read,
     Write,
-    Flush,
 }
 
 /// Physical disk transfers across the machine since the previous batch.
@@ -105,12 +91,7 @@ impl DiskDelta {
                 self.write_bytes += e.transfer_size;
                 self.write_ops += 1;
             }
-            DiskEventType::Flush => {}
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.read_ops == 0 && self.write_ops == 0
     }
 }
 
@@ -149,12 +130,7 @@ pub type DiskDeltas = fxhash::FxHashMap<u32, DiskDelta>;
 pub struct NetworkEvent {
     pub pid: u32,
     pub event_type: NetworkEventType,
-    pub proto: NetworkProto,
     pub size: u32,
-    pub src_addr: std::net::IpAddr,
-    pub src_port: u16,
-    pub dst_addr: std::net::IpAddr,
-    pub dst_port: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -162,14 +138,7 @@ pub enum NetworkEventType {
     Send,
     Recv,
     Connect,
-    Disconnect,
     Accept,
-}
-
-#[derive(Clone, Debug)]
-pub enum NetworkProto {
-    Tcp,
-    Udp,
 }
 
 #[derive(Debug, Clone)]
@@ -189,7 +158,6 @@ pub enum StateChange {
     Machine(Box<MachineSnapshot>),
     Disk(DiskDeltas),
     Network(NetDeltas),
-    CpuUsage { pid: u32, percent: f64 },
     /// Profile samples per thread since the previous batch, attributed to
     /// processes when applied and shared out at the next machine snapshot.
     CpuSamples(crate::providers::cpu_sampler::counters::Samples),
@@ -212,12 +180,7 @@ mod tests {
         NetworkEvent {
             pid: 1,
             event_type,
-            proto: NetworkProto::Tcp,
             size,
-            src_addr: std::net::Ipv4Addr::LOCALHOST.into(),
-            src_port: 1,
-            dst_addr: std::net::Ipv4Addr::LOCALHOST.into(),
-            dst_port: 2,
         }
     }
 
@@ -242,15 +205,10 @@ mod tests {
     #[test]
     fn disk_transfers_add_up_by_direction() {
         let mut d = DiskDelta::default();
-        assert!(d.is_empty());
         for (event_type, size) in [(DiskEventType::Read, 512), (DiskEventType::Write, 4096), (DiskEventType::Write, 4096)] {
             d.add(&DiskEvent {
-                pid: 0,
                 event_type,
                 transfer_size: size,
-                byte_offset: 0,
-                disk_number: 0,
-                elapsed_time: 0,
             });
         }
         assert_eq!(
@@ -262,6 +220,5 @@ mod tests {
                 write_ops: 2,
             }
         );
-        assert!(!d.is_empty());
     }
 }

@@ -19,6 +19,7 @@ use binrw::BinRead;
 /// ```
 #[derive(BinRead, Debug)]
 #[br(little)]
+#[allow(dead_code)]
 pub struct Ipv4Flow {
     pub pid: u32,
     pub size: u32,
@@ -34,6 +35,7 @@ pub struct Ipv4Flow {
 /// connid, ...) is unused and left unparsed.
 #[derive(BinRead, Debug)]
 #[br(little)]
+#[allow(dead_code)]
 pub struct Ipv6Flow {
     pub pid: u32,
     pub size: u32,
@@ -46,8 +48,8 @@ pub struct Ipv6Flow {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::etw::signatures::utils::{parse, to_ip4};
-    use std::net::{IpAddr, Ipv4Addr};
+    use crate::etw::signatures::utils::parse;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     /// Full-length `TcpIp_SendIPV4` payload (36 bytes as observed on Win11);
     /// only the prefix is parsed. pid=1234, size=1460,
@@ -95,8 +97,8 @@ pub mod tests {
         let f = parse::<Ipv6Flow>(&v6_dump()).expect("valid dump");
         assert_eq!(f.pid, 4321);
         assert_eq!(f.size, 40);
-        assert_eq!(to_ip4(f.src_addr), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
-        assert_eq!(to_ip4(f.dst_addr), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(Ipv6Addr::from(f.src_addr).to_ipv4_mapped(), Some(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(Ipv6Addr::from(f.dst_addr).to_ipv4_mapped(), Some(Ipv4Addr::new(10, 0, 0, 2)));
         assert_eq!(u16::from_be(f.dst_port_be), 53);
     }
 

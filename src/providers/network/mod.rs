@@ -1,16 +1,14 @@
 mod events;
 mod vars;
 
-use std::net::{IpAddr, Ipv4Addr};
-
 use anyhow::Result;
 use windows::Win32::{EVENT_RECORD, EVENT_TRACE_FLAG_NETWORK_TCPIP};
 
 use crate::etw::router::{Batch, KernelRouterBuilder};
 use crate::etw::vars::BATCH_WINDOW;
 use crate::providers::provider::Provider;
-use crate::state::events::{NetDeltas, NetworkEvent, NetworkEventType, NetworkProto, StateChange};
-use crate::etw::signatures::utils::{parse, to_ip4};
+use crate::state::events::{NetDeltas, NetworkEvent, NetworkEventType, StateChange};
+use crate::etw::signatures::utils::parse;
 use crate::providers::network::events::{Ipv4Flow, Ipv6Flow};
 use crate::providers::network::vars::*;
 
@@ -60,53 +58,34 @@ fn event(record: &EVENT_RECORD, data: &[u8]) -> Option<NetworkEvent> {
     let is_tcp = record.EventHeader.ProviderId == TCPIP_TASK_GUID;
     let opcode = record.EventHeader.EventDescriptor.Opcode;
 
-    let (proto, event_type, is_v6) = match (is_tcp, opcode) {
-        (true, TCPIP_SEND_V4) => (NetworkProto::Tcp, NetworkEventType::Send, false),
-        (true, TCPIP_RECEIVE_V4) => (NetworkProto::Tcp, NetworkEventType::Recv, false),
-        (true, TCPIP_CONNECT_V4) => (NetworkProto::Tcp, NetworkEventType::Connect, false),
-        (true, TCPIP_ACCEPT_V4) => (NetworkProto::Tcp, NetworkEventType::Accept, false),
-        (true, TCPIP_SEND_V6) => (NetworkProto::Tcp, NetworkEventType::Send, true),
-        (true, TCPIP_RECEIVE_V6) => (NetworkProto::Tcp, NetworkEventType::Recv, true),
-        (true, TCPIP_CONNECT_V6) => (NetworkProto::Tcp, NetworkEventType::Connect, true),
-        (true, TCPIP_ACCEPT_V6) => (NetworkProto::Tcp, NetworkEventType::Accept, true),
-        (false, UDPIP_SEND_V4) => (NetworkProto::Udp, NetworkEventType::Send, false),
-        (false, UDPIP_RECEIVE_V4) => (NetworkProto::Udp, NetworkEventType::Recv, false),
-        (false, UDPIP_SEND_V6) => (NetworkProto::Udp, NetworkEventType::Send, true),
-        (false, UDPIP_RECEIVE_V6) => (NetworkProto::Udp, NetworkEventType::Recv, true),
+    let (event_type, is_v6) = match (is_tcp, opcode) {
+        (true, TCPIP_SEND_V4) => (NetworkEventType::Send, false),
+        (true, TCPIP_RECEIVE_V4) => (NetworkEventType::Recv, false),
+        (true, TCPIP_CONNECT_V4) => (NetworkEventType::Connect, false),
+        (true, TCPIP_ACCEPT_V4) => (NetworkEventType::Accept, false),
+        (true, TCPIP_SEND_V6) => (NetworkEventType::Send, true),
+        (true, TCPIP_RECEIVE_V6) => (NetworkEventType::Recv, true),
+        (true, TCPIP_CONNECT_V6) => (NetworkEventType::Connect, true),
+        (true, TCPIP_ACCEPT_V6) => (NetworkEventType::Accept, true),
+        (false, UDPIP_SEND_V4) => (NetworkEventType::Send, false),
+        (false, UDPIP_RECEIVE_V4) => (NetworkEventType::Recv, false),
+        (false, UDPIP_SEND_V6) => (NetworkEventType::Send, true),
+        (false, UDPIP_RECEIVE_V6) => (NetworkEventType::Recv, true),
         _ => return None,
     };
 
-    let (pid, size, src_addr, dst_addr, src_port, dst_port) = if is_v6 {
+    let (pid, size) = if is_v6 {
         let f = parse::<Ipv6Flow>(data)?;
-        (
-            f.pid,
-            f.size,
-            to_ip4(f.src_addr),
-            to_ip4(f.dst_addr),
-            u16::from_be(f.src_port_be),
-            u16::from_be(f.dst_port_be),
-        )
+        (f.pid, f.size)
     } else {
         let f = parse::<Ipv4Flow>(data)?;
-        (
-            f.pid,
-            f.size,
-            IpAddr::V4(Ipv4Addr::from(f.src_addr)),
-            IpAddr::V4(Ipv4Addr::from(f.dst_addr)),
-            u16::from_be(f.src_port_be),
-            u16::from_be(f.dst_port_be),
-        )
+        (f.pid, f.size)
     };
 
     Some(NetworkEvent {
         pid,
-        proto,
         event_type,
         size,
-        src_addr,
-        dst_addr,
-        src_port,
-        dst_port,
     })
 }
 
@@ -156,13 +135,9 @@ mod tests {
     #[test]
     fn tcp_send_ipv4() {
         let e = network_event(event(&record(TCPIP_TASK_GUID, TCPIP_SEND_V4), &v4_dump()));
-        assert!(matches!(e.proto, NetworkProto::Tcp));
         assert!(matches!(e.event_type, NetworkEventType::Send));
         assert_eq!(e.pid, 1234);
         assert_eq!(e.size, 1460);
-        assert_eq!(e.src_addr, IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)));
-        assert_eq!(e.src_port, 8080);
-        assert_eq!(e.dst_port, 443);
     }
 
     #[test]
@@ -172,27 +147,16 @@ mod tests {
     }
 
     #[test]
-    fn udp_send_ipv4_is_not_tcp() {
-        // Opcode 10 on UDPIP_TASK_GUID must not be classified as TCP.
-        let e = network_event(event(&record(UDPIP_TASK_GUID, UDPIP_SEND_V4), &v4_dump()));
-        assert!(matches!(e.proto, NetworkProto::Udp));
-        assert!(matches!(e.event_type, NetworkEventType::Send));
-    }
-
-    #[test]
     fn udp_recv_ipv6() {
         let e = network_event(event(&record(UDPIP_TASK_GUID, UDPIP_RECEIVE_V6), &v6_dump()));
-        assert!(matches!(e.proto, NetworkProto::Udp));
         assert!(matches!(e.event_type, NetworkEventType::Recv));
         assert_eq!(e.pid, 4321);
-        assert_eq!(e.src_addr, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
-        assert_eq!(e.dst_port, 53);
+        assert_eq!(e.size, 40);
     }
 
     #[test]
     fn tcp_connect_ipv6() {
         let e = network_event(event(&record(TCPIP_TASK_GUID, TCPIP_CONNECT_V6), &v6_dump()));
-        assert!(matches!(e.proto, NetworkProto::Tcp));
         assert!(matches!(e.event_type, NetworkEventType::Connect));
     }
 
