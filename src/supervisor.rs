@@ -62,10 +62,6 @@ impl Supervisor {
         }
     }
 
-    pub fn set_config(&mut self, config: SupervisorConfig) {
-        self.config = config;
-    }
-
     pub fn dropped(&self) -> u64 {
         self.sink.as_ref().map(|s| s.dropped()).unwrap_or(0)
     }

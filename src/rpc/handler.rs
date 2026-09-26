@@ -5,7 +5,7 @@ use std::time::Duration;
 use uniproc_protocol::meta_capnp::{self, ResponseStatus};
 use uniproc_protocol::windows_capnp::{ProcessPriority as ProtoPriority, windows_agent};
 
-use crate::commands::process::ProcessPriority;
+use crate::api::ProcessPriority;
 use crate::commands::{Commands, Outcome};
 use crate::monitor::SharedSupervisor;
 use crate::rpc::mapping;

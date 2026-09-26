@@ -3,10 +3,12 @@ pub mod process;
 pub mod services;
 mod vars;
 
-use std::cell::RefCell;
 use std::collections::HashSet;
-use std::rc::Rc;
+use std::sync::Arc;
 
+use parking_lot::Mutex;
+
+use crate::api::ProcessPriority;
 use crate::commands::services::{ScHandle, ScManager, ServiceAction};
 use crate::commands::vars::ERROR_BUSY;
 
@@ -20,11 +22,12 @@ async fn spawn_blocking(f: impl FnOnce() -> Outcome + Send + 'static) -> Outcome
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Commands {
-    state: Rc<RefCell<CommandState>>,
+    state: Arc<Mutex<CommandState>>,
 }
 
+#[derive(Default)]
 struct CommandState {
     scm: Option<ScManager>,
     inflight: HashSet<String>,
@@ -32,12 +35,19 @@ struct CommandState {
 
 impl Commands {
     pub fn new() -> Self {
-        Self {
-            state: Rc::new(RefCell::new(CommandState {
-                scm: None,
-                inflight: HashSet::new(),
-            })),
-        }
+        Self::default()
+    }
+
+    /// Blocks until the SCM has taken the control; `ERROR_BUSY` while another one runs for the same service.
+    pub fn control_service(&self, name: &str, action: ServiceAction) -> Outcome {
+        let _guard = self.acquire(name)?;
+        services::control(self.scm()?, name, action)
+    }
+
+    /// Blocks until the service has stopped and been started again.
+    pub fn restart_service(&self, name: &str) -> Outcome {
+        let _guard = self.acquire(name)?;
+        services::restart(self.scm()?, name)
     }
 
     pub async fn service_start(&self, name: String) -> Outcome {
@@ -57,15 +67,13 @@ impl Commands {
     }
 
     pub async fn service_restart(&self, name: String) -> Outcome {
-        let _guard = self.acquire(&name)?;
-        let scm = self.scm()?;
-        spawn_blocking(move || services::restart(scm, &name)).await
+        let this = self.clone();
+        spawn_blocking(move || this.restart_service(&name)).await
     }
 
     async fn service(&self, name: String, action: ServiceAction) -> Outcome {
-        let _guard = self.acquire(&name)?;
-        let scm = self.scm()?;
-        spawn_blocking(move || services::control(scm, &name, action)).await
+        let this = self.clone();
+        spawn_blocking(move || this.control_service(&name, action)).await
     }
 
     pub async fn process_kill(&self, pid: u32) -> Outcome {
@@ -80,11 +88,7 @@ impl Commands {
         spawn_blocking(move || process::resume(pid)).await
     }
 
-    pub async fn process_set_priority(
-        &self,
-        pid: u32,
-        priority: process::ProcessPriority,
-    ) -> Outcome {
+    pub async fn process_set_priority(&self, pid: u32, priority: ProcessPriority) -> Outcome {
         spawn_blocking(move || process::set_priority(pid, priority)).await
     }
 
@@ -93,7 +97,7 @@ impl Commands {
     }
 
     fn scm(&self) -> Result<ScHandle, u32> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock();
         if let Some(scm) = &state.scm {
             return Ok(scm.handle());
         }
@@ -104,11 +108,8 @@ impl Commands {
     }
 
     fn acquire(&self, name: &str) -> Result<InflightGuard, u32> {
-        {
-            let mut state = self.state.borrow_mut();
-            if !state.inflight.insert(name.to_string()) {
-                return Err(ERROR_BUSY);
-            }
+        if !self.state.lock().inflight.insert(name.to_string()) {
+            return Err(ERROR_BUSY);
         }
         Ok(InflightGuard {
             state: self.state.clone(),
@@ -117,19 +118,13 @@ impl Commands {
     }
 }
 
-impl Default for Commands {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 struct InflightGuard {
-    state: Rc<RefCell<CommandState>>,
+    state: Arc<Mutex<CommandState>>,
     name: String,
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.state.borrow_mut().inflight.remove(&self.name);
+        self.state.lock().inflight.remove(&self.name);
     }
 }

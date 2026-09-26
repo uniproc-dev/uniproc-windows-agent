@@ -59,11 +59,11 @@ pub fn file_stamp(path: &str) -> Option<(u64, u64)> {
     Some((meta.len(), modified))
 }
 
-fn store_path() -> PathBuf {
+fn store_path(name: &str) -> PathBuf {
     let root = std::env::var_os("ProgramData")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"));
-    root.join("Uniproc").join("signature-cache")
+    root.join("Uniproc").join(name)
 }
 
 fn builder(path: PathBuf) -> StoreBuilder {
@@ -101,8 +101,8 @@ impl Drop for PersistentSignatures {
     }
 }
 
-pub fn open() -> Option<PersistentSignatures> {
-    let path = store_path();
+pub fn open(name: &str) -> Option<PersistentSignatures> {
+    let path = store_path(name);
     if let Some(parent) = path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
     {

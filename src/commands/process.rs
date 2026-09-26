@@ -5,30 +5,19 @@ use windows::Win32::{
     SetProcessAffinityMask, TerminateProcess,
 };
 
+use crate::api::ProcessPriority;
 use crate::commands::Outcome;
 use crate::commands::services::win32_code;
 use crate::win::open_process;
 
-#[derive(Clone, Copy)]
-pub enum ProcessPriority {
-    Idle,
-    BelowNormal,
-    Normal,
-    AboveNormal,
-    High,
-    Realtime,
-}
-
-impl ProcessPriority {
-    fn class(self) -> i32 {
-        match self {
-            Self::Idle => IDLE_PRIORITY_CLASS,
-            Self::BelowNormal => BELOW_NORMAL_PRIORITY_CLASS,
-            Self::Normal => NORMAL_PRIORITY_CLASS,
-            Self::AboveNormal => ABOVE_NORMAL_PRIORITY_CLASS,
-            Self::High => HIGH_PRIORITY_CLASS,
-            Self::Realtime => REALTIME_PRIORITY_CLASS,
-        }
+fn class(priority: ProcessPriority) -> i32 {
+    match priority {
+        ProcessPriority::Idle => IDLE_PRIORITY_CLASS,
+        ProcessPriority::BelowNormal => BELOW_NORMAL_PRIORITY_CLASS,
+        ProcessPriority::Normal => NORMAL_PRIORITY_CLASS,
+        ProcessPriority::AboveNormal => ABOVE_NORMAL_PRIORITY_CLASS,
+        ProcessPriority::High => HIGH_PRIORITY_CLASS,
+        ProcessPriority::Realtime => REALTIME_PRIORITY_CLASS,
     }
 }
 
@@ -68,7 +57,7 @@ pub fn resume(pid: u32) -> Outcome {
 
 pub fn set_priority(pid: u32, priority: ProcessPriority) -> Outcome {
     let handle = HandleGuard::open(PROCESS_SET_INFORMATION, pid)?;
-    unsafe { SetPriorityClass(handle.0, priority.class() as u32) }.ok().map_err(|e| win32_code(&e))
+    unsafe { SetPriorityClass(handle.0, class(priority) as u32) }.ok().map_err(|e| win32_code(&e))
 }
 
 pub fn set_affinity(pid: u32, mask: u64) -> Outcome {

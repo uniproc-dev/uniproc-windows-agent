@@ -2,17 +2,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::providers::Supervisor;
-use crate::supervisor::SupervisorConfig;
-
-const DEBUG_SESSION_NAMESPACE: &str = "Uniproc-Debug-";
+use crate::providers::{DEBUG, supervisor};
 
 pub fn run(iterations: u32, top: usize) -> Result<()> {
-    let mut supervisor = Supervisor::default();
-    supervisor.set_config(SupervisorConfig {
-        session_namespace: Some(DEBUG_SESSION_NAMESPACE.to_string()),
-        ..Default::default()
-    });
+    let mut supervisor = supervisor(&DEBUG);
     supervisor.start()?;
 
     let state = supervisor.state();

@@ -4,6 +4,23 @@ pub const SERVICE_NAME: &str = "UniprocProcessMonitor";
 /// Name the service shows in the Services console.
 pub const SERVICE_DISPLAY_NAME: &str = "Uniproc Process Monitor";
 
+/// Ok, or the Win32 error code; an NTSTATUS for suspend and resume.
+pub type CommandResult = Result<(), u32>;
+
+/// A value and the tag it was taken under: an unchanged tag means an unchanged value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tagged<T> {
+    pub etag: u64,
+    pub value: T,
+}
+
+/// Metrics for exactly the processes listed under `processes_etag`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProcessMetricsSnapshot {
+    pub processes_etag: u64,
+    pub metrics: Vec<ProcessMetrics>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SignatureStatus {
     /// Not checked yet, or the check itself failed.

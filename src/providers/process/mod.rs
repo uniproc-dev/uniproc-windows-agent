@@ -36,20 +36,25 @@ pub use vars::KERNEL_PROCESS_PROVIDER;
 pub struct KernelProcessProvider {
     tx: Sender<u32>,
     rx: Receiver<u32>,
+    signature_store: &'static str,
     running: Arc<AtomicBool>,
     worker: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl KernelProcessProvider {
     pub fn new() -> Self {
-        Self::with_queue(crossbeam_channel::unbounded())
+        Self::with_queue(crossbeam_channel::unbounded(), crate::providers::SERVICE.signature_store)
     }
 
     /// Shared enrichment queue: bootstrap also feeds pids into it.
-    pub fn with_queue((tx, rx): (Sender<u32>, Receiver<u32>)) -> Self {
+    pub fn with_queue(
+        (tx, rx): (Sender<u32>, Receiver<u32>),
+        signature_store: &'static str,
+    ) -> Self {
         Self {
             tx,
             rx,
+            signature_store,
             running: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(Vec::new()),
         }
@@ -251,7 +256,7 @@ impl Provider for KernelProcessProvider {
         }
         let rx = self.rx.clone();
 
-        let persisted = signature_cache::open();
+        let persisted = signature_cache::open(self.signature_store);
         let mut handles = Vec::with_capacity(2);
 
         {
