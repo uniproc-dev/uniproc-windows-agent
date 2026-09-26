@@ -1,16 +1,14 @@
-use windows::Win32::Foundation::STATUS_SUCCESS;
-use windows::Win32::System::Performance::{
-    PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue,
-    PdhOpenQueryW,
+use ntapi::ntpoapi::PROCESSOR_POWER_INFORMATION;
+use windows::Win32::{
+    CallNtPowerInformation, GlobalMemoryStatusEx, MEMORYSTATUSEX, PDH_FMT_COUNTERVALUE,
+    PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery,
+    PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW, ProcessorInformation,
+    STATUS_SUCCESS,
 };
-use windows::Win32::System::Power::{
-    CallNtPowerInformation, PROCESSOR_POWER_INFORMATION, ProcessorInformation,
-};
-use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows::core::PCWSTR;
 
 use crate::providers::machine::processor_times::{ProcessorTimes, sample_processor_times};
-use crate::providers::machine::vars::PDH_PROCESSOR_PERFORMANCE;
+use crate::providers::machine::vars::{PDH_CSTATUS_VALID_DATA, PDH_PROCESSOR_PERFORMANCE};
 use crate::state::events::MachineSnapshot;
 
 fn now_ms() -> u64 {
@@ -29,12 +27,12 @@ impl PdhProcessorPerformance {
     pub fn open() -> Option<Self> {
         unsafe {
             let mut query = PDH_HQUERY::default();
-            if PdhOpenQueryW(None, 0, &mut query) != 0 {
+            if PdhOpenQueryW(PCWSTR::null(), 0, &mut query).0 != 0 {
                 return None;
             }
 
             let mut counter = PDH_HCOUNTER::default();
-            if PdhAddEnglishCounterW(query, PDH_PROCESSOR_PERFORMANCE, 0, &mut counter) != 0 {
+            if PdhAddEnglishCounterW(query, PDH_PROCESSOR_PERFORMANCE, 0, &mut counter).0 != 0 {
                 let _ = PdhCloseQuery(query);
                 return None;
             }
@@ -47,12 +45,12 @@ impl PdhProcessorPerformance {
 
     pub fn sample(&mut self) -> Option<f64> {
         unsafe {
-            if PdhCollectQueryData(self.query) != 0 {
+            if PdhCollectQueryData(self.query).0 != 0 {
                 return None;
             }
 
             let mut value = PDH_FMT_COUNTERVALUE::default();
-            if PdhGetFormattedCounterValue(self.counter, PDH_FMT_DOUBLE, None, &mut value) != 0 {
+            if PdhGetFormattedCounterValue(self.counter, PDH_FMT_DOUBLE, None, &mut value).0 != 0 {
                 return None;
             }
             if value.CStatus != PDH_CSTATUS_VALID_DATA {
@@ -78,7 +76,7 @@ fn sample_cpu_frequency_mhz(
         .map(|n| n.get())
         .unwrap_or(1);
     info.clear();
-    info.resize(cpu_count, PROCESSOR_POWER_INFORMATION::default());
+    info.resize(cpu_count, unsafe { std::mem::zeroed() });
 
     let status = unsafe {
         CallNtPowerInformation(
@@ -90,7 +88,7 @@ fn sample_cpu_frequency_mhz(
         )
     };
 
-    if status != STATUS_SUCCESS || info.is_empty() {
+    if status != STATUS_SUCCESS.0 || info.is_empty() {
         return (0, 0);
     }
 
@@ -126,10 +124,10 @@ pub fn sample_machine(
         dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
         ..Default::default()
     };
-    if unsafe { GlobalMemoryStatusEx(&mut mem) }.is_ok() {
-        snap.total_physical_kb = mem.ullTotalPhys / 1024;
-        snap.available_physical_kb = mem.ullAvailPhys / 1024;
-        snap.used_physical_kb = (mem.ullTotalPhys - mem.ullAvailPhys) / 1024;
+    if unsafe { GlobalMemoryStatusEx(&mut mem) }.as_bool() {
+        snap.total_physical_kb = mem.ullTotalPhys.0 / 1024;
+        snap.available_physical_kb = mem.ullAvailPhys.0 / 1024;
+        snap.used_physical_kb = (mem.ullTotalPhys.0 - mem.ullAvailPhys.0) / 1024;
     }
 
     snap

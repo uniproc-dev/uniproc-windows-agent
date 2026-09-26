@@ -3,8 +3,7 @@ mod events;
 mod vars;
 
 use anyhow::Result;
-use windows::Win32::System::Diagnostics::Etw::EVENT_TRACE_FLAG_PROFILE;
-use windows::Win32::System::Performance::QueryPerformanceFrequency;
+use windows::Win32::{EVENT_TRACE_FLAG_PROFILE, QueryPerformanceFrequency};
 
 use crate::etw::router::KernelRouterBuilder;
 use crate::etw::signatures::utils::parse;
@@ -26,7 +25,7 @@ impl CpuSamplerProvider {
 impl Provider for CpuSamplerProvider {
     fn register(&self, b: &mut KernelRouterBuilder) -> Result<()> {
         let mut ticks_per_second = 0i64;
-        unsafe { QueryPerformanceFrequency(&mut ticks_per_second) }?;
+        unsafe { QueryPerformanceFrequency(&mut ticks_per_second) }.ok()?;
         let max_age = (FLUSH_AGE.as_secs_f64() * ticks_per_second as f64) as i64;
         let mut batch = SampleBatch::new(FLUSH_ENTRIES, FLUSH_EVENTS, max_age);
 

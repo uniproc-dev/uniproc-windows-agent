@@ -1,10 +1,9 @@
 use anyhow::{Result, bail};
-use windows::Win32::Foundation::{CloseHandle, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE};
-use windows::Win32::Security::{
-    AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+use windows::Win32::{
+    AdjustTokenPrivileges, CloseHandle, ERROR_NOT_ALL_ASSIGNED, GetCurrentProcess, GetLastError,
+    HANDLE, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, OpenProcessToken, SE_PRIVILEGE_ENABLED,
     TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::PCWSTR;
 
 /// Turns on a privilege the process token already holds.
@@ -16,9 +15,10 @@ pub fn enable(name: PCWSTR) -> Result<()> {
     unsafe {
         OpenProcessToken(
             GetCurrentProcess(),
-            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            (TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY) as u32,
             &mut token,
-        )?
+        )
+        .ok()?
     };
 
     let adjusted = adjust(token, name);
@@ -28,19 +28,19 @@ pub fn enable(name: PCWSTR) -> Result<()> {
 
 fn adjust(token: HANDLE, name: PCWSTR) -> Result<()> {
     let mut luid = Default::default();
-    unsafe { LookupPrivilegeValueW(None, name, &mut luid)? };
+    unsafe { LookupPrivilegeValueW(PCWSTR::null(), name, &mut luid).ok()? };
 
     let privileges = TOKEN_PRIVILEGES {
         PrivilegeCount: 1,
         Privileges: [LUID_AND_ATTRIBUTES {
             Luid: luid,
-            Attributes: SE_PRIVILEGE_ENABLED,
+            Attributes: SE_PRIVILEGE_ENABLED as u32,
         }],
     };
 
-    unsafe { AdjustTokenPrivileges(token, false, Some(&privileges), 0, None, None)? };
+    unsafe { AdjustTokenPrivileges(token, false, Some(&privileges), 0, None, None).ok()? };
 
-    if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED {
+    if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED as u32 {
         bail!(
             "the process token does not hold {}",
             unsafe { name.to_string() }.unwrap_or_default()

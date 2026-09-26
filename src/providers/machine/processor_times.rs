@@ -1,8 +1,6 @@
 use anyhow::{Result, bail};
 use ntapi::ntexapi::SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION;
-use windows::Wdk::System::SystemInformation::{
-    NtQuerySystemInformation, SystemProcessorPerformanceInformation,
-};
+use windows::Win32::{NtQuerySystemInformation, SystemProcessorPerformanceInformation};
 
 use crate::aligned::AlignedBuf;
 use crate::providers::bootstrap::vars::STATUS_INFO_LENGTH_MISMATCH;
@@ -38,7 +36,7 @@ fn read_totals() -> Result<ProcessorTimes> {
                 SystemProcessorPerformanceInformation,
                 buf.as_mut_ptr() as *mut _,
                 buf.len() as u32,
-                &mut return_length,
+                Some(&mut return_length),
             )
         };
 

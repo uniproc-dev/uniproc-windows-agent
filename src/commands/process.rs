@@ -1,13 +1,13 @@
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Threading::{
-    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS,
-    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_ACCESS_RIGHTS,
-    PROCESS_CREATION_FLAGS, PROCESS_SET_INFORMATION, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
-    REALTIME_PRIORITY_CLASS, SetPriorityClass, SetProcessAffinityMask, TerminateProcess,
+use windows::Win32::{
+    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, CloseHandle, HANDLE,
+    HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_SET_INFORMATION,
+    PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE, REALTIME_PRIORITY_CLASS, SetPriorityClass,
+    SetProcessAffinityMask, TerminateProcess,
 };
 
 use crate::commands::Outcome;
 use crate::commands::services::win32_code;
+use crate::win::open_process;
 
 #[derive(Clone, Copy)]
 pub enum ProcessPriority {
@@ -20,7 +20,7 @@ pub enum ProcessPriority {
 }
 
 impl ProcessPriority {
-    fn class(self) -> PROCESS_CREATION_FLAGS {
+    fn class(self) -> i32 {
         match self {
             Self::Idle => IDLE_PRIORITY_CLASS,
             Self::BelowNormal => BELOW_NORMAL_PRIORITY_CLASS,
@@ -35,9 +35,8 @@ impl ProcessPriority {
 struct HandleGuard(HANDLE);
 
 impl HandleGuard {
-    fn open(access: PROCESS_ACCESS_RIGHTS, pid: u32) -> Result<Self, u32> {
-        let handle =
-            unsafe { OpenProcess(access, false, pid) }.map_err(|e| win32_code(&e))?;
+    fn open(access: i32, pid: u32) -> Result<Self, u32> {
+        let handle = open_process(access, pid).map_err(|e| win32_code(&e))?;
         Ok(Self(handle))
     }
 }
@@ -50,7 +49,7 @@ impl Drop for HandleGuard {
 
 pub fn kill(pid: u32) -> Outcome {
     let handle = HandleGuard::open(PROCESS_TERMINATE, pid)?;
-    unsafe { TerminateProcess(handle.0, 1) }.map_err(|e| win32_code(&e))
+    unsafe { TerminateProcess(handle.0, 1) }.ok().map_err(|e| win32_code(&e))
 }
 
 pub fn suspend(pid: u32) -> Outcome {
@@ -69,10 +68,10 @@ pub fn resume(pid: u32) -> Outcome {
 
 pub fn set_priority(pid: u32, priority: ProcessPriority) -> Outcome {
     let handle = HandleGuard::open(PROCESS_SET_INFORMATION, pid)?;
-    unsafe { SetPriorityClass(handle.0, priority.class()) }.map_err(|e| win32_code(&e))
+    unsafe { SetPriorityClass(handle.0, priority.class() as u32) }.ok().map_err(|e| win32_code(&e))
 }
 
 pub fn set_affinity(pid: u32, mask: u64) -> Outcome {
     let handle = HandleGuard::open(PROCESS_SET_INFORMATION, pid)?;
-    unsafe { SetProcessAffinityMask(handle.0, mask as usize) }.map_err(|e| win32_code(&e))
+    unsafe { SetProcessAffinityMask(handle.0, mask as usize) }.ok().map_err(|e| win32_code(&e))
 }

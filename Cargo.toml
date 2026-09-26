@@ -5,18 +5,13 @@ edition = "2024"
 
 [dependencies]
 windows-service = "0.8.0"
-windows = { version = "0.62.2", features = [
-    "Win32_System_Diagnostics_Etw", "Win32_System_Threading", "Win32_Foundation",
-    "Win32_System_EventLog", "Win32_Security", "Win32_System_Registry",
-    "Win32_System_Services", "Win32_System_Time", "Win32_System_SystemInformation",
-    "Win32_System_Power", "Win32_System_Performance", "Wdk", "Wdk_System",
-    "Wdk_Foundation", "Wdk_System_Threading", "Wdk_System_SystemInformation",
-    "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_Storage_Packaging",
-    "Win32_Storage_FileSystem",
-    "Win32_Storage_Packaging_Appx", "Win32_UI", "Win32_UI_Shell",
-    "Win32_Security_WinTrust", "Win32_Security_Cryptography",
-    "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip",
-    "Win32_UI_WindowsAndMessaging"] }
+windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", features = [
+    "evntrace", "evntcons", "evntprov", "wmistr", "minwinbase", "timezoneapi",
+    "winerror", "ntstatus", "minwindef", "winnt", "windef", "handleapi", "errhandlingapi",
+    "processthreadsapi", "winbase", "securitybaseapi", "winternl", "ntddk", "memoryapi",
+    "winsvc", "profileapi", "pdh", "powerbase", "sysinfoapi",
+    "winver", "fileapi", "appmodel", "shellapi", "shlwapi",
+    "mscat", "mssip", "wincrypt", "wintrust", "ntsecapi"] }
 ntapi = "0.4.3"
 fxhash = "0.2.1"
 

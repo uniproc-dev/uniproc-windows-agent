@@ -2,8 +2,12 @@ use std::mem::size_of;
 
 use anyhow::{Result, bail};
 use tracing::{info, warn};
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
-use windows::Win32::System::Diagnostics::Etw::*;
+use windows::Win32::{
+    CONTROLTRACE_ID, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION_2,
+    ERROR_ALREADY_EXISTS, ERROR_SUCCESS, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+    EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, EVENT_TRACE_SYSTEM_LOGGER_MODE,
+    EnableTraceEx2, StartTraceW, StopTraceW, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
+};
 use windows::core::{GUID, PCWSTR};
 
 use crate::aligned::AlignedBuf;
@@ -16,7 +20,7 @@ pub enum SessionMode {
 
 pub struct EtwSession {
     name: String,
-    handle: CONTROLTRACE_HANDLE,
+    handle: CONTROLTRACE_ID,
 }
 
 unsafe impl Send for EtwSession {}
@@ -32,7 +36,7 @@ impl EtwSession {
         })
     }
 
-    pub fn handle(&self) -> CONTROLTRACE_HANDLE {
+    pub fn handle(&self) -> CONTROLTRACE_ID {
         self.handle
     }
 
@@ -68,7 +72,7 @@ fn start_raw(
     guid: Option<GUID>,
     flags: u32,
     mode: SessionMode,
-) -> Result<CONTROLTRACE_HANDLE> {
+) -> Result<CONTROLTRACE_ID> {
     let pcwstr = PCWSTR(name_ptr);
     let displayed = String::from_utf16_lossy(unsafe { pcwstr.as_wide() });
     let name_bytes = unsafe { pcwstr.as_wide() }.len() * 2;
@@ -76,28 +80,22 @@ fn start_raw(
     let mut buf = AlignedBuf::zeroed(props_size);
     let props = unsafe { build_props(&mut buf, guid, flags, mode) };
 
-    let mut handle = CONTROLTRACE_HANDLE::default();
+    let mut handle = CONTROLTRACE_ID::default();
     let status = unsafe { StartTraceW(&mut handle, pcwstr, props) };
 
-    if status == ERROR_SUCCESS {
-        info!(
-            "ETW session '{displayed}' started (handle={})",
-            handle.Value
-        );
-    } else if status == ERROR_ALREADY_EXISTS {
+    if status == ERROR_SUCCESS as u32 {
+        info!("ETW session '{displayed}' started (handle={})", handle.0);
+    } else if status == ERROR_ALREADY_EXISTS as u32 {
         warn!("Session '{displayed}' already exists, restarting...");
         let mut stop_buf = AlignedBuf::zeroed(props_size + 512);
         let stop_props = unsafe { build_props(&mut stop_buf, None, 0, SessionMode::Normal) };
-        let _ = unsafe { StopTraceW(CONTROLTRACE_HANDLE::default(), pcwstr, stop_props) };
+        let _ = unsafe { StopTraceW(CONTROLTRACE_ID::default(), pcwstr, stop_props) };
         let props = unsafe { build_props(&mut buf, guid, flags, mode) };
         let status2 = unsafe { StartTraceW(&mut handle, pcwstr, props) };
-        if status2 != ERROR_SUCCESS {
+        if status2 != ERROR_SUCCESS as u32 {
             bail!("StartTraceW after restart '{displayed}': {status2:?}");
         }
-        info!(
-            "ETW session '{displayed}' restarted (handle={})",
-            handle.Value
-        );
+        info!("ETW session '{displayed}' restarted (handle={})", handle.0);
     } else {
         bail!("StartTraceW '{displayed}': {status:?}");
     }
@@ -113,26 +111,30 @@ unsafe fn build_props(
 ) -> &mut EVENT_TRACE_PROPERTIES {
     let props = &mut *(buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES);
     props.Wnode.BufferSize = buf.len() as u32;
-    props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+    props.Wnode.Flags = WNODE_FLAG_TRACED_GUID as u32;
     props.Wnode.ClientContext = 1; // QPC timestamps
     if let Some(g) = guid {
         props.Wnode.Guid = g;
     }
-    props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+    props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE as u32;
     if mode == SessionMode::SystemLogger {
-        props.LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE;
+        props.LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE as u32;
     }
     props.BufferSize = crate::etw::vars::BUFFER_SIZE_KB;
     props.MinimumBuffers = crate::etw::vars::MINIMUM_BUFFERS;
     props.MaximumBuffers = crate::etw::vars::MAXIMUM_BUFFERS;
     props.FlushTimer = crate::etw::vars::FLUSH_TIMER_SEC;
-    props.EnableFlags = EVENT_TRACE_FLAG(flags);
+    props.EnableFlags = flags;
     props
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::{
+        ControlTraceW, EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_FLAG_DISK_IO,
+        EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROFILE,
+    };
 
     fn enabled_flags(name: &str) -> u32 {
         let w = session_name_wide(name);
@@ -144,14 +146,14 @@ mod tests {
         props.LogFileNameOffset = (size_of::<EVENT_TRACE_PROPERTIES>() + 1024) as u32;
         let status = unsafe {
             ControlTraceW(
-                CONTROLTRACE_HANDLE::default(),
+                CONTROLTRACE_ID::default(),
                 PCWSTR(w.as_ptr()),
                 props,
-                EVENT_TRACE_CONTROL_QUERY,
+                EVENT_TRACE_CONTROL_QUERY as u32,
             )
         };
-        assert_eq!(status, ERROR_SUCCESS, "query '{name}'");
-        props.EnableFlags.0
+        assert_eq!(status, ERROR_SUCCESS as u32, "query '{name}'");
+        props.EnableFlags
     }
 
     fn stop(name: &str) {
@@ -159,14 +161,14 @@ mod tests {
         let size = size_of::<EVENT_TRACE_PROPERTIES>() + 2048;
         let mut buf = AlignedBuf::zeroed(size);
         let props = unsafe { build_props(&mut buf, None, 0, SessionMode::Normal) };
-        let _ = unsafe { StopTraceW(CONTROLTRACE_HANDLE::default(), PCWSTR(w.as_ptr()), props) };
+        let _ = unsafe { StopTraceW(CONTROLTRACE_ID::default(), PCWSTR(w.as_ptr()), props) };
     }
 
     #[test]
     #[ignore = "requires admin and a real ETW session"]
     fn a_leftover_session_is_restarted_with_its_flags() {
         crate::privileges::enable(windows::core::w!("SeSystemProfilePrivilege")).unwrap();
-        let flags = EVENT_TRACE_FLAG_DISK_IO.0 | EVENT_TRACE_FLAG_PROFILE.0 | EVENT_TRACE_FLAG_NETWORK_TCPIP.0;
+        let flags = (EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_PROFILE | EVENT_TRACE_FLAG_NETWORK_TCPIP) as u32;
         let name = "Uniproc-RestartTest";
         stop(name);
         let w = session_name_wide(name);
@@ -181,16 +183,16 @@ mod tests {
     }
 }
 
-fn enable_provider(handle: CONTROLTRACE_HANDLE, guid: &GUID) -> Result<()> {
+fn enable_provider(handle: CONTROLTRACE_ID, guid: &GUID) -> Result<()> {
     let params = ENABLE_TRACE_PARAMETERS {
-        Version: ENABLE_TRACE_PARAMETERS_VERSION_2,
+        Version: ENABLE_TRACE_PARAMETERS_VERSION_2 as u32,
         ..Default::default()
     };
     let err = unsafe {
         EnableTraceEx2(
             handle,
             guid,
-            EVENT_CONTROL_CODE_ENABLE_PROVIDER.0,
+            EVENT_CONTROL_CODE_ENABLE_PROVIDER as u32,
             TRACE_LEVEL_INFORMATION as u8,
             0xFFFF_FFFF_FFFF_FFFF,
             0,
@@ -198,7 +200,7 @@ fn enable_provider(handle: CONTROLTRACE_HANDLE, guid: &GUID) -> Result<()> {
             Some(&params),
         )
     };
-    if err != ERROR_SUCCESS {
+    if err != ERROR_SUCCESS as u32 {
         bail!("EnableTraceEx2({guid:?}): {err:?}");
     }
     Ok(())

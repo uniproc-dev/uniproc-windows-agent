@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ntapi::ntexapi::{SYSTEM_PROCESS_INFORMATION, SYSTEM_THREAD_INFORMATION};
-use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
+use windows::Win32::{NtQuerySystemInformation, SystemProcessInformation};
 
 use crate::aligned::AlignedBuf;
 use crate::providers::bootstrap::vars::{
@@ -33,7 +33,7 @@ pub unsafe fn enum_processes() -> Result<Vec<StateChange>> {
                 SystemProcessInformation,
                 buf.as_mut_ptr() as *mut _,
                 buf_size as u32,
-                &mut return_length,
+                Some(&mut return_length),
             )
         };
 

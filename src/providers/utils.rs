@@ -1,44 +1,33 @@
 use ntapi::ntrtl::RTL_USER_PROCESS_PARAMETERS;
 use ntapi::winapi::um::winbase::LocalFree;
+use windows::Win32::{
+    CATALOG_INFO, CERT_NAME_SIMPLE_DISPLAY_TYPE, CloseHandle, CloseServiceHandle,
+    CommandLineToArgvW, CreateFileW, CertGetNameStringW, CryptCATAdminAcquireContext2,
+    CryptCATAdminCalcHashFromFileHandle2, CryptCATAdminEnumCatalogFromHash,
+    CryptCATAdminReleaseCatalogContext, CryptCATAdminReleaseContext,
+    CryptCATCatalogInfoFromContext, ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, GENERIC_READ, GetApplicationUserModelId,
+    GetPackageFullName, HANDLE, HCATADMIN, HCATINFO, HWND, NtQueryInformationProcess,
+    OPEN_EXISTING, OpenServiceW, PEB, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, PROCESSINFOCLASS, ProcessBasicInformation,
+    QUERY_SERVICE_CONFIGW, QueryFullProcessImageNameW, QueryServiceConfig2W, QueryServiceConfigW,
+    ReadProcessMemory, SC_ENUM_PROCESS_INFO, SC_HANDLE, SERVICE_CONFIG_DESCRIPTION,
+    SERVICE_CONTINUE_PENDING, SERVICE_DESCRIPTIONW, SERVICE_PAUSE_PENDING, SERVICE_PAUSED,
+    SERVICE_QUERY_CONFIG, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATE_ALL,
+    SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_WIN32, TRUST_E_NOSIGNATURE,
+    TRUST_E_SUBJECT_FORM_UNKNOWN, WINTRUST_CATALOG_INFO, WINTRUST_DATA, WINTRUST_FILE_INFO,
+    WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_CATALOG, WTD_CHOICE_FILE, WTD_REVOKE_NONE,
+    WTD_SAFER_FLAG, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+    WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
+};
 use windows::core::{PCWSTR, PWSTR};
-use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS, ProcessBasicInformation};
-use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, HWND, TRUST_E_NOSIGNATURE, TRUST_E_SUBJECT_FORM_UNKNOWN};
-use windows::Win32::Security::Cryptography::Catalog::{
-    CATALOG_INFO, CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
-    CryptCATAdminEnumCatalogFromHash, CryptCATAdminReleaseCatalogContext,
-    CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext,
-};
-use windows::Win32::Security::Cryptography::{CertGetNameStringW, CERT_NAME_SIMPLE_DISPLAY_TYPE};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, OPEN_EXISTING,
-};
-use windows::Win32::Security::WinTrust::{
-    WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL,
-    WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_SAFER_FLAG, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
-    WTD_UI_NONE, WINTRUST_CATALOG_INFO, WTD_CHOICE_CATALOG, WTHelperGetProvSignerFromChain,
-    WTHelperProvDataFromStateData, WinVerifyTrust,
-};
-use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-use windows::Win32::System::Services::{
-    CloseServiceHandle, ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, OpenServiceW,
-    QUERY_SERVICE_CONFIGW, QueryServiceConfig2W, QueryServiceConfigW, SC_ENUM_PROCESS_INFO,
-    SC_HANDLE, SERVICE_CONFIG_DESCRIPTION, SERVICE_CONTINUE_PENDING, SERVICE_DESCRIPTIONW,
-    SERVICE_STATUS_CURRENT_STATE,
-    SERVICE_PAUSED, SERVICE_PAUSE_PENDING, SERVICE_QUERY_CONFIG, SERVICE_RUNNING,
-    SERVICE_START_PENDING, SERVICE_STATE_ALL, SERVICE_STOPPED, SERVICE_STOP_PENDING, SERVICE_WIN32,
-};
-use windows::Win32::System::Threading::{
-    OpenProcess, PEB, PROCESS_BASIC_INFORMATION, PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, QueryFullProcessImageNameW,
-};
-use windows::Win32::Storage::Packaging::Appx::{GetApplicationUserModelId, GetPackageFullName};
-use windows::Win32::UI::Shell::CommandLineToArgvW;
 
 use crate::commands::services::ScHandle;
 use crate::state::events::ProcessSignature;
+use crate::win::{PROCESS_NAME_WIN32, WINTRUST_ACTION_GENERIC_VERIFY_V2, open_process};
 
 pub unsafe fn query_command_line(pid: u32) -> Option<String> {
-    let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
+    let handle = open_process(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, pid).ok()?;
 
     let mut pbi = PROCESS_BASIC_INFORMATION::default();
 
@@ -47,11 +36,11 @@ pub unsafe fn query_command_line(pid: u32) -> Option<String> {
         ProcessBasicInformation,
         &mut pbi as *mut _ as *mut _,
         std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
-        std::ptr::null_mut(),
+        None,
     );
 
     if status.is_err() {
-        CloseHandle(handle).ok();
+        let _ = CloseHandle(handle);
         return None;
     }
 
@@ -63,8 +52,8 @@ pub unsafe fn query_command_line(pid: u32) -> Option<String> {
         std::mem::size_of::<PEB>(),
         None,
     );
-    if ok.is_err() {
-        CloseHandle(handle).ok();
+    if !ok.as_bool() {
+        let _ = CloseHandle(handle);
         return None;
     }
 
@@ -76,8 +65,8 @@ pub unsafe fn query_command_line(pid: u32) -> Option<String> {
         std::mem::size_of::<RTL_USER_PROCESS_PARAMETERS>(),
         None,
     );
-    if ok.is_err() {
-        CloseHandle(handle).ok();
+    if !ok.as_bool() {
+        let _ = CloseHandle(handle);
         return None;
     }
 
@@ -93,13 +82,13 @@ pub unsafe fn query_command_line(pid: u32) -> Option<String> {
             params.CommandLine.Length as usize,
             None,
         );
-        if ok.is_err() {
+        if !ok.as_bool() {
             return None;
         }
         Some(String::from_utf16_lossy(&scratch))
     });
 
-    CloseHandle(handle).ok();
+    let _ = CloseHandle(handle);
     result
 }
 
@@ -128,7 +117,7 @@ pub unsafe fn parse_cmd_line(cmd_line: &str) -> Vec<String> {
 
 pub unsafe fn get_process_package_info(pid: u32) -> Option<(String, String)> {
 
-    let Ok(handle) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) else {
+    let Ok(handle) = open_process(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, pid) else {
         return None;
     };
 
@@ -138,7 +127,7 @@ pub unsafe fn get_process_package_info(pid: u32) -> Option<(String, String)> {
     let _ = GetPackageFullName(handle, &mut len, None);
     if len > 0 {
         let mut buf = vec![0u16; len as usize];
-        if GetPackageFullName(handle, &mut len, Option::from(PWSTR(buf.as_mut_ptr()))).is_ok() {
+        if GetPackageFullName(handle, &mut len, Option::from(PWSTR(buf.as_mut_ptr()))) == 0 {
 
             package_full_name = Some(String::from_utf16_lossy(&buf[..len as usize - 1]));
         }
@@ -148,7 +137,7 @@ pub unsafe fn get_process_package_info(pid: u32) -> Option<(String, String)> {
     let _ = GetApplicationUserModelId(handle, &mut len, None);
     if len > 0 {
         let mut buf = vec![0u16; len as usize];
-        if GetApplicationUserModelId(handle, &mut len, Option::from(PWSTR(buf.as_mut_ptr()))).is_ok() {
+        if GetApplicationUserModelId(handle, &mut len, Option::from(PWSTR(buf.as_mut_ptr()))) == 0 {
             let aumid = String::from_utf16_lossy(&buf[..len as usize - 1]);
 
             if let Some(pos) = aumid.find('!') {
@@ -166,7 +155,7 @@ pub unsafe fn get_process_package_info(pid: u32) -> Option<(String, String)> {
     }
 }
 pub unsafe fn query_image_path(pid: u32) -> Option<String> {
-    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+    let handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, pid).ok()?;
     let result = WIDE_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
         scratch.clear();
@@ -178,18 +167,18 @@ pub unsafe fn query_image_path(pid: u32) -> Option<String> {
             PWSTR(scratch.as_mut_ptr()),
             &mut len,
         );
-        ok.ok()?;
+        ok.ok().ok()?;
         Some(String::from_utf16_lossy(&scratch[..len as usize]))
     });
     let _ = CloseHandle(handle);
     result
 }
 
-const PROCESS_CONSOLE_HOST_PROCESS: PROCESSINFOCLASS = PROCESSINFOCLASS(49);
+const PROCESS_CONSOLE_HOST_PROCESS: PROCESSINFOCLASS = 49;
 
 /// Pid of the conhost serving `pid`'s console, or 0 when it has none.
 pub unsafe fn query_console_host_pid(pid: u32) -> u32 {
-    let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+    let Ok(handle) = open_process(PROCESS_QUERY_LIMITED_INFORMATION, pid) else {
         return 0;
     };
     let mut value = 0usize;
@@ -198,7 +187,7 @@ pub unsafe fn query_console_host_pid(pid: u32) -> u32 {
         PROCESS_CONSOLE_HOST_PROCESS,
         &mut value as *mut usize as *mut _,
         std::mem::size_of::<usize>() as u32,
-        std::ptr::null_mut(),
+        None,
     );
     let _ = CloseHandle(handle);
     if status.is_err() {
@@ -279,11 +268,11 @@ fn catalog_signature(path: &str) -> Option<ProcessSignature> {
 
         let mut data = WINTRUST_DATA {
             cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
-            dwUIChoice: WTD_UI_NONE,
-            fdwRevocationChecks: WTD_REVOKE_NONE,
-            dwUnionChoice: WTD_CHOICE_CATALOG,
-            dwStateAction: WTD_STATEACTION_VERIFY,
-            dwProvFlags: WTD_SAFER_FLAG | WTD_CACHE_ONLY_URL_RETRIEVAL,
+            dwUIChoice: WTD_UI_NONE as u32,
+            fdwRevocationChecks: WTD_REVOKE_NONE as u32,
+            dwUnionChoice: WTD_CHOICE_CATALOG as u32,
+            dwStateAction: WTD_STATEACTION_VERIFY as u32,
+            dwProvFlags: (WTD_SAFER_FLAG | WTD_CACHE_ONLY_URL_RETRIEVAL) as u32,
             ..Default::default()
         };
         data.Anonymous.pCatalog = &mut catalog_info;
@@ -297,7 +286,7 @@ fn catalog_signature(path: &str) -> Option<ProcessSignature> {
             None => ProcessSignature::Unknown,
         });
 
-        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        data.dwStateAction = WTD_STATEACTION_CLOSE as u32;
         let _ = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
         verdict
     }
@@ -316,23 +305,22 @@ impl Drop for OwnedFile {
 
 fn open_for_read(path: &str) -> Option<OwnedFile> {
     let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
-    unsafe {
+    let handle = unsafe {
         CreateFileW(
             PCWSTR(wide.as_ptr()),
-            GENERIC_READ.0,
-            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            GENERIC_READ,
+            (FILE_SHARE_READ | FILE_SHARE_DELETE) as u32,
             None,
-            OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
+            OPEN_EXISTING as u32,
+            0,
             None,
         )
-        .ok()
-        .map(OwnedFile)
-    }
+    };
+    (handle.0 as isize != -1).then_some(OwnedFile(handle))
 }
 
 /// The catalog admin context, released on drop.
-struct CatalogAdmin(isize);
+struct CatalogAdmin(HCATADMIN);
 
 impl Drop for CatalogAdmin {
     fn drop(&mut self) {
@@ -344,9 +332,10 @@ impl Drop for CatalogAdmin {
 
 impl CatalogAdmin {
     fn acquire() -> Option<Self> {
-        let mut handle = 0isize;
+        let mut handle = HCATADMIN::default();
         unsafe {
             CryptCATAdminAcquireContext2(&mut handle, None, windows::core::w!("SHA256"), None, None)
+                .ok()
                 .ok()?;
         }
         Some(Self(handle))
@@ -363,6 +352,7 @@ impl CatalogAdmin {
             }
             let mut hash = vec![0u8; len as usize];
             CryptCATAdminCalcHashFromFileHandle2(self.0, file, &mut len, Some(hash.as_mut_ptr()), None)
+                .ok()
                 .ok()?;
             hash.truncate(len as usize);
             Some(hash)
@@ -373,7 +363,7 @@ impl CatalogAdmin {
     fn find_catalog(&self, hash: &[u8]) -> Option<CatalogContext<'_>> {
         unsafe {
             let context = CryptCATAdminEnumCatalogFromHash(self.0, hash, None, None);
-            (context != 0).then_some(CatalogContext {
+            (!context.0.is_null()).then_some(CatalogContext {
                 admin: self,
                 context,
             })
@@ -383,7 +373,7 @@ impl CatalogAdmin {
 
 struct CatalogContext<'a> {
     admin: &'a CatalogAdmin,
-    context: isize,
+    context: HCATINFO,
 }
 
 impl Drop for CatalogContext<'_> {
@@ -400,7 +390,7 @@ impl CatalogContext<'_> {
             cbStruct: std::mem::size_of::<CATALOG_INFO>() as u32,
             ..Default::default()
         };
-        unsafe { CryptCATCatalogInfoFromContext(self.context, &mut info, 0).ok()? };
+        unsafe { CryptCATCatalogInfoFromContext(self.context, &mut info, 0).ok().ok()? };
         Some(info)
     }
 }
@@ -414,11 +404,11 @@ pub fn check_signature(path: &str) -> ProcessSignature {
         };
         let mut data = WINTRUST_DATA {
             cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
-            dwUIChoice: WTD_UI_NONE,
-            fdwRevocationChecks: WTD_REVOKE_NONE,
-            dwUnionChoice: WTD_CHOICE_FILE,
-            dwStateAction: WTD_STATEACTION_VERIFY,
-            dwProvFlags: WTD_SAFER_FLAG | WTD_CACHE_ONLY_URL_RETRIEVAL,
+            dwUIChoice: WTD_UI_NONE as u32,
+            fdwRevocationChecks: WTD_REVOKE_NONE as u32,
+            dwUnionChoice: WTD_CHOICE_FILE as u32,
+            dwStateAction: WTD_STATEACTION_VERIFY as u32,
+            dwProvFlags: (WTD_SAFER_FLAG | WTD_CACHE_ONLY_URL_RETRIEVAL) as u32,
             ..Default::default()
         };
         data.Anonymous.pFile = &mut file_info;
@@ -442,7 +432,7 @@ pub fn check_signature(path: &str) -> ProcessSignature {
             ProcessSignature::Unknown
         };
 
-        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        data.dwStateAction = WTD_STATEACTION_CLOSE as u32;
         let _ = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
         result
     })
@@ -466,12 +456,13 @@ unsafe fn signer_subject(state: HANDLE) -> Option<String> {
         if cert.is_null() {
             return None;
         }
-        let len = CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, None, None);
+        let kind = CERT_NAME_SIMPLE_DISPLAY_TYPE as u32;
+        let len = CertGetNameStringW(cert, kind, 0, None, None, 0);
         if len <= 1 {
             return None;
         }
         let mut buf = vec![0u16; len as usize];
-        CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, None, Some(&mut buf));
+        CertGetNameStringW(cert, kind, 0, None, Some(PWSTR(buf.as_mut_ptr())), len);
         Some(String::from_utf16_lossy(&buf[..len as usize - 1]))
     }
 }
@@ -517,7 +508,7 @@ struct ServiceHandle(SC_HANDLE);
 
 impl Drop for ServiceHandle {
     fn drop(&mut self) {
-        if !self.0.is_invalid() {
+        if !self.0.0.is_null() {
             unsafe {
                 let _ = CloseServiceHandle(self.0);
             }
@@ -533,8 +524,8 @@ unsafe fn as_byte_slice(buf: &mut [u64], len: u32) -> &mut [u8] {
     unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, len as usize) }
 }
 
-fn service_state(raw: SERVICE_STATUS_CURRENT_STATE) -> ServiceState {
-    match raw {
+fn service_state(raw: u32) -> ServiceState {
+    match raw as i32 {
         SERVICE_STOPPED => ServiceState::Stopped,
         SERVICE_START_PENDING => ServiceState::StartPending,
         SERVICE_STOP_PENDING => ServiceState::StopPending,
@@ -554,7 +545,11 @@ pub fn query_service_config(scm: ScHandle, name: &str) -> ServiceConfig {
 
     unsafe {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        let Ok(handle) = OpenServiceW(scm.0, PCWSTR(wide.as_ptr()), SERVICE_QUERY_CONFIG) else {
+        let Ok(handle) = crate::win::service_handle(OpenServiceW(
+            scm.0,
+            PCWSTR(wide.as_ptr()),
+            SERVICE_QUERY_CONFIG as u32,
+        )) else {
             return out;
         };
         let service = ServiceHandle(handle);
@@ -564,23 +559,25 @@ pub fn query_service_config(scm: ScHandle, name: &str) -> ServiceConfig {
         if size > 0 {
             let mut storage = aligned_bytes(size);
             let config = storage.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
-            if QueryServiceConfigW(service.0, Some(config), size, &mut size).is_ok() {
+            if QueryServiceConfigW(service.0, Some(config), size, &mut size).as_bool() {
                 out.load_group = (*config).lpLoadOrderGroup.to_string().unwrap_or_default();
                 out.image_path = (*config).lpBinaryPathName.to_string().unwrap_or_default();
             }
         }
 
+        let level = SERVICE_CONFIG_DESCRIPTION as u32;
         let mut size = 0u32;
-        let _ = QueryServiceConfig2W(service.0, SERVICE_CONFIG_DESCRIPTION, None, &mut size);
+        let _ = QueryServiceConfig2W(service.0, level, None, 0, &mut size);
         if size > 0 {
             let mut storage = aligned_bytes(size);
             if QueryServiceConfig2W(
                 service.0,
-                SERVICE_CONFIG_DESCRIPTION,
-                Some(as_byte_slice(&mut storage, size)),
+                level,
+                Some(as_byte_slice(&mut storage, size).as_mut_ptr()),
+                size,
                 &mut size,
             )
-            .is_ok()
+            .as_bool()
             {
                 let desc = storage.as_ptr() as *const SERVICE_DESCRIPTIONW;
                 let ptr = (*desc).lpDescription;
@@ -605,13 +602,14 @@ pub fn enum_services(scm: ScHandle, buf: &mut Vec<u64>) -> Vec<ServiceInfo> {
         let _ = EnumServicesStatusExW(
             scm.0,
             SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32,
-            SERVICE_STATE_ALL,
+            SERVICE_WIN32 as u32,
+            SERVICE_STATE_ALL as u32,
             None,
+            0,
             &mut bytes_needed,
             &mut services_returned,
             Some(&mut resume),
-            None,
+            PCWSTR::null(),
         );
 
         if bytes_needed == 0 {
@@ -624,18 +622,20 @@ pub fn enum_services(scm: ScHandle, buf: &mut Vec<u64>) -> Vec<ServiceInfo> {
         buf.clear();
         buf.resize(bytes_needed.div_ceil(8) as usize, 0);
         resume = 0;
-        if EnumServicesStatusExW(
+        let size = bytes_needed;
+        if !EnumServicesStatusExW(
             scm.0,
             SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32,
-            SERVICE_STATE_ALL,
-            Some(as_byte_slice(buf, bytes_needed)),
+            SERVICE_WIN32 as u32,
+            SERVICE_STATE_ALL as u32,
+            Some(as_byte_slice(buf, size).as_mut_ptr()),
+            size,
             &mut bytes_needed,
             &mut services_returned,
             Some(&mut resume),
-            None,
+            PCWSTR::null(),
         )
-        .is_err()
+        .as_bool()
         {
             return Vec::new();
         }

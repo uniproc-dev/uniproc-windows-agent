@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use fxhash::FxHashMap;
 use ntapi::ntpsapi::VM_COUNTERS_EX2;
-use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::{
+    CloseHandle, HANDLE, NtQueryInformationProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use crate::providers::memory::vars::PROCESS_VM_COUNTERS;
 use crate::providers::provider::LivePids;
@@ -59,7 +59,7 @@ impl Handles {
             match self.open.get_mut(&pid) {
                 Some(opened) if opened.generation == generation => opened.seen = self.pass,
                 _ => {
-                    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+                    let handle = crate::win::open_process(PROCESS_QUERY_LIMITED_INFORMATION, pid)
                         .ok()
                         .map(ProcessHandle);
                     if handle.is_some() {
@@ -108,10 +108,10 @@ fn read_one(pid: u32, opened: &Opened, now: u64, out: &mut Vec<MemorySnapshot>) 
     let status = unsafe {
         NtQueryInformationProcess(
             handle.0,
-            PROCESSINFOCLASS(PROCESS_VM_COUNTERS),
+            PROCESS_VM_COUNTERS,
             &mut counters as *mut VM_COUNTERS_EX2 as *mut _,
             size_of::<VM_COUNTERS_EX2>() as u32,
-            std::ptr::null_mut(),
+            None,
         )
     };
     if status.is_ok() {

@@ -15,6 +15,7 @@ mod settings;
 mod sink;
 mod state;
 mod supervisor;
+mod win;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

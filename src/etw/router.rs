@@ -4,7 +4,7 @@ use std::thread::JoinHandle;
 
 use anyhow::Result;
 use tracing::error;
-use windows::Win32::System::Diagnostics::Etw::{EVENT_RECORD, EVENT_TRACE_FLAG, ProcessTrace};
+use windows::Win32::{EVENT_RECORD, ProcessTrace};
 use windows::core::{GUID, w};
 
 use crate::etw::consumer::{EventSink, TraceConsumer};
@@ -23,9 +23,7 @@ fn manifest_session_name_in(prefix: &str, guid: &GUID) -> String {
 
 fn qpc_ticks(d: std::time::Duration) -> i64 {
     let mut per_second = 0i64;
-    let _ = unsafe {
-        windows::Win32::System::Performance::QueryPerformanceFrequency(&mut per_second)
-    };
+    let _ = unsafe { windows::Win32::QueryPerformanceFrequency(&mut per_second) };
     (d.as_secs_f64() * per_second as f64) as i64
 }
 
@@ -52,13 +50,11 @@ enum Target {
     Batch(usize),
 }
 
-// `From<EVENT_TRACE_FLAG> for u32` is blocked by the orphan rule, so the
-// boundary takes a local newtype instead.
 pub struct EnableFlags(pub u32);
 
-impl From<EVENT_TRACE_FLAG> for EnableFlags {
-    fn from(flags: EVENT_TRACE_FLAG) -> Self {
-        Self(flags.0)
+impl From<i32> for EnableFlags {
+    fn from(flags: i32) -> Self {
+        Self(flags as u32)
     }
 }
 
@@ -323,7 +319,7 @@ pub(crate) mod tests {
     use crate::etw::vars::guid;
     use crate::providers::process::KERNEL_PROCESS_PROVIDER;
     use crate::providers::provider::Provider;
-    use windows::Win32::System::Diagnostics::Etw::EVENT_TRACE_FLAG_NETWORK_TCPIP;
+    use windows::Win32::EVENT_TRACE_FLAG_NETWORK_TCPIP;
 
     /// Only one NT Kernel Logger session can exist at a time, so ETW
     /// integration tests must not run concurrently.

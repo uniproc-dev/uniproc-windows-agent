@@ -1,5 +1,8 @@
 use anyhow::{Result, bail};
-use windows::Win32::System::Diagnostics::Etw::*;
+use windows::Win32::{
+    CloseTrace, EVENT_RECORD, EVENT_TRACE_LOGFILEW, EVENT_TRACE_LOGFILEW_0, EVENT_TRACE_LOGFILEW_1,
+    OpenTraceW, PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, PROCESSTRACE_HANDLE,
+};
 use windows::core::PWSTR;
 
 use crate::etw::session::session_name_wide;
@@ -47,8 +50,8 @@ impl TraceConsumer {
         let mut logfile = EVENT_TRACE_LOGFILEW {
             LoggerName: PWSTR(w.as_mut_ptr()),
             Context: ctx.cast(),
-            Anonymous1: EVENT_TRACE_LOGFILEW_0 {
-                ProcessTraceMode: PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD,
+            Anonymous: EVENT_TRACE_LOGFILEW_0 {
+                ProcessTraceMode: (PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD) as u32,
             },
             Anonymous2: EVENT_TRACE_LOGFILEW_1 {
                 EventRecordCallback: Some(dispatch::<T>),

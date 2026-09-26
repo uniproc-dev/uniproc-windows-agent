@@ -21,16 +21,11 @@
 //! before this moved behind the RPC boundary.
 
 use std::ptr::addr_of;
-use windows::Win32::Foundation::{ERROR_SUCCESS, FALSE};
-use windows::Win32::Storage::FileSystem::{
-    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
-};
-use windows::Win32::Storage::Packaging::Appx::{
+use windows::Win32::{
+    ERROR_SUCCESS, FILE_ATTRIBUTE_NORMAL, GetFileVersionInfoSizeW, GetFileVersionInfoW,
     GetPackagePathByFullName, PACKAGE_ID, PACKAGE_INFORMATION_BASIC, PACKAGE_INFORMATION_FULL,
-    PackageIdFromFullName,
-};
-use windows::Win32::UI::Shell::{
-    SHFILEINFOW, SHGFI_DISPLAYNAME, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHLoadIndirectString,
+    PackageIdFromFullName, SHFILEINFOW, SHGFI_DISPLAYNAME, SHGFI_USEFILEATTRIBUTES,
+    SHGetFileInfoW, SHLoadIndirectString, VerQueryValueW,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
@@ -81,7 +76,7 @@ pub fn package_publisher(package_full_name: &str) -> Option<String> {
     unsafe {
         let _ = PackageIdFromFullName(
             PCWSTR(full_name.as_ptr()),
-            PACKAGE_INFORMATION_FULL,
+            PACKAGE_INFORMATION_FULL as u32,
             &mut buffer_size,
             None,
         );
@@ -92,14 +87,15 @@ pub fn package_publisher(package_full_name: &str) -> Option<String> {
 
     let mut buffer = AlignedBuf::zeroed(buffer_size as usize);
     unsafe {
-        PackageIdFromFullName(
+        let status = PackageIdFromFullName(
             PCWSTR(full_name.as_ptr()),
-            PACKAGE_INFORMATION_FULL,
+            PACKAGE_INFORMATION_FULL as u32,
             &mut buffer_size,
             Some(buffer.as_mut_ptr()),
-        )
-        .ok()
-        .ok()?;
+        );
+        if status != ERROR_SUCCESS {
+            return None;
+        }
 
         let pkg_id = buffer.as_ptr() as *const PACKAGE_ID;
         let publisher: PWSTR = addr_of!((*pkg_id).publisher).read_unaligned();
@@ -245,7 +241,14 @@ fn load_indirect(package_full_name: &str, uri: &str) -> Option<String> {
     let mut out = [0u16; 256];
 
     unsafe {
-        SHLoadIndirectString(PCWSTR(indirect.as_ptr()), &mut out, None).ok()?;
+        SHLoadIndirectString(
+            PCWSTR(indirect.as_ptr()),
+            PWSTR(out.as_mut_ptr()),
+            out.len() as u32,
+            None,
+        )
+        .ok()
+        .ok()?;
     }
 
     let resolved = String::from_utf16_lossy(&out)
@@ -269,7 +272,7 @@ fn package_base_name(package_full_name: &str) -> Option<String> {
     unsafe {
         let _ = PackageIdFromFullName(
             PCWSTR(full_name.as_ptr()),
-            PACKAGE_INFORMATION_BASIC,
+            PACKAGE_INFORMATION_BASIC as u32,
             &mut buffer_size,
             None,
         );
@@ -280,14 +283,15 @@ fn package_base_name(package_full_name: &str) -> Option<String> {
 
     let mut buffer = AlignedBuf::zeroed(buffer_size as usize);
     unsafe {
-        PackageIdFromFullName(
+        let status = PackageIdFromFullName(
             PCWSTR(full_name.as_ptr()),
-            PACKAGE_INFORMATION_BASIC,
+            PACKAGE_INFORMATION_BASIC as u32,
             &mut buffer_size,
             Some(buffer.as_mut_ptr()),
-        )
-        .ok()
-        .ok()?;
+        );
+        if status != ERROR_SUCCESS {
+            return None;
+        }
 
         let pkg_id = buffer.as_ptr() as *const PACKAGE_ID;
         let name: PWSTR = addr_of!((*pkg_id).name).read_unaligned();
@@ -317,6 +321,7 @@ fn file_description(image_path: &str) -> Option<String> {
             size,
             buffer.as_mut_ptr() as *mut _,
         )
+        .ok()
         .ok()?;
 
         // The string table is keyed by language+codepage, and there is no
@@ -324,12 +329,13 @@ fn file_description(image_path: &str) -> Option<String> {
         // take the first.
         let mut translate = std::ptr::null_mut();
         let mut translate_len = 0u32;
-        if VerQueryValueW(
+        if !VerQueryValueW(
             buffer.as_ptr() as *const _,
             windows::core::w!("\\VarFileInfo\\Translation"),
             &mut translate,
             &mut translate_len,
-        ) == FALSE
+        )
+        .as_bool()
             || translate_len < 4
         {
             return None;
@@ -344,12 +350,13 @@ fn file_description(image_path: &str) -> Option<String> {
 
         let mut description = std::ptr::null_mut();
         let mut description_len = 0u32;
-        if VerQueryValueW(
+        if !VerQueryValueW(
             buffer.as_ptr() as *const _,
             PCWSTR(sub_block.as_ptr()),
             &mut description,
             &mut description_len,
-        ) == FALSE
+        )
+        .as_bool()
         {
             return None;
         }
@@ -370,10 +377,10 @@ fn shell_display_name(image_path: &str) -> Option<String> {
     unsafe {
         SHGetFileInfoW(
             PCWSTR(path.as_ptr()),
-            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL as u32,
             Some(&mut info),
             std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_DISPLAYNAME | SHGFI_USEFILEATTRIBUTES,
+            (SHGFI_DISPLAYNAME | SHGFI_USEFILEATTRIBUTES) as u32,
         );
     }
 
