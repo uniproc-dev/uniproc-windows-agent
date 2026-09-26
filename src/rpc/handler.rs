@@ -3,40 +3,35 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use uniproc_protocol::meta_capnp::{self, ResponseStatus};
-use uniproc_protocol::windows_capnp::{ProcessPriority as ProtoPriority, windows_agent};
+use uniproc_protocol::windows_capnp::windows_agent;
 
-use crate::api::ProcessPriority;
-use crate::commands::{Commands, Outcome};
-use crate::monitor::SharedSupervisor;
+use crate::api::CommandResult;
+use crate::embedded::Embedded;
 use crate::rpc::mapping;
-use crate::settings::CollectorSettings;
-use crate::state::SystemState;
 
 #[derive(Clone)]
 pub struct AgentImpl {
-    supervisor: SharedSupervisor,
-    state: Arc<parking_lot::Mutex<SystemState>>,
-    settings: CollectorSettings,
-    commands: Commands,
+    agent: Arc<Embedded>,
 }
 
 impl AgentImpl {
-    pub fn new(
-        supervisor: SharedSupervisor,
-        state: Arc<parking_lot::Mutex<SystemState>>,
-        settings: CollectorSettings,
-        commands: Commands,
-    ) -> Self {
-        Self {
-            supervisor,
-            state,
-            settings,
-            commands,
-        }
+    pub fn new(agent: Arc<Embedded>) -> Self {
+        Self { agent }
+    }
+
+    /// Runs a blocking command on compio's pool; a panic in it is resumed here, not swallowed.
+    async fn command(
+        &self,
+        f: impl FnOnce(&Embedded) -> CommandResult + Send + 'static,
+    ) -> CommandResult {
+        let agent = self.agent.clone();
+        compio::runtime::spawn_blocking(move || f(&agent))
+            .await
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
 }
 
-fn code(outcome: Outcome) -> u32 {
+fn code(outcome: CommandResult) -> u32 {
     outcome.err().unwrap_or(0)
 }
 
@@ -56,25 +51,8 @@ fn conditional(mut meta: meta_capnp::response_meta::Builder, if_none_match: u64,
     }
 }
 
-impl AgentImpl {
-    fn tick(&self) {
-        self.supervisor.lock().tick();
-    }
-}
-
 fn name(params: capnp::text::Reader) -> Result<String, capnp::Error> {
     Ok(params.to_str()?.to_owned())
-}
-
-fn priority(p: ProtoPriority) -> ProcessPriority {
-    match p {
-        ProtoPriority::Idle => ProcessPriority::Idle,
-        ProtoPriority::BelowNormal => ProcessPriority::BelowNormal,
-        ProtoPriority::Normal => ProcessPriority::Normal,
-        ProtoPriority::AboveNormal => ProcessPriority::AboveNormal,
-        ProtoPriority::High => ProcessPriority::High,
-        ProtoPriority::Realtime => ProcessPriority::Realtime,
-    }
 }
 
 macro_rules! service_method {
@@ -85,7 +63,7 @@ macro_rules! service_method {
             mut results: windows_agent::$results,
         ) -> Result<(), capnp::Error> {
             let service_name = name(params.get()?.get_name()?)?;
-            let outcome = self.commands.$call(service_name).await;
+            let outcome = self.command(move |agent| agent.$call(&service_name)).await;
             unconditional(results.get().init_meta());
             results.get().set_code(code(outcome));
             Ok(())
@@ -110,9 +88,9 @@ impl windows_agent::Server for AgentImpl {
         _: windows_agent::GetMachineParams,
         mut results: windows_agent::GetMachineResults,
     ) -> Result<(), capnp::Error> {
-        self.tick();
+        let machine = self.agent.machine();
         unconditional(results.get().init_meta());
-        mapping::build_machine(&self.state.lock(), results.get().init_machine());
+        mapping::build_machine(&machine, results.get().init_machine());
         Ok(())
     }
 
@@ -122,10 +100,9 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::GetServicesResults,
     ) -> Result<(), capnp::Error> {
         let if_none_match = params.get()?.get_meta()?.get_if_none_match();
-        self.tick();
-        let state = self.state.lock();
-        if conditional(results.get().init_meta(), if_none_match, state.services_etag()) {
-            mapping::build_services(&state, results.get());
+        let services = self.agent.services();
+        if conditional(results.get().init_meta(), if_none_match, services.etag) {
+            mapping::build_services(&services.value, results.get());
         }
         Ok(())
     }
@@ -136,10 +113,9 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::GetProcessesResults,
     ) -> Result<(), capnp::Error> {
         let if_none_match = params.get()?.get_meta()?.get_if_none_match();
-        self.tick();
-        let state = self.state.lock();
-        if conditional(results.get().init_meta(), if_none_match, state.processes_etag()) {
-            mapping::build_processes(&state, results.get());
+        let processes = self.agent.processes();
+        if conditional(results.get().init_meta(), if_none_match, processes.etag) {
+            mapping::build_processes(&processes.value, results.get());
         }
         Ok(())
     }
@@ -149,9 +125,9 @@ impl windows_agent::Server for AgentImpl {
         _: windows_agent::GetProcessMetricsParams,
         mut results: windows_agent::GetProcessMetricsResults,
     ) -> Result<(), capnp::Error> {
-        self.tick();
+        let snapshot = self.agent.process_metrics();
         unconditional(results.get().init_meta());
-        mapping::build_process_metrics(&self.state.lock(), results.get());
+        mapping::build_process_metrics(&snapshot, results.get());
         Ok(())
     }
 
@@ -165,11 +141,11 @@ impl windows_agent::Server for AgentImpl {
         let memory_interval_ms = params.get_memory_interval_ms();
         let cpu_interval_ms = params.get_cpu_interval_ms();
         if memory_interval_ms > 0 {
-            self.settings
+            self.agent
                 .set_memory_interval(Duration::from_millis(memory_interval_ms));
         }
         if cpu_interval_ms > 0 {
-            self.settings
+            self.agent
                 .set_cpu_interval(Duration::from_millis(cpu_interval_ms));
         }
         Ok(())
@@ -181,7 +157,7 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::KillResults,
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
-        let outcome = self.commands.process_kill(pid).await;
+        let outcome = self.command(move |agent| agent.kill(pid)).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -193,7 +169,7 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::SuspendResults,
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
-        let outcome = self.commands.process_suspend(pid).await;
+        let outcome = self.command(move |agent| agent.suspend(pid)).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -205,7 +181,7 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::ResumeResults,
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
-        let outcome = self.commands.process_resume(pid).await;
+        let outcome = self.command(move |agent| agent.resume(pid)).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -217,10 +193,9 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::SetPriorityResults,
     ) -> Result<(), capnp::Error> {
         let params = params.get()?;
-        let outcome = self
-            .commands
-            .process_set_priority(params.get_pid(), priority(params.get_priority()?))
-            .await;
+        let pid = params.get_pid();
+        let priority = mapping::priority(params.get_priority()?);
+        let outcome = self.command(move |agent| agent.set_priority(pid, priority)).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -232,10 +207,9 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::SetAffinityResults,
     ) -> Result<(), capnp::Error> {
         let params = params.get()?;
-        let outcome = self
-            .commands
-            .process_set_affinity(params.get_pid(), params.get_mask())
-            .await;
+        let pid = params.get_pid();
+        let mask = params.get_mask();
+        let outcome = self.command(move |agent| agent.set_affinity(pid, mask)).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())

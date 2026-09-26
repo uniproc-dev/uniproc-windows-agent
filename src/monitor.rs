@@ -5,6 +5,7 @@ use std::thread::JoinHandle;
 use parking_lot::Mutex;
 use tracing::info;
 
+use crate::embedded::Embedded;
 use crate::settings::CollectorSettings;
 use crate::state::SystemState;
 use crate::supervisor::Supervisor;
@@ -17,7 +18,7 @@ pub struct Monitor {
     state: Arc<Mutex<SystemState>>,
     settings: CollectorSettings,
     tick_running: Arc<AtomicBool>,
-    tick_handle: Option<JoinHandle<()>>,
+    tick_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Monitor {
@@ -61,8 +62,18 @@ impl Monitor {
             state,
             settings,
             tick_running,
-            tick_handle: Some(tick_handle),
+            tick_handle: Mutex::new(Some(tick_handle)),
         })
+    }
+
+    /// Stops the tick thread and the providers; reads after it see the last state.
+    pub fn stop(&self) {
+        self.tick_running.store(false, Ordering::Relaxed);
+        if let Some(tick_handle) = self.tick_handle.lock().take() {
+            tick_handle.thread().unpark();
+            let _ = tick_handle.join();
+        }
+        self.supervisor.lock().stop();
     }
 
     pub fn supervisor(&self) -> &SharedSupervisor {
@@ -86,20 +97,15 @@ impl Monitor {
 
 impl Drop for Monitor {
     fn drop(&mut self) {
-        self.tick_running.store(false, Ordering::Relaxed);
-        if let Some(tick_handle) = self.tick_handle.take() {
-            tick_handle.thread().unpark();
-            let _ = tick_handle.join();
-        }
-        self.supervisor.lock().stop();
+        self.stop();
     }
 }
 
 pub fn run(stop: impl FnOnce()) -> Result<()> {
-    let monitor = Monitor::start(Supervisor::default())?;
-    let supervisor = monitor.supervisor().clone();
+    let agent = Arc::new(Embedded::from_monitor(Monitor::start(Supervisor::default())?));
+    let monitor = agent.monitor();
 
-    match crate::http::serve(monitor.state().clone(), supervisor.clone()) {
+    match crate::http::serve(monitor.state().clone(), monitor.supervisor().clone()) {
         Ok(access) => info!(
             url = access.url,
             access = %crate::http::access_path().display(),
@@ -108,11 +114,12 @@ pub fn run(stop: impl FnOnce()) -> Result<()> {
         Err(error) => tracing::warn!(%error, "the state API did not start"),
     }
 
+    let node_agent = agent.clone();
     std::thread::spawn(move || {
         compio::runtime::Runtime::new()
             .unwrap()
             .block_on(async move {
-                if let Err(e) = crate::rpc::run(supervisor).await {
+                if let Err(e) = crate::rpc::run(node_agent).await {
                     tracing::error!("node error: {e:#}");
                 }
             });
@@ -123,6 +130,6 @@ pub fn run(stop: impl FnOnce()) -> Result<()> {
     stop();
 
     info!("Shutting down…");
-    drop(monitor);
+    agent.monitor().stop();
     Ok(())
 }

@@ -56,12 +56,20 @@ impl Embedded {
         monitor
             .settings()
             .set_memory_interval(Duration::from_millis(ATTACHED_MEMORY_INTERVAL_MS));
-        Ok(Self {
+        Ok(Self::from_monitor(monitor))
+    }
+
+    pub(crate) fn from_monitor(monitor: Monitor) -> Self {
+        Self {
             monitor,
             commands: Commands::new(),
             processes: Mutex::new(None),
             services: Mutex::new(None),
-        })
+        }
+    }
+
+    pub(crate) fn monitor(&self) -> &Monitor {
+        &self.monitor
     }
 
     pub fn machine(&self) -> MachineStats {
