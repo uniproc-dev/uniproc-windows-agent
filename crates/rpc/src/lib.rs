@@ -10,12 +10,12 @@ use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::accept_session;
 use uniproc_protocol::windows_capnp::windows_agent;
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE, WINDOWS_SCHEMA_ID};
-use uniproc_windows_agent::embedded::{ATTACHED_MEMORY_INTERVAL, Embedded, IDLE_MEMORY_INTERVAL};
+use uniproc_windows_agent::local::{ATTACHED_MEMORY_INTERVAL, IDLE_MEMORY_INTERVAL, Local};
 
 use crate::handler::AgentImpl;
 
 /// Serves the agent on the service's pipe, a session per client, until the runtime stops.
-pub async fn run(agent: Arc<Embedded>) -> Result<()> {
+pub async fn run(agent: Arc<Local>) -> Result<()> {
     let endpoint = Endpoint::for_service(APP_NAME, WINDOWS_AGENT_SERVICE)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let listener = endpoint.listen().await.map_err(|e| anyhow::anyhow!("{e:?}"))?;

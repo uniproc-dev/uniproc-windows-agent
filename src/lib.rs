@@ -3,7 +3,7 @@
 
 pub mod agent;
 pub mod api;
-pub mod embedded;
+pub mod local;
 pub mod remote;
 pub mod wire;
 

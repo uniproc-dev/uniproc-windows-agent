@@ -43,23 +43,26 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-/// The agent running inside the caller's process. Its ETW sessions and
-/// signature store are its own, so it runs beside the service without
-/// touching it. Monitoring stops when this is dropped.
-pub struct Embedded {
+/// The agent running in this process: the core, the service inventory and
+/// the commands. Whoever holds it - the service, its pipe and HTTP API, or
+/// an app - reads the same published snapshots. Monitoring stops when the
+/// last holder drops it, or at [`stop`](Self::stop).
+pub struct Local {
     feed: Arc<Feed>,
     settings: CollectorSettings,
     commands: Commands,
     running: Mutex<Option<(Monitor, Inventory)>>,
 }
 
-impl Embedded {
-    /// Starts monitoring; fails with `NotElevated` rather than collect a partial picture.
+impl Local {
+    /// Starts monitoring inside an app, under session names and a store of
+    /// its own, so it runs beside the service without touching it. Fails
+    /// with `NotElevated` rather than collect a partial picture.
     pub fn start() -> Result<Self, StartError> {
         if !crate::privileges::is_elevated().map_err(StartError::Failed)? {
             return Err(StartError::NotElevated);
         }
-        let agent = Self::launch(profile::embedded()).map_err(StartError::Failed)?;
+        let agent = Self::launch(profile::in_app()).map_err(StartError::Failed)?;
         agent.set_memory_interval(ATTACHED_MEMORY_INTERVAL);
         Ok(agent)
     }
@@ -150,13 +153,13 @@ mod tests {
     #[test]
     fn the_agent_can_be_shared_between_threads() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Embedded>();
+        assert_send_sync::<Local>();
     }
 
     #[test]
     #[ignore = "requires admin and a real ETW session"]
     fn an_elevated_process_sees_the_machine() {
-        let agent = Embedded::start().expect("elevated");
+        let agent = Local::start().expect("elevated");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut listed = agent.processes();

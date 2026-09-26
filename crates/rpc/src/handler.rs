@@ -6,16 +6,16 @@ use uniproc_protocol::meta_capnp::{self, ResponseStatus};
 use uniproc_protocol::windows_capnp::windows_agent;
 
 use uniproc_windows_agent::api::{Command, CommandResult};
-use uniproc_windows_agent::embedded::Embedded;
+use uniproc_windows_agent::local::Local;
 use uniproc_windows_agent::wire::{decode, encode};
 
 #[derive(Clone)]
 pub struct AgentImpl {
-    agent: Arc<Embedded>,
+    agent: Arc<Local>,
 }
 
 impl AgentImpl {
-    pub fn new(agent: Arc<Embedded>) -> Self {
+    pub fn new(agent: Arc<Local>) -> Self {
         Self { agent }
     }
 

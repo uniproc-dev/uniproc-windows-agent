@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
 
-use uniproc_windows_agent::embedded::Embedded;
+use uniproc_windows_agent::local::Local;
 
 /// Where it listens unless `UNIPROC_AGENT_HTTP` says otherwise; any free port
 /// when this one is taken.
@@ -110,7 +110,7 @@ struct Row {
     signature: String,
 }
 
-async fn snapshot(State(agent): State<Arc<Embedded>>) -> Json<Snapshot> {
+async fn snapshot(State(agent): State<Arc<Local>>) -> Json<Snapshot> {
     let latest = agent.latest();
     let s = &latest.snapshot;
     let m = &s.machine;
@@ -198,7 +198,7 @@ struct Session {
     free_buffers: u32,
 }
 
-async fn health(State(agent): State<Arc<Embedded>>) -> (StatusCode, Json<Health>) {
+async fn health(State(agent): State<Arc<Local>>) -> (StatusCode, Json<Health>) {
     let latest = agent.latest();
     let age = latest.reported_at.map(|at| at.elapsed());
     let ok = age.is_some_and(|age| age < STALE)
@@ -255,7 +255,7 @@ async fn authorized(expected: Arc<str>, request: Request, next: Next) -> Respons
     next.run(request).await
 }
 
-pub fn serve(agent: Arc<Embedded>) -> io::Result<Access> {
+pub fn serve(agent: Arc<Local>) -> io::Result<Access> {
     let (listener, addr) = bind()?;
     listener.set_nonblocking(true)?;
 

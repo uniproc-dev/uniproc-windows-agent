@@ -8,8 +8,8 @@ pub fn service() -> SupervisorConfig {
     }
 }
 
-/// An agent inside the caller's process, beside the service without touching it.
-pub fn embedded() -> SupervisorConfig {
+/// An agent inside an app, beside the service without touching it.
+pub fn in_app() -> SupervisorConfig {
     SupervisorConfig {
         session_namespace: Some("Uniproc-Embedded-".to_string()),
         signature_store: "signature-cache-embedded".to_string(),

@@ -1,6 +1,6 @@
 //! Manual end-to-end check of `Agent`, driven from a plain futures executor:
 //!   cargo run --example agent -- remote      (against the running service)
-//!   cargo run --example agent -- embedded    (in this process; run it elevated)
+//!   cargo run --example agent -- local       (in this process; run it elevated)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +27,7 @@ async fn snapshot(agent: &Agent) -> anyhow::Result<Snapshot> {
 
 async fn run(mode: &str) -> anyhow::Result<()> {
     let agent = match mode {
-        "embedded" => Agent::embedded()?,
+        "local" => Agent::local()?,
         _ => Agent::remote(Duration::from_secs(5)).await?,
     };
     agent.ping().await?;

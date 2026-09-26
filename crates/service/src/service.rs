@@ -9,14 +9,14 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
-use uniproc_windows_agent::embedded::Embedded;
+use uniproc_windows_agent::local::Local;
 
 use crate::logger;
 
 define_windows_service!(ffi_service_main, service_main);
 
 fn run(stop: impl FnOnce()) -> Result<()> {
-    let agent = std::sync::Arc::new(Embedded::start_as_service()?);
+    let agent = std::sync::Arc::new(Local::start_as_service()?);
 
     match uniproc_windows_http::serve(agent.clone()) {
         Ok(access) => info!(

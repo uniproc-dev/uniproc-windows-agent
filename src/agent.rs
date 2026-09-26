@@ -5,21 +5,21 @@ use anyhow::{Result, anyhow};
 use futures::channel::oneshot;
 
 use crate::api::{Command, CommandResult, Snapshot};
-use crate::embedded::{Embedded, StartError};
+use crate::local::{Local, StartError};
 use crate::remote::Remote;
 
 /// The agent either way: running in this process or behind the service's pipe.
 /// Both answer the same calls with the same `api` structs.
 #[derive(Clone)]
 pub enum Agent {
-    Embedded(Arc<Embedded>),
+    Local(Arc<Local>),
     Remote(Remote),
 }
 
 impl Agent {
     /// Starts monitoring in this process; needs it elevated.
-    pub fn embedded() -> Result<Self, StartError> {
-        Ok(Self::Embedded(Arc::new(Embedded::start()?)))
+    pub fn local() -> Result<Self, StartError> {
+        Ok(Self::Local(Arc::new(Local::start()?)))
     }
 
     /// Connects to the service, waiting up to `give_up_after` for its pipe.
@@ -30,7 +30,7 @@ impl Agent {
     /// Always answers in process; over the pipe it proves the session is alive.
     pub async fn ping(&self) -> Result<()> {
         match self {
-            Self::Embedded(_) => Ok(()),
+            Self::Local(_) => Ok(()),
             Self::Remote(remote) => remote.ping().await,
         }
     }
@@ -39,7 +39,7 @@ impl Agent {
     /// process list kept changing under the metrics.
     pub async fn snapshot(&self) -> Result<Option<Snapshot>> {
         match self {
-            Self::Embedded(agent) => Ok(Some(agent.snapshot())),
+            Self::Local(agent) => Ok(Some(agent.snapshot())),
             Self::Remote(remote) => remote.snapshot().await,
         }
     }
@@ -47,7 +47,7 @@ impl Agent {
     /// `None` leaves that interval as it is.
     pub async fn set_intervals(&self, memory: Option<Duration>, cpu: Option<Duration>) -> Result<()> {
         match self {
-            Self::Embedded(agent) => {
+            Self::Local(agent) => {
                 if let Some(memory) = memory {
                     agent.set_memory_interval(memory);
                 }
@@ -63,7 +63,7 @@ impl Agent {
     /// In process the command runs on a thread of its own, so awaiting it never blocks an executor.
     pub async fn run(&self, command: Command) -> Result<CommandResult> {
         match self {
-            Self::Embedded(agent) => {
+            Self::Local(agent) => {
                 let agent = agent.clone();
                 let (tx, rx) = oneshot::channel();
                 std::thread::Builder::new()
