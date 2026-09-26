@@ -1,16 +1,6 @@
-use std::time::Duration;
-
 use uniproc_windows_core::SupervisorConfig;
 
-/// Memory is read this often while someone watches.
-pub const ATTACHED_MEMORY_INTERVAL: Duration = Duration::from_millis(1000);
-
-/// And this often while nobody does.
-#[cfg(feature = "service")]
-pub const IDLE_MEMORY_INTERVAL: Duration = Duration::from_millis(2000);
-
 /// The service's sessions and store: the plain names.
-#[cfg(feature = "service")]
 pub fn service() -> SupervisorConfig {
     SupervisorConfig {
         session_namespace: None,

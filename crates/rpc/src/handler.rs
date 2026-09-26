@@ -5,9 +5,9 @@ use std::time::Duration;
 use uniproc_protocol::meta_capnp::{self, ResponseStatus};
 use uniproc_protocol::windows_capnp::windows_agent;
 
-use crate::api::{Command, CommandResult};
-use crate::embedded::Embedded;
-use crate::rpc::mapping;
+use uniproc_windows_agent::api::{Command, CommandResult};
+use uniproc_windows_agent::embedded::Embedded;
+use uniproc_windows_agent::wire::{decode, encode};
 
 #[derive(Clone)]
 pub struct AgentImpl {
@@ -87,7 +87,7 @@ impl windows_agent::Server for AgentImpl {
     ) -> Result<(), capnp::Error> {
         let machine = self.agent.machine();
         unconditional(results.get().init_meta());
-        mapping::build_machine(&machine, results.get().init_machine());
+        encode::machine(&machine, results.get().init_machine());
         Ok(())
     }
 
@@ -99,7 +99,7 @@ impl windows_agent::Server for AgentImpl {
         let if_none_match = params.get()?.get_meta()?.get_if_none_match();
         let services = self.agent.services();
         if conditional(results.get().init_meta(), if_none_match, services.etag) {
-            mapping::build_services(&services.value, results.get());
+            encode::services(&services.value, results.get());
         }
         Ok(())
     }
@@ -112,7 +112,7 @@ impl windows_agent::Server for AgentImpl {
         let if_none_match = params.get()?.get_meta()?.get_if_none_match();
         let processes = self.agent.processes();
         if conditional(results.get().init_meta(), if_none_match, processes.etag) {
-            mapping::build_processes(&processes.value, results.get());
+            encode::processes(&processes.value, results.get());
         }
         Ok(())
     }
@@ -124,7 +124,7 @@ impl windows_agent::Server for AgentImpl {
     ) -> Result<(), capnp::Error> {
         let snapshot = self.agent.process_metrics();
         unconditional(results.get().init_meta());
-        mapping::build_process_metrics(&snapshot, results.get());
+        encode::process_metrics(&snapshot, results.get());
         Ok(())
     }
 
@@ -191,7 +191,7 @@ impl windows_agent::Server for AgentImpl {
     ) -> Result<(), capnp::Error> {
         let params = params.get()?;
         let pid = params.get_pid();
-        let priority = mapping::priority(params.get_priority()?);
+        let priority = decode::priority(params.get_priority()?);
         let outcome = self.run(Command::SetPriority { pid, priority }).await;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));

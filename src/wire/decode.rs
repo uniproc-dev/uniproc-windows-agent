@@ -37,14 +37,14 @@ fn service_state(s: Result<WireServiceState, capnp::NotInSchema>) -> ServiceStat
     }
 }
 
-pub fn priority(p: ProcessPriority) -> WirePriority {
+pub fn priority(p: WirePriority) -> ProcessPriority {
     match p {
-        ProcessPriority::Idle => WirePriority::Idle,
-        ProcessPriority::BelowNormal => WirePriority::BelowNormal,
-        ProcessPriority::Normal => WirePriority::Normal,
-        ProcessPriority::AboveNormal => WirePriority::AboveNormal,
-        ProcessPriority::High => WirePriority::High,
-        ProcessPriority::Realtime => WirePriority::Realtime,
+        WirePriority::Idle => ProcessPriority::Idle,
+        WirePriority::BelowNormal => ProcessPriority::BelowNormal,
+        WirePriority::Normal => ProcessPriority::Normal,
+        WirePriority::AboveNormal => ProcessPriority::AboveNormal,
+        WirePriority::High => ProcessPriority::High,
+        WirePriority::Realtime => ProcessPriority::Realtime,
     }
 }
 

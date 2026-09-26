@@ -169,7 +169,7 @@ impl MemoryPoller {
 
                         passes += 1;
                         micros_total += pass_start.elapsed().as_micros() as u64;
-                        if passes % 20 == 0 {
+                        if passes.is_multiple_of(20) {
                             tracing::warn!(
                                 pids = counted,
                                 unopened = handles.unopened(),

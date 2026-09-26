@@ -2260,28 +2260,18 @@ name = "uniproc-windows-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "capnp",
  "capnp-rpc",
- "clap",
  "compio",
  "crossbeam-channel",
- "ctrlc",
- "dhat",
  "futures",
- "getrandom 0.3.4",
  "ntapi",
  "ogurpchik",
  "parking_lot",
- "serde",
- "serde_json",
- "tokio",
  "tracing",
- "tracing-subscriber",
  "uniproc-protocol",
  "uniproc-windows-core",
  "windows",
- "windows-service",
 ]
 
 [[package]]
@@ -2302,6 +2292,50 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows",
+]
+
+[[package]]
+name = "uniproc-windows-http"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uniproc-windows-agent",
+]
+
+[[package]]
+name = "uniproc-windows-rpc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "capnp",
+ "capnp-rpc",
+ "compio",
+ "ogurpchik",
+ "tracing",
+ "uniproc-protocol",
+ "uniproc-windows-agent",
+]
+
+[[package]]
+name = "uniproc-windows-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "compio",
+ "ctrlc",
+ "dhat",
+ "tracing",
+ "tracing-subscriber",
+ "uniproc-windows-agent",
+ "uniproc-windows-http",
+ "uniproc-windows-rpc",
+ "windows-service",
 ]
 
 [[package]]

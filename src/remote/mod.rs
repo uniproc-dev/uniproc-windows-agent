@@ -1,5 +1,3 @@
-pub(crate) mod decode;
-
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -17,6 +15,7 @@ use uniproc_protocol::windows_capnp::windows_agent;
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE, WINDOWS_SCHEMA_ID};
 
 use crate::api::{Command, CommandResult, ProcessInfo, ServiceStats, Snapshot, Tagged};
+use crate::wire::{decode, encode};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
 const JOIN_ATTEMPTS: usize = 3;
@@ -364,7 +363,7 @@ impl Session {
             Command::SetPriority { pid, priority } => {
                 let mut request = client.set_priority_request();
                 request.get().set_pid(pid);
-                request.get().set_priority(decode::priority(priority));
+                request.get().set_priority(encode::priority(priority));
                 request.send().promise.await?.get()?.get_code()
             }
             Command::SetAffinity { pid, mask } => {

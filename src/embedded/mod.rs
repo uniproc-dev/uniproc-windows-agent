@@ -14,6 +14,12 @@ use crate::feed::Feed;
 
 pub use crate::feed::Published;
 pub use uniproc_windows_core::{Samples, SessionHealth};
+
+/// Memory is read this often while someone watches.
+pub const ATTACHED_MEMORY_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// And this often while nobody does.
+pub const IDLE_MEMORY_INTERVAL: Duration = Duration::from_millis(2000);
 use crate::monitor::Monitor;
 use crate::profile;
 use crate::scm::{Inventory, Scm};
@@ -54,11 +60,18 @@ impl Embedded {
             return Err(StartError::NotElevated);
         }
         let agent = Self::launch(profile::embedded()).map_err(StartError::Failed)?;
-        agent.set_memory_interval(profile::ATTACHED_MEMORY_INTERVAL);
+        agent.set_memory_interval(ATTACHED_MEMORY_INTERVAL);
         Ok(agent)
     }
 
-    pub(crate) fn launch(config: SupervisorConfig) -> anyhow::Result<Self> {
+    /// Starts monitoring under the service's own session names and store, at the idle rate.
+    pub fn start_as_service() -> anyhow::Result<Self> {
+        let agent = Self::launch(profile::service())?;
+        agent.set_memory_interval(IDLE_MEMORY_INTERVAL);
+        Ok(agent)
+    }
+
+    fn launch(config: SupervisorConfig) -> anyhow::Result<Self> {
         let feed = Arc::new(Feed::new());
         let settings = CollectorSettings::default();
         let monitor = Monitor::start(config, settings.clone(), {

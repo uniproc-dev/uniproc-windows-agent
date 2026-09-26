@@ -5,24 +5,12 @@ pub mod agent;
 pub mod api;
 pub mod embedded;
 pub mod remote;
+pub mod wire;
 
 mod commands;
 mod feed;
-#[cfg(feature = "service")]
-mod http;
-#[cfg(feature = "service")]
-mod logger;
 mod monitor;
 mod privileges;
 mod profile;
-#[cfg(feature = "service")]
-mod rpc;
 mod scm;
-#[cfg(feature = "service")]
-mod service;
 mod win;
-
-#[cfg(feature = "service")]
-pub use logger::init_console;
-#[cfg(feature = "service")]
-pub use service::{install, run_as_service, run_direct, uninstall};

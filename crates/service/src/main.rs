@@ -1,3 +1,6 @@
+mod logger;
+mod service;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
@@ -40,21 +43,20 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Install) => {
-            uniproc_windows_agent::install(SERVICE_NAME, SERVICE_DISPLAY_NAME, SERVICE_DESC)
+            service::install(SERVICE_NAME, SERVICE_DISPLAY_NAME, SERVICE_DESC)
                 .context("Failed to install service")?;
             info!("[+] Service installed successfully.");
         }
         Some(Command::Uninstall) => {
-            uniproc_windows_agent::uninstall(SERVICE_NAME)
-                .context("Failed to uninstall service")?;
+            service::uninstall(SERVICE_NAME).context("Failed to uninstall service")?;
             info!("[+] Service uninstalled successfully.");
         }
         Some(Command::Run) => {
-            uniproc_windows_agent::init_console();
-            uniproc_windows_agent::run_direct()?;
+            logger::init_console();
+            service::run_direct()?;
         }
         None => {
-            uniproc_windows_agent::run_as_service(SERVICE_NAME)?;
+            service::run_as_service(SERVICE_NAME)?;
         }
     }
 

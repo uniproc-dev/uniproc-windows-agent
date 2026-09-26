@@ -56,7 +56,7 @@ impl EtwSession {
         let status = unsafe {
             ControlTraceW(self.handle, PCWSTR::null(), props, EVENT_TRACE_CONTROL_QUERY as u32)
         };
-        (status == ERROR_SUCCESS as u32).then(|| SessionCounters {
+        (status == ERROR_SUCCESS as u32).then_some(SessionCounters {
             events_lost: props.EventsLost,
             realtime_buffers_lost: props.RealTimeBuffersLost,
             log_buffers_lost: props.LogBuffersLost,
@@ -154,6 +154,29 @@ unsafe fn build_props(
     props
 }
 
+fn enable_provider(handle: CONTROLTRACE_ID, guid: &GUID) -> Result<()> {
+    let params = ENABLE_TRACE_PARAMETERS {
+        Version: ENABLE_TRACE_PARAMETERS_VERSION_2 as u32,
+        ..Default::default()
+    };
+    let err = unsafe {
+        EnableTraceEx2(
+            handle,
+            guid,
+            EVENT_CONTROL_CODE_ENABLE_PROVIDER as u32,
+            TRACE_LEVEL_INFORMATION as u8,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0,
+            0,
+            Some(&params),
+        )
+    };
+    if err != ERROR_SUCCESS as u32 {
+        bail!("EnableTraceEx2({guid:?}): {err:?}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,27 +229,4 @@ mod tests {
         stop(name);
         assert_eq!(after_restart, flags, "the restarted session lost its kernel flags");
     }
-}
-
-fn enable_provider(handle: CONTROLTRACE_ID, guid: &GUID) -> Result<()> {
-    let params = ENABLE_TRACE_PARAMETERS {
-        Version: ENABLE_TRACE_PARAMETERS_VERSION_2 as u32,
-        ..Default::default()
-    };
-    let err = unsafe {
-        EnableTraceEx2(
-            handle,
-            guid,
-            EVENT_CONTROL_CODE_ENABLE_PROVIDER as u32,
-            TRACE_LEVEL_INFORMATION as u8,
-            0xFFFF_FFFF_FFFF_FFFF,
-            0,
-            0,
-            Some(&params),
-        )
-    };
-    if err != ERROR_SUCCESS as u32 {
-        bail!("EnableTraceEx2({guid:?}): {err:?}");
-    }
-    Ok(())
 }

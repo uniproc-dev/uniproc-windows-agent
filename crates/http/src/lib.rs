@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
 
-use crate::embedded::Embedded;
+use uniproc_windows_agent::embedded::Embedded;
 
 /// Where it listens unless `UNIPROC_AGENT_HTTP` says otherwise; any free port
 /// when this one is taken.

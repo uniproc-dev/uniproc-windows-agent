@@ -9,20 +9,19 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
-use crate::embedded::Embedded;
+use uniproc_windows_agent::embedded::Embedded;
+
 use crate::logger;
-use crate::profile;
 
 define_windows_service!(ffi_service_main, service_main);
 
 fn run(stop: impl FnOnce()) -> Result<()> {
-    let agent = std::sync::Arc::new(Embedded::launch(profile::service())?);
-    agent.set_memory_interval(profile::IDLE_MEMORY_INTERVAL);
+    let agent = std::sync::Arc::new(Embedded::start_as_service()?);
 
-    match crate::http::serve(agent.clone()) {
+    match uniproc_windows_http::serve(agent.clone()) {
         Ok(access) => info!(
             url = access.url,
-            access = %crate::http::access_path().display(),
+            access = %uniproc_windows_http::access_path().display(),
             "state API listening"
         ),
         Err(error) => tracing::warn!(%error, "the state API did not start"),
@@ -33,7 +32,7 @@ fn run(stop: impl FnOnce()) -> Result<()> {
         compio::runtime::Runtime::new()
             .unwrap()
             .block_on(async move {
-                if let Err(e) = crate::rpc::run(node_agent).await {
+                if let Err(e) = uniproc_windows_rpc::run(node_agent).await {
                     error!("node error: {e:#}");
                 }
             });

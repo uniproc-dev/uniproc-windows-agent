@@ -1,0 +1,22 @@
+[package]
+name = "uniproc-windows-service"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "uniproc-windows-agent"
+path = "src/main.rs"
+
+[dependencies]
+uniproc-windows-agent = { path = "../.." }
+uniproc-windows-http = { path = "../http" }
+uniproc-windows-rpc = { path = "../rpc" }
+
+windows-service = "0.8.0"
+clap = { version = "4", features = ["derive"] }
+dhat = "0.3.3"
+ctrlc = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+compio = { version = "0.18.0", features = ["time"] }
+anyhow = "1"
