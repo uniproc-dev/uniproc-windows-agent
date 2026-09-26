@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let endpoint = Endpoint::vsock_to_best_vm(WSL_AGENT_VSOCK_PORT)
+    let endpoint = Endpoint::vsock_to_wsl(WSL_AGENT_VSOCK_PORT)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let session = connect_session::<linux_agent::Client, _>(
         &endpoint,

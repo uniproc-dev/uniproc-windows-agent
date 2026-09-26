@@ -1573,8 +1573,8 @@ dependencies = [
 
 [[package]]
 name = "ogurpchik"
-version = "0.6.0"
-source = "git+https://github.com/uniproc-dev/oguRPChik?tag=v0.6.0#dbad65acd38facc41d7b0c729770a5bfe90716ba"
+version = "0.6.2"
+source = "git+https://github.com/uniproc-dev/oguRPChik?tag=v0.6.2#85a13fccf31e49487508674d06f3849846bd33d1"
 dependencies = [
  "base64",
  "binrw",
