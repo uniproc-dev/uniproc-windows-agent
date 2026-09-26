@@ -156,6 +156,7 @@ pub unsafe fn get_process_package_info(pid: u32) -> Option<(String, String)> {
             }
         }
     }
+    let _ = CloseHandle(handle);
 
     if let Some(package_relative_app_id) = package_relative_app_id && let Some(package_full_name) = package_full_name {
         Some((package_full_name, package_relative_app_id))
