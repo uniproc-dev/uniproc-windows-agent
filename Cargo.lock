@@ -1573,8 +1573,8 @@ dependencies = [
 
 [[package]]
 name = "ogurpchik"
-version = "0.6.2"
-source = "git+https://github.com/uniproc-dev/oguRPChik?tag=v0.6.2#85a13fccf31e49487508674d06f3849846bd33d1"
+version = "0.6.3"
+source = "git+https://github.com/uniproc-dev/oguRPChik?tag=v0.6.3#0d61d28bb427d15823f274e7626d076d8f25b9be"
 dependencies = [
  "base64",
  "binrw",
@@ -2346,6 +2346,7 @@ dependencies = [
  "ctrlc",
  "dashmap",
  "dhat",
+ "futures",
  "fxhash",
  "getrandom 0.3.4",
  "ntapi",

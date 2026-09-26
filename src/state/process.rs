@@ -291,6 +291,7 @@ impl ProcessTable {
         self.recently_stopped.clear();
     }
 
+    #[cfg(feature = "service")]
     pub fn sample_counts(&self) -> (u64, u64, u64) {
         self.last_fold
     }
@@ -315,6 +316,7 @@ impl ProcessTable {
         self.processes.get(&pid)
     }
 
+    #[cfg(feature = "service")]
     pub fn len(&self) -> usize {
         self.processes.len()
     }

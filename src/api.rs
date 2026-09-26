@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// Name the agent's Windows service is registered under.
 pub const SERVICE_NAME: &str = "UniprocProcessMonitor";
 
@@ -19,6 +21,30 @@ pub struct Tagged<T> {
 pub struct ProcessMetricsSnapshot {
     pub processes_etag: u64,
     pub metrics: Vec<ProcessMetrics>,
+}
+
+/// Everything at one moment: `metrics` covers exactly the pids in `processes`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    pub machine: MachineStats,
+    pub services: Tagged<Arc<[ServiceStats]>>,
+    pub processes: Tagged<Arc<[ProcessInfo]>>,
+    pub metrics: Vec<ProcessMetrics>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Command {
+    Kill { pid: u32 },
+    Suspend { pid: u32 },
+    Resume { pid: u32 },
+    SetPriority { pid: u32, priority: ProcessPriority },
+    SetAffinity { pid: u32, mask: u64 },
+    ServiceStart { name: String },
+    ServiceStop { name: String },
+    ServicePause { name: String },
+    ServiceResume { name: String },
+    /// Waits for the service to stop, up to half a minute, then starts it.
+    ServiceRestart { name: String },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

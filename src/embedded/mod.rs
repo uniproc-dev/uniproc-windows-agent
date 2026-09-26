@@ -7,8 +7,8 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use crate::api::{
-    CommandResult, MachineStats, ProcessInfo, ProcessMetricsSnapshot, ProcessPriority,
-    ServiceStats, Tagged,
+    Command, CommandResult, MachineStats, ProcessInfo, ProcessMetricsSnapshot, ProcessPriority,
+    ServiceStats, Snapshot, Tagged,
 };
 use crate::commands::Commands;
 use crate::commands::process;
@@ -68,8 +68,21 @@ impl Embedded {
         }
     }
 
+    #[cfg(feature = "service")]
     pub(crate) fn monitor(&self) -> &Monitor {
         &self.monitor
+    }
+
+    /// Everything under one lock, so the metrics always join the process list.
+    pub fn snapshot(&self) -> Snapshot {
+        self.monitor.read(|state| Snapshot {
+            machine: snapshot::machine(state),
+            services: cached(&self.services, state.services_etag(), || snapshot::services(state)),
+            processes: cached(&self.processes, state.processes_etag(), || {
+                snapshot::processes(state)
+            }),
+            metrics: snapshot::process_metrics(state).metrics,
+        })
     }
 
     pub fn machine(&self) -> MachineStats {
@@ -101,6 +114,22 @@ impl Embedded {
 
     pub fn set_cpu_interval(&self, interval: Duration) {
         self.monitor.settings().set_cpu_interval(interval);
+    }
+
+    /// Blocks for as long as the command takes; a service restart up to half a minute.
+    pub fn run(&self, command: Command) -> CommandResult {
+        match command {
+            Command::Kill { pid } => self.kill(pid),
+            Command::Suspend { pid } => self.suspend(pid),
+            Command::Resume { pid } => self.resume(pid),
+            Command::SetPriority { pid, priority } => self.set_priority(pid, priority),
+            Command::SetAffinity { pid, mask } => self.set_affinity(pid, mask),
+            Command::ServiceStart { name } => self.service_start(&name),
+            Command::ServiceStop { name } => self.service_stop(&name),
+            Command::ServicePause { name } => self.service_pause(&name),
+            Command::ServiceResume { name } => self.service_resume(&name),
+            Command::ServiceRestart { name } => self.service_restart(&name),
+        }
     }
 
     pub fn kill(&self, pid: u32) -> CommandResult {

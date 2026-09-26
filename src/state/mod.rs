@@ -124,6 +124,7 @@ impl SystemState {
         self.machine.as_ref()
     }
 
+    #[cfg(feature = "service")]
     pub fn sample_counts(&self) -> (u64, u64, u64) {
         self.processes.sample_counts()
     }
@@ -132,6 +133,7 @@ impl SystemState {
         &self.machine_totals
     }
 
+    #[cfg(feature = "service")]
     pub fn len(&self) -> usize {
         self.processes.len()
     }

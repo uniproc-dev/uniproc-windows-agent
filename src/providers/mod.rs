@@ -31,6 +31,7 @@ pub const EMBEDDED: Profile = Profile {
     signature_store: "signature-cache-embedded",
 };
 
+#[cfg(feature = "service")]
 pub const DEBUG: Profile = Profile {
     session_namespace: Some("Uniproc-Debug-"),
     signature_store: "signature-cache",

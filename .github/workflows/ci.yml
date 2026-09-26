@@ -36,6 +36,9 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      - name: Build as uniproc embeds it
+        run: cargo check --no-default-features --lib --tests --examples
+
       # Tests that need admin rights and a live ETW session are `#[ignore]`d
       # and run in the next step.
       - name: Test

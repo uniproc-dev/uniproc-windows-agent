@@ -44,6 +44,7 @@ pub struct MemorySnapshot {
     pub peak_working_set_bytes: u64,
     pub private_working_set_bytes: u64,
     pub private_bytes: u64,
+    #[cfg_attr(not(feature = "service"), allow(dead_code))]
     pub timestamp_ms: u64,
 }
 

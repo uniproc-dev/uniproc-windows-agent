@@ -1,3 +1,4 @@
+#[cfg(feature = "service")]
 pub mod cpu;
 pub mod process;
 pub mod services;

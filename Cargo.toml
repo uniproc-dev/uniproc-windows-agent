@@ -3,9 +3,21 @@ name = "uniproc-windows-agent"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["service"]
+service = [
+    "dep:windows-service", "dep:clap", "dep:dhat", "dep:ctrlc", "dep:tracing-subscriber",
+    "dep:axum", "dep:tokio", "dep:serde_json",
+]
+
+[[bin]]
+name = "uniproc-windows-agent"
+path = "src/main.rs"
+required-features = ["service"]
+
 [dependencies]
-windows-service = "0.8.0"
-windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", features = [
+windows-service = { version = "0.8.0", optional = true }
+windows ={ git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", features = [
     "evntrace", "evntcons", "evntprov", "wmistr", "minwinbase", "timezoneapi",
     "winerror", "ntstatus", "minwindef", "winnt", "windef", "handleapi", "errhandlingapi",
     "processthreadsapi", "winbase", "securitybaseapi", "winternl", "ntddk", "memoryapi",
@@ -15,39 +27,43 @@ windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", 
 ntapi = "0.4.3"
 fxhash = "0.2.1"
 
-ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", tag = "v0.6.2" }
+ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", tag = "v0.6.3" }
 uniproc-protocol = { git = "https://github.com/uniproc-dev/uniproc-protocol", tag = "v0.9.0" }
 capnp = "0.27"
 capnp-rpc = "0.27"
-dhat = "0.3.3"
-clap = { version = "4", features = ["derive"] }
+dhat = { version = "0.3.3", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
 
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 chrono = { version = "0.4", features = ["clock"] }
 
 anyhow = "1"
-ctrlc = "3"
+ctrlc = { version = "3", optional = true }
 binrw = "0.15.0"
 
 amethystate = { version = "0.22", default-features = false, features = ["redb"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", optional = true }
 
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 
 # The read-only state API: its own thread with a current-thread tokio runtime,
 # beside the capnp side's compio. The two share only the state behind its lock.
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
-tokio = { version = "1", default-features = false, features = ["rt", "net"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"], optional = true }
+tokio = { version = "1", default-features = false, features = ["rt", "net"], optional = true }
 getrandom = "0.3"
 
 roxmltree = "0.20"
 
 dashmap = "6.1.0"
-compio = "0.18.0"
+compio = { version = "0.18.0", features = ["time"] }
+futures = "0.3"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.profiling]
 inherits = "release"

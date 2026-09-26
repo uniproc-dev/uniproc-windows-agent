@@ -62,6 +62,7 @@ impl Supervisor {
         }
     }
 
+    #[cfg(feature = "service")]
     pub fn dropped(&self) -> u64 {
         self.sink.as_ref().map(|s| s.dropped()).unwrap_or(0)
     }

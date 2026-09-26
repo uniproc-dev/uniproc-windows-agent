@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use parking_lot::Mutex;
+#[cfg(feature = "service")]
 use tracing::info;
 
+#[cfg(feature = "service")]
 use crate::embedded::Embedded;
 use crate::settings::CollectorSettings;
 use crate::state::SystemState;
@@ -76,10 +78,12 @@ impl Monitor {
         self.supervisor.lock().stop();
     }
 
+    #[cfg(feature = "service")]
     pub fn supervisor(&self) -> &SharedSupervisor {
         &self.supervisor
     }
 
+    #[cfg(feature = "service")]
     pub fn state(&self) -> &Arc<Mutex<SystemState>> {
         &self.state
     }
@@ -101,6 +105,7 @@ impl Drop for Monitor {
     }
 }
 
+#[cfg(feature = "service")]
 pub fn run(stop: impl FnOnce()) -> Result<()> {
     let agent = Arc::new(Embedded::from_monitor(Monitor::start(Supervisor::default())?));
     let monitor = agent.monitor();
