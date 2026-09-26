@@ -12,7 +12,7 @@ uniproc-windows-core = { path = "crates/core" }
 
 windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", features = [
     "winerror", "minwindef", "winnt", "windef", "handleapi", "errhandlingapi",
-    "processthreadsapi", "winbase", "securitybaseapi", "winsvc"] }
+    "processthreadsapi", "winbase", "minwinbase", "securitybaseapi", "synchapi", "winsvc"] }
 ntapi = "0.4.3"
 
 ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", tag = "v0.6.3" }

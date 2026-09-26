@@ -1,7 +1,9 @@
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use parking_lot::Mutex;
 use uniproc_windows_core::{CollectorSettings, SupervisorConfig};
 
@@ -11,8 +13,12 @@ use crate::api::{
 };
 use crate::commands::Commands;
 use crate::feed::Feed;
+use crate::monitor::Monitor;
+use crate::profile;
+use crate::scm::{Inventory, Scm, Watcher, Watching};
 
 pub use crate::feed::Published;
+pub use crate::scm::ServiceWatch;
 pub use uniproc_windows_core::{Samples, SessionHealth};
 
 /// Memory is read this often while someone watches.
@@ -20,9 +26,6 @@ pub const ATTACHED_MEMORY_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// And this often while nobody does.
 pub const IDLE_MEMORY_INTERVAL: Duration = Duration::from_millis(2000);
-use crate::monitor::Monitor;
-use crate::profile;
-use crate::scm::{Inventory, Scm};
 
 #[derive(Debug)]
 pub enum StartError {
@@ -43,15 +46,22 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-/// The agent running in this process: the core, the service inventory and
-/// the commands. Whoever holds it - the service, its pipe and HTTP API, or
-/// an app - reads the same published snapshots. Monitoring stops when the
+/// The agent running in this process: the core, the services and the
+/// commands. Whoever holds it - the service, its pipe and HTTP API, or an
+/// app - reads the same published snapshots. Monitoring stops when the
 /// last holder drops it, or at [`stop`](Self::stop).
 pub struct Local {
     feed: Arc<Feed>,
     settings: CollectorSettings,
     commands: Commands,
-    running: Mutex<Option<(Monitor, Inventory)>>,
+    watching: Watching,
+    running: Mutex<Option<Running>>,
+}
+
+struct Running {
+    _monitor: Monitor,
+    _inventory: Inventory,
+    _watcher: Watcher,
 }
 
 impl Local {
@@ -86,11 +96,21 @@ impl Local {
             let feed = feed.clone();
             move |services| feed.services(services)
         })?;
+        let watcher = Watcher::start(scm.clone(), {
+            let feed = feed.clone();
+            move |name, status| feed.service_status(name, status)
+        })?;
+        let watching = watcher.watching();
         Ok(Self {
             feed,
             settings,
-            commands: Commands::new(scm),
-            running: Mutex::new(Some((monitor, inventory))),
+            commands: Commands::start(scm, watching.clone())?,
+            watching,
+            running: Mutex::new(Some(Running {
+                _monitor: monitor,
+                _inventory: inventory,
+                _watcher: watcher,
+            })),
         })
     }
 
@@ -140,9 +160,20 @@ impl Local {
         self.settings.set_cpu_interval(interval);
     }
 
-    /// Blocks for as long as the command takes; a service restart up to half a minute.
-    pub fn run(&self, command: Command) -> CommandResult {
-        self.commands.run(command)
+    /// Runs on the agent's own command threads; the future needs no
+    /// particular runtime. `ERROR_BUSY` while another command runs for the
+    /// same process or service. A service stays followed for a minute after
+    /// a command on it, so snapshots show its transition as it happens.
+    pub fn run(&self, command: Command) -> impl Future<Output = anyhow::Result<CommandResult>> + Send + 'static {
+        let answer = self.commands.run(command);
+        async move { answer.await.map_err(|_| anyhow!("the command panicked")) }
+    }
+
+    /// The service's status now, then every change: what an app shows while
+    /// it starts, stops, pauses or resumes one. Ends when the service is
+    /// deleted, cannot be opened, or monitoring stops.
+    pub fn watch_service(&self, name: &str) -> ServiceWatch {
+        self.watching.watch(name)
     }
 }
 

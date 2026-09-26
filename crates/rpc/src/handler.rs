@@ -19,12 +19,12 @@ impl AgentImpl {
         Self { agent }
     }
 
-    /// Runs a command on compio's blocking pool; a panic in it is resumed here, not swallowed.
-    async fn run(&self, command: Command) -> CommandResult {
-        let agent = self.agent.clone();
-        compio::runtime::spawn_blocking(move || agent.run(command))
+    /// A command that panicked fails the call rather than answer a code.
+    async fn run(&self, command: Command) -> Result<CommandResult, capnp::Error> {
+        self.agent
+            .run(command)
             .await
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .map_err(|e| capnp::Error::failed(format!("{e:#}")))
     }
 }
 
@@ -60,7 +60,7 @@ macro_rules! service_method {
             mut results: windows_agent::$results,
         ) -> Result<(), capnp::Error> {
             let name = name(params.get()?.get_name()?)?;
-            let outcome = self.run(Command::$command { name }).await;
+            let outcome = self.run(Command::$command { name }).await?;
             unconditional(results.get().init_meta());
             results.get().set_code(code(outcome));
             Ok(())
@@ -154,7 +154,7 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::KillResults,
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
-        let outcome = self.run(Command::Kill { pid }).await;
+        let outcome = self.run(Command::Kill { pid }).await?;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -166,7 +166,7 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::SuspendResults,
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
-        let outcome = self.run(Command::Suspend { pid }).await;
+        let outcome = self.run(Command::Suspend { pid }).await?;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -178,7 +178,7 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::ResumeResults,
     ) -> Result<(), capnp::Error> {
         let pid = params.get()?.get_pid();
-        let outcome = self.run(Command::Resume { pid }).await;
+        let outcome = self.run(Command::Resume { pid }).await?;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -192,7 +192,7 @@ impl windows_agent::Server for AgentImpl {
         let params = params.get()?;
         let pid = params.get_pid();
         let priority = decode::priority(params.get_priority()?);
-        let outcome = self.run(Command::SetPriority { pid, priority }).await;
+        let outcome = self.run(Command::SetPriority { pid, priority }).await?;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())
@@ -206,7 +206,7 @@ impl windows_agent::Server for AgentImpl {
         let params = params.get()?;
         let pid = params.get_pid();
         let mask = params.get_mask();
-        let outcome = self.run(Command::SetAffinity { pid, mask }).await;
+        let outcome = self.run(Command::SetAffinity { pid, mask }).await?;
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())

@@ -1,8 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
-use futures::channel::oneshot;
+use anyhow::Result;
 
 use crate::api::{Command, CommandResult, Snapshot};
 use crate::local::{Local, StartError};
@@ -60,19 +59,10 @@ impl Agent {
         }
     }
 
-    /// In process the command runs on a thread of its own, so awaiting it never blocks an executor.
+    /// Awaiting it never blocks an executor: in process the command runs on the agent's own threads.
     pub async fn run(&self, command: Command) -> Result<CommandResult> {
         match self {
-            Self::Local(agent) => {
-                let agent = agent.clone();
-                let (tx, rx) = oneshot::channel();
-                std::thread::Builder::new()
-                    .name("agent-command".into())
-                    .spawn(move || {
-                        let _ = tx.send(agent.run(command));
-                    })?;
-                rx.await.map_err(|_| anyhow!("the command thread panicked"))
-            }
+            Self::Local(agent) => agent.run(command).await,
             Self::Remote(remote) => remote.run(command).await,
         }
     }

@@ -1,19 +1,24 @@
 mod control;
 mod inventory;
+mod watch;
 
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use windows::Win32::{
-    CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_HANDLE, SC_MANAGER_CONNECT,
-    SC_MANAGER_ENUMERATE_SERVICE,
+    CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_HANDLE,
+    SC_MANAGER_CONNECT, SC_MANAGER_ENUMERATE_SERVICE, SC_STATUS_PROCESS_INFO,
+    SERVICE_CONTINUE_PENDING, SERVICE_PAUSE_PENDING, SERVICE_PAUSED, SERVICE_RUNNING,
+    SERVICE_START_PENDING, SERVICE_STATUS_PROCESS, SERVICE_STOP_PENDING, SERVICE_STOPPED,
 };
 use windows::core::{Error, PCWSTR};
 
+use crate::api::{ServiceState, ServiceStatus};
 use crate::win::win32_code;
 
 pub use control::{ServiceAction, control, restart};
 pub use inventory::Inventory;
+pub use watch::{ServiceWatch, Watcher, Watching};
 
 /// Win32 ERROR_SERVICE_NOT_ACTIVE: stop on an already stopped service.
 const ERROR_SERVICE_NOT_ACTIVE: u32 = 1062;
@@ -88,6 +93,49 @@ impl Service {
 impl Drop for Service {
     fn drop(&mut self) {
         let _ = unsafe { CloseServiceHandle(self.0) };
+    }
+}
+
+impl Service {
+    fn status(&self) -> Option<ServiceStatus> {
+        let mut raw = SERVICE_STATUS_PROCESS::default();
+        let mut needed = 0;
+        unsafe {
+            QueryServiceStatusEx(
+                self.0,
+                SC_STATUS_PROCESS_INFO,
+                Some(&mut raw as *mut _ as *mut u8),
+                size_of::<SERVICE_STATUS_PROCESS>() as u32,
+                &mut needed,
+            )
+        }
+        .ok()
+        .ok()?;
+        Some(status(&raw))
+    }
+}
+
+fn state(raw: u32) -> ServiceState {
+    match raw as i32 {
+        SERVICE_STOPPED => ServiceState::Stopped,
+        SERVICE_START_PENDING => ServiceState::StartPending,
+        SERVICE_STOP_PENDING => ServiceState::StopPending,
+        SERVICE_RUNNING => ServiceState::Running,
+        SERVICE_CONTINUE_PENDING => ServiceState::ContinuePending,
+        SERVICE_PAUSE_PENDING => ServiceState::PausePending,
+        SERVICE_PAUSED => ServiceState::Paused,
+        _ => ServiceState::Unknown,
+    }
+}
+
+fn status(raw: &SERVICE_STATUS_PROCESS) -> ServiceStatus {
+    ServiceStatus {
+        state: state(raw.dwCurrentState),
+        pid: raw.dwProcessId,
+        exit_code: raw.dwWin32ExitCode,
+        service_exit_code: raw.dwServiceSpecificExitCode,
+        checkpoint: raw.dwCheckPoint,
+        wait_hint_ms: raw.dwWaitHint,
     }
 }
 

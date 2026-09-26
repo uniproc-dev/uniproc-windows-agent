@@ -6,14 +6,12 @@ use crossbeam_channel::{RecvTimeoutError, Sender};
 use windows::Win32::{
     ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, QUERY_SERVICE_CONFIGW,
     QueryServiceConfig2W, QueryServiceConfigW, SC_ENUM_PROCESS_INFO, SERVICE_CONFIG_DESCRIPTION,
-    SERVICE_CONTINUE_PENDING, SERVICE_DESCRIPTIONW, SERVICE_PAUSE_PENDING, SERVICE_PAUSED,
-    SERVICE_QUERY_CONFIG, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATE_ALL,
-    SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_WIN32,
+    SERVICE_DESCRIPTIONW, SERVICE_QUERY_CONFIG, SERVICE_STATE_ALL, SERVICE_WIN32,
 };
 use windows::core::PCWSTR;
 
-use crate::api::{ServiceState, ServiceStats};
-use crate::scm::{ScHandle, Scm, Service};
+use crate::api::ServiceStats;
+use crate::scm::{ScHandle, Scm, Service, state};
 
 /// How often the inventory is taken again.
 const INTERVAL: Duration = Duration::from_secs(5);
@@ -92,19 +90,6 @@ fn aligned_bytes(len: u32) -> Vec<u64> {
 
 unsafe fn as_byte_slice(buf: &mut [u64], len: u32) -> &mut [u8] {
     unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, len as usize) }
-}
-
-fn state(raw: u32) -> ServiceState {
-    match raw as i32 {
-        SERVICE_STOPPED => ServiceState::Stopped,
-        SERVICE_START_PENDING => ServiceState::StartPending,
-        SERVICE_STOP_PENDING => ServiceState::StopPending,
-        SERVICE_RUNNING => ServiceState::Running,
-        SERVICE_CONTINUE_PENDING => ServiceState::ContinuePending,
-        SERVICE_PAUSE_PENDING => ServiceState::PausePending,
-        SERVICE_PAUSED => ServiceState::Paused,
-        _ => ServiceState::Unknown,
-    }
 }
 
 fn config(scm: ScHandle, name: &str) -> Config {
@@ -216,6 +201,7 @@ fn enumerate(scm: ScHandle, buf: &mut Vec<u64>) -> Vec<ServiceStats> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ServiceState;
 
     #[test]
     fn the_machine_has_services_and_each_is_described_once() {

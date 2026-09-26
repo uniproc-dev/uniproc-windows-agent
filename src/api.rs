@@ -65,6 +65,31 @@ pub enum ProcessPriority {
     Realtime,
 }
 
+/// One service right now, as the SCM reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServiceStatus {
+    pub state: ServiceState,
+    /// 0 while the service has no process.
+    pub pid: u32,
+    /// Win32 code the service stopped with; 0 for none.
+    pub exit_code: u32,
+    /// The service's own code, when `exit_code` is ERROR_SERVICE_SPECIFIC_ERROR.
+    pub service_exit_code: u32,
+    /// Grows while a pending start, stop, pause or continue makes progress.
+    pub checkpoint: u32,
+    /// How long the service expects its pending step to take, in milliseconds.
+    pub wait_hint_ms: u32,
+}
+
+impl ServiceState {
+    pub fn is_pending(self) -> bool {
+        matches!(
+            self,
+            Self::StartPending | Self::StopPending | Self::ContinuePending | Self::PausePending
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServiceStats {
     pub name: String,

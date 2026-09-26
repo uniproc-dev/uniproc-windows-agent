@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,7 +7,7 @@ use uniproc_windows_core::{
     Epoch, MachineStats, Process, Report, Samples, SessionHealth, Tagged,
 };
 
-use crate::api::{ProcessInfo, ServiceStats, Snapshot};
+use crate::api::{ProcessInfo, ServiceState, ServiceStats, ServiceStatus, Snapshot};
 
 /// Everything the agent shows at one moment. Never changes once published.
 #[derive(Clone, Debug)]
@@ -37,6 +37,7 @@ struct Join {
     processes: Tagged<Arc<[ProcessInfo]>>,
     services_generation: u32,
     services: Tagged<Arc<[ServiceStats]>>,
+    followed: HashMap<String, (ServiceState, u32)>,
 }
 
 impl Feed {
@@ -64,6 +65,14 @@ impl Feed {
         join.services(services);
         *self.latest.lock() = Arc::new(join.publish());
     }
+
+    /// A followed service's status as it changes; it wins over an inventory
+    /// scan taken before the change. None: no longer followed, scans rule again.
+    pub fn service_status(&self, name: &str, status: Option<&ServiceStatus>) {
+        let mut join = self.join.lock();
+        join.service_status(name, status);
+        *self.latest.lock() = Arc::new(join.publish());
+    }
 }
 
 impl Join {
@@ -83,6 +92,7 @@ impl Join {
                 etag: epoch.tag(0),
                 value: Arc::from([]),
             },
+            followed: HashMap::new(),
         }
     }
 
@@ -97,7 +107,22 @@ impl Join {
         }
     }
 
-    fn services(&mut self, services: Vec<ServiceStats>) {
+    fn service_status(&mut self, name: &str, status: Option<&ServiceStatus>) {
+        let Some(status) = status else {
+            self.followed.remove(name);
+            return;
+        };
+        self.followed.insert(name.to_string(), (status.state, status.pid));
+        self.services(self.services.value.to_vec());
+    }
+
+    fn services(&mut self, mut services: Vec<ServiceStats>) {
+        for service in &mut services {
+            if let Some(&(state, pid)) = self.followed.get(&service.name) {
+                service.state = state;
+                service.pid = pid;
+            }
+        }
         if *self.services.value != *services {
             self.services_generation = self.services_generation.wrapping_add(1);
             self.services = Tagged {
@@ -280,6 +305,55 @@ mod tests {
         let after = feed.latest();
         assert_eq!(after.snapshot.processes.etag, before.snapshot.processes.etag);
         assert_eq!(after.snapshot.services.etag, before.snapshot.services.etag);
+    }
+
+    fn status(state: ServiceState, pid: u32) -> ServiceStatus {
+        ServiceStatus {
+            state,
+            pid,
+            ..Default::default()
+        }
+    }
+
+    fn listed(feed: &Feed, name: &str) -> (ServiceState, u32) {
+        let latest = feed.latest();
+        let service = latest.snapshot.services.value.iter().find(|s| s.name == name).unwrap();
+        (service.state, service.pid)
+    }
+
+    #[test]
+    fn a_followed_change_shows_before_the_next_scan() {
+        let feed = Feed::new();
+        feed.report(report(1, &[10]));
+        feed.services(vec![ServiceStats {
+            state: ServiceState::Running,
+            ..service("a", 10)
+        }]);
+        let before = feed.latest().snapshot.clone();
+
+        feed.service_status("a", Some(&status(ServiceState::Stopped, 0)));
+        assert_eq!(listed(&feed, "a"), (ServiceState::Stopped, 0));
+        let after = feed.latest();
+        assert_ne!(after.snapshot.services.etag, before.services.etag);
+        assert_ne!(after.snapshot.processes.etag, before.processes.etag, "10 is no longer a service");
+        assert!(!after.snapshot.processes.value[0].is_service);
+    }
+
+    #[test]
+    fn a_scan_taken_before_the_change_does_not_undo_it() {
+        let feed = Feed::new();
+        let stale = vec![ServiceStats {
+            state: ServiceState::Running,
+            ..service("a", 10)
+        }];
+        feed.services(stale.clone());
+        feed.service_status("a", Some(&status(ServiceState::StopPending, 10)));
+        feed.services(stale.clone());
+        assert_eq!(listed(&feed, "a"), (ServiceState::StopPending, 10));
+
+        feed.service_status("a", None);
+        feed.services(stale);
+        assert_eq!(listed(&feed, "a"), (ServiceState::Running, 10), "unfollowed, scans rule again");
     }
 
     #[test]
