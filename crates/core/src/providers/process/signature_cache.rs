@@ -11,13 +11,15 @@ use crate::state::events::ProcessSignature;
 /// Which resolver produced a verdict. Raised whenever the way a verdict is
 /// worked out changes, so entries an older build wrote are recomputed instead
 /// of served - the file they describe has not changed, the answer has.
-pub const RESOLVER: u32 = 4;
+pub const RESOLVER: u32 = 5;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CachedVerdict {
     pub signature: u8,
     pub is_windows_process: bool,
     pub display_name: String,
+    #[serde(default)]
+    pub signer: String,
     pub size: u64,
     pub modified_ms: u64,
     #[serde(default)]
@@ -172,6 +174,7 @@ mod tests {
             signature: 3,
             is_windows_process: false,
             display_name: "probe".to_string(),
+            signer: "CN=Probe".to_string(),
             size,
             modified_ms: 1,
             resolver: RESOLVER,

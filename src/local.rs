@@ -6,26 +6,27 @@ use std::time::Duration;
 use anyhow::anyhow;
 use parking_lot::Mutex;
 use uniproc_agent_kit::{Cadence, Monitor};
-use uniproc_windows_core::{CollectorSettings, Supervisor, SupervisorConfig};
+use uniproc_windows_core::{Demand, Supervisor, SupervisorConfig};
 
 use crate::api::{
-    Command, CommandResult, MachineStats, ProcessInfo, ProcessMetricsSnapshot, ServiceStats,
-    Snapshot, Tagged,
+    Command, CommandResult, MetricSpec, ProcessInfo, ProcessStates, ServiceStats, Snapshot, Tagged,
 };
 use crate::commands::Commands;
 use crate::feed::Feed;
 use crate::profile;
+use crate::sampler::Subscriptions;
 use crate::scm::{Inventory, Scm, Watcher, Watching};
 
 pub use crate::feed::Published;
+pub use crate::sampler::LocalSampler;
 pub use crate::scm::ServiceWatch;
-pub use uniproc_windows_core::{Samples, SessionHealth};
+pub use uniproc_windows_core::{ProbeCost, SessionHealth};
 
-/// Memory is read this often while someone watches.
-pub const ATTACHED_MEMORY_INTERVAL: Duration = Duration::from_millis(1000);
+/// Passports and states are read this often while a client is attached and nobody subscribes.
+pub const ATTACHED_PERIOD: Duration = Duration::from_millis(1000);
 
-/// And this often while nobody does.
-pub const IDLE_MEMORY_INTERVAL: Duration = Duration::from_millis(2000);
+/// And this often while nobody is attached.
+pub const IDLE_PERIOD: Duration = Duration::from_millis(2000);
 
 #[derive(Debug)]
 pub enum StartError {
@@ -52,14 +53,14 @@ impl std::error::Error for StartError {}
 /// last holder drops it, or at [`stop`](Self::stop).
 pub struct Local {
     feed: Arc<Feed>,
-    settings: CollectorSettings,
+    subscriptions: Arc<Subscriptions>,
     commands: Commands,
     watching: Watching,
     running: Mutex<Option<Running>>,
 }
 
 struct Running {
-    _monitor: Monitor,
+    _monitor: Arc<Monitor>,
     _inventory: Inventory,
     _watcher: Watcher,
 }
@@ -72,37 +73,35 @@ impl Local {
         if !crate::privileges::is_elevated().map_err(StartError::Failed)? {
             return Err(StartError::NotElevated);
         }
-        let agent = Self::launch(profile::in_app()).map_err(StartError::Failed)?;
-        agent.set_memory_interval(ATTACHED_MEMORY_INTERVAL);
-        Ok(agent)
+        Self::launch(profile::in_app(), ATTACHED_PERIOD).map_err(StartError::Failed)
     }
 
     /// Starts monitoring under the service's own session names and store, at the idle rate.
     pub fn start_as_service() -> anyhow::Result<Self> {
-        let agent = Self::launch(profile::service())?;
-        agent.set_memory_interval(IDLE_MEMORY_INTERVAL);
-        Ok(agent)
+        Self::launch(profile::service(), IDLE_PERIOD)
     }
 
-    fn launch(config: SupervisorConfig) -> anyhow::Result<Self> {
+    fn launch(config: SupervisorConfig, idle: Duration) -> anyhow::Result<Self> {
         let feed = Arc::new(Feed::new());
-        let settings = CollectorSettings::default();
-        let monitor = Monitor::start(
+        let demand = Demand::new(idle);
+        let subscriptions = Subscriptions::new(demand.clone());
+        let monitor = Arc::new(Monitor::start(
             "core",
-            Cadence::default(),
-            {
-                let settings = settings.clone();
-                move || {
-                    let mut supervisor = Supervisor::new(config, settings);
-                    supervisor.start()?;
-                    Ok(move || supervisor.tick())
-                }
+            Cadence {
+                period: demand.period(),
+                ..Cadence::default()
+            },
+            move || {
+                let mut supervisor = Supervisor::new(config, demand);
+                supervisor.start()?;
+                Ok(move || supervisor.tick())
             },
             {
                 let feed = feed.clone();
                 move |report| feed.report(report)
             },
-        )?;
+        )?);
+        subscriptions.drive(&monitor);
         let scm = Scm::new();
         let inventory = Inventory::start(scm.clone(), {
             let feed = feed.clone();
@@ -115,7 +114,7 @@ impl Local {
         let watching = watcher.watching();
         Ok(Self {
             feed,
-            settings,
+            subscriptions,
             commands: Commands::start(scm, watching.clone())?,
             watching,
             running: Mutex::new(Some(Running {
@@ -136,13 +135,9 @@ impl Local {
         self.feed.latest()
     }
 
-    /// The metrics always join the process list.
+    /// The states always cover the process list.
     pub fn snapshot(&self) -> Snapshot {
         self.latest().snapshot.clone()
-    }
-
-    pub fn machine(&self) -> MachineStats {
-        self.latest().snapshot.machine.clone()
     }
 
     /// The same `Arc` for as long as the tag holds.
@@ -150,13 +145,9 @@ impl Local {
         self.latest().snapshot.processes.clone()
     }
 
-    /// A `processes_etag` other than the one held means the list must be read again before joining by pid.
-    pub fn process_metrics(&self) -> ProcessMetricsSnapshot {
-        let latest = self.latest();
-        ProcessMetricsSnapshot {
-            processes_etag: latest.snapshot.processes.etag,
-            metrics: latest.snapshot.metrics.clone(),
-        }
+    /// Moves when any state moves; `passport_etag` names the list it covers.
+    pub fn states(&self) -> Tagged<ProcessStates> {
+        self.latest().snapshot.states.clone()
     }
 
     /// The same `Arc` for as long as the tag holds.
@@ -164,12 +155,17 @@ impl Local {
         self.latest().snapshot.services.clone()
     }
 
-    pub fn set_memory_interval(&self, interval: Duration) {
-        self.settings.set_memory_interval(interval);
+    /// Samples what `spec` asks for until the sampler is dropped. The core
+    /// samples the union of every live sampler at the shortest interval.
+    pub fn subscribe(&self, spec: MetricSpec) -> LocalSampler {
+        LocalSampler::new(self.feed.clone(), &self.subscriptions, spec)
     }
 
-    pub fn set_cpu_interval(&self, interval: Duration) {
-        self.settings.set_cpu_interval(interval);
+    /// Whether a client is attached: passports and states then refresh at
+    /// [`ATTACHED_PERIOD`] even while nobody subscribes.
+    pub fn set_attached(&self, attached: bool) {
+        self.subscriptions
+            .set_idle(if attached { ATTACHED_PERIOD } else { IDLE_PERIOD });
     }
 
     /// Runs on the agent's own command threads; the future needs no
@@ -192,11 +188,13 @@ impl Local {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{MachineMetric, ProcessMetric};
 
     #[test]
     fn the_agent_can_be_shared_between_threads() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Local>();
+        assert_send_sync::<LocalSampler>();
     }
 
     #[test]
@@ -213,14 +211,24 @@ mod tests {
         assert!(listed.value.len() >= 10, "{} processes", listed.value.len());
         assert!(listed.value.iter().any(|p| p.pid == std::process::id()));
 
-        let metrics = agent.process_metrics();
-        if metrics.processes_etag == listed.etag {
-            assert_eq!(metrics.metrics.len(), listed.value.len());
+        let snapshot = agent.snapshot();
+        if snapshot.states.value.passport_etag == snapshot.processes.etag {
+            assert_eq!(snapshot.states.value.states.len(), snapshot.processes.value.len());
         }
 
+        let sampler = agent.subscribe(MetricSpec {
+            interval: Duration::from_millis(500),
+            processes: [ProcessMetric::WorkingSet, ProcessMetric::CpuUserTime].into_iter().collect(),
+            machine: [MachineMetric::Memory].into_iter().collect(),
+        });
+        let first = futures::executor::block_on(sampler.sample(0));
+        let second = futures::executor::block_on(sampler.sample(first.snapshot));
+        assert!(second.snapshot > first.snapshot);
+        assert_eq!(second.columns.working_set.as_ref().unwrap().len(), second.pids.len());
+        assert!(second.columns.handles.is_none(), "not asked for");
+        assert!(second.machine.memory.unwrap().total_physical > 0);
+
         std::thread::sleep(Duration::from_millis(2500));
-        let machine = agent.machine();
-        assert!(machine.total_physical_kb > 0);
         assert!(!agent.services().value.is_empty());
         assert!(agent.processes().value.iter().any(|p| p.is_service));
     }

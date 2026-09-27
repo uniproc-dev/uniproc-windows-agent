@@ -1,8 +1,11 @@
 pub mod events;
+pub mod network;
 pub mod process;
 
-use crate::state::events::{MachineSnapshot, StateChange};
-use crate::state::process::{ProcessEntry, ProcessTable};
+use crate::snapshot::Row;
+use crate::state::events::StateChange;
+use crate::state::network::{NetworkCounters, NetworkStats};
+use crate::state::process::{ProcessEntry, ProcessTable, Sighted};
 use uniproc_agent_kit::Epoch;
 
 /// Machine-wide cumulative counters. Monotonic by construction: they only
@@ -19,7 +22,7 @@ pub struct MachineTotals {
 
 pub struct SystemState {
     processes: ProcessTable,
-    machine: Option<MachineSnapshot>,
+    network: NetworkCounters,
     machine_totals: MachineTotals,
     epoch: Epoch,
 }
@@ -28,20 +31,15 @@ impl SystemState {
     pub fn new() -> Self {
         Self {
             processes: ProcessTable::new(),
-            machine: None,
+            network: NetworkCounters::default(),
             machine_totals: MachineTotals::default(),
             epoch: Epoch::new(),
         }
     }
 
     pub fn apply(&mut self, change: StateChange) {
-        match &change {
-            StateChange::Machine(snap) => {
-                let attributable =
-                    (snap.cpu_percent - snap.cpu_interrupt_percent - snap.cpu_dpc_percent).max(0.0);
-                self.machine = Some(MachineSnapshot::clone(snap));
-                self.processes.fold_samples(attributable);
-            }
+        match change {
+            StateChange::ProcessEnriched(e) => self.processes.enrich(*e),
             StateChange::Disk(deltas) => {
                 for d in deltas.values() {
                     self.machine_totals.disk_read_bytes += d.read_bytes;
@@ -55,10 +53,21 @@ impl SystemState {
                     self.machine_totals.net_rx_bytes += d.rx_bytes;
                     self.machine_totals.net_tx_bytes += d.tx_bytes;
                 }
+                self.network.charge(&deltas, &self.processes);
             }
-            _ => {}
         }
-        self.processes.apply(change);
+    }
+
+    /// The processes become exactly `rows`; returns the rows new to it.
+    pub fn reconcile<'a>(&mut self, rows: &'a [Row], sight: impl FnMut(&Row) -> Sighted) -> Vec<&'a Row> {
+        let added = self.processes.reconcile(rows, sight);
+        self.network.retain_listed(&self.processes);
+        added
+    }
+
+    /// What the process sent and received since the agent first listed it.
+    pub fn network(&self, pid: u32, sequence_number: u64) -> NetworkStats {
+        self.network.get(pid, sequence_number)
     }
 
     /// Moves with every passport change. Never zero.
@@ -66,16 +75,12 @@ impl SystemState {
         self.epoch.tag(self.processes.passport_generation())
     }
 
-    pub fn machine(&self) -> Option<&MachineSnapshot> {
-        self.machine.as_ref()
-    }
-
-    pub fn sample_counts(&self) -> (u64, u64, u64) {
-        self.processes.sample_counts()
-    }
-
     pub fn machine_totals(&self) -> &MachineTotals {
         &self.machine_totals
+    }
+
+    pub fn process(&self, pid: u32) -> Option<&ProcessEntry> {
+        self.processes.get(pid)
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &ProcessEntry> {
@@ -92,20 +97,7 @@ impl Default for SystemState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::events::ProcessStarted;
-
-    fn started(pid: u32) -> StateChange {
-        StateChange::ProcessStarted(Box::new(ProcessStarted {
-            pid,
-            parent_pid: 0,
-            session_id: 0,
-            image_name: format!("p{pid}.exe"),
-            command_line: Vec::new(),
-            package_full_name: String::new(),
-            package_relative_app_id: String::new(),
-            is_kernel_process: false,
-        }))
-    }
+    use crate::state::events::{DiskDelta, DiskDeltas};
 
     #[test]
     fn two_runs_start_from_different_tags() {
@@ -117,10 +109,28 @@ mod tests {
     }
 
     #[test]
-    fn a_process_starting_moves_the_tag() {
+    fn a_process_showing_up_moves_the_tag() {
         let mut s = SystemState::new();
         let before = s.processes_etag();
-        s.apply(started(100));
+        s.reconcile(
+            &[Row {
+                pid: 100,
+                sequence_number: 1,
+                ..Default::default()
+            }],
+            |_| Sighted::default(),
+        );
         assert_ne!(s.processes_etag(), before);
+    }
+
+    #[test]
+    fn disk_transfers_add_up_whichever_thread_issued_them() {
+        let mut s = SystemState::new();
+        let mut deltas = DiskDeltas::default();
+        deltas.insert(1, DiskDelta { read_bytes: 10, read_ops: 1, ..Default::default() });
+        deltas.insert(2, DiskDelta { write_bytes: 20, write_ops: 2, ..Default::default() });
+        s.apply(StateChange::Disk(deltas));
+        let t = s.machine_totals();
+        assert_eq!((t.disk_read_bytes, t.disk_write_bytes, t.disk_write_ops), (10, 20, 2));
     }
 }

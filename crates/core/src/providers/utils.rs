@@ -220,7 +220,7 @@ fn with_wide<R>(s: &str, f: impl FnOnce(PCWSTR) -> R) -> R {
 /// `None` means no catalog vouches for the file, so the caller's "unsigned"
 /// verdict stands; `Some` carries whatever the catalog's signer turned out
 /// to be.
-fn catalog_signature(path: &str) -> Option<ProcessSignature> {
+fn catalog_signature(path: &str) -> Option<(ProcessSignature, Option<String>)> {
     let file = open_for_read(path)?;
     let admin = CatalogAdmin::acquire()?;
     let mut hash = admin.file_hash(file.0)?;
@@ -273,11 +273,7 @@ fn catalog_signature(path: &str) -> Option<ProcessSignature> {
         let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
         let status = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
 
-        let verdict = (status == 0).then(|| match signer_subject(data.hWVTStateData) {
-            Some(subject) if subject.contains("Microsoft") => ProcessSignature::Microsoft,
-            Some(_) => ProcessSignature::ThirdParty,
-            None => ProcessSignature::Unknown,
-        });
+        let verdict = (status == 0).then(|| signer_verdict(signer_subject(data.hWVTStateData)));
 
         data.dwStateAction = WTD_STATEACTION_CLOSE as u32;
         let _ = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
@@ -388,7 +384,22 @@ impl CatalogContext<'_> {
     }
 }
 
+fn signer_verdict(subject: Option<String>) -> (ProcessSignature, Option<String>) {
+    let signature = match &subject {
+        Some(subject) if subject.contains("Microsoft") => ProcessSignature::Microsoft,
+        Some(_) => ProcessSignature::ThirdParty,
+        None => ProcessSignature::Unknown,
+    };
+    (signature, subject)
+}
+
+#[cfg(test)]
 pub fn check_signature(path: &str) -> ProcessSignature {
+    check_signer(path).0
+}
+
+/// The verdict, and the signer's subject name when the file is signed.
+pub fn check_signer(path: &str) -> (ProcessSignature, Option<String>) {
     with_wide(path, |path_w| unsafe {
         let mut file_info = WINTRUST_FILE_INFO {
             cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
@@ -410,19 +421,15 @@ pub fn check_signature(path: &str) -> ProcessSignature {
         let status = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
 
         let result = if status == 0 {
-            match signer_subject(data.hWVTStateData) {
-                Some(subject) if subject.contains("Microsoft") => ProcessSignature::Microsoft,
-                Some(_) => ProcessSignature::ThirdParty,
-                None => ProcessSignature::Unknown,
-            }
+            signer_verdict(signer_subject(data.hWVTStateData))
         } else if status == TRUST_E_NOSIGNATURE.0 || status == TRUST_E_SUBJECT_FORM_UNKNOWN.0 {
             // No *embedded* signature is not the same as unsigned: most of
             // Windows' own binaries (dwm.exe, winlogon.exe, wslservice.exe)
             // are signed by catalog instead, and treating them as unsigned
             // filed half the operating system under third-party software.
-            catalog_signature(path).unwrap_or(ProcessSignature::Unsigned)
+            catalog_signature(path).unwrap_or((ProcessSignature::Unsigned, None))
         } else {
-            ProcessSignature::Unknown
+            (ProcessSignature::Unknown, None)
         };
 
         data.dwStateAction = WTD_STATEACTION_CLOSE as u32;

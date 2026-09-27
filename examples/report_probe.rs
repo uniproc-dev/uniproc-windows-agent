@@ -1,8 +1,8 @@
 //! Read-only probe against a running agent:
 //!   cargo run --example report_probe
 //!
-//! Calls ping, then the four read methods twice, a second apart, passing the
-//! previous round's tags, and prints what came back.
+//! Calls ping, subscribes, then samples and calls the three read methods
+//! twice, passing the previous round's tags, and prints what came back.
 
 use std::time::{Duration, Instant};
 
@@ -11,7 +11,8 @@ use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::connect_session;
 use uniproc_protocol::windows_capnp::windows_agent;
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
-use uniproc_windows_agent::wire::PROTOCOL;
+use uniproc_windows_agent::api::{MachineMetrics, MetricSpec, ProcessMetric};
+use uniproc_windows_agent::wire::{PROTOCOL, decode, encode};
 
 struct ClientStub;
 impl windows_agent::Server for ClientStub {}
@@ -39,25 +40,39 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     client.ping_request().send().promise.await?;
     println!("ping: ok in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
 
-    let (mut services_etag, mut processes_etag) = (0u64, 0u64);
+    let spec = MetricSpec {
+        interval: Duration::from_secs(1),
+        processes: [ProcessMetric::WorkingSet, ProcessMetric::CpuUserTime, ProcessMetric::CpuKernelTime]
+            .into_iter()
+            .collect(),
+        machine: MachineMetrics::all(),
+    };
+    let mut req = client.subscribe_request();
+    encode::metric_spec(&spec, req.get().init_spec());
+    let sampler = req.send().promise.await?.get()?.get_sampler()?;
+
+    let (mut services_etag, mut processes_etag, mut states_etag, mut snapshot) = (0u64, 0u64, 0u64, 0u64);
     for round in 1..=2 {
-        let reply = client.get_machine_request().send().promise.await?;
-        let machine = reply.get()?.get_machine()?;
+        let started = Instant::now();
+        let mut req = sampler.sample_request();
+        req.get().init_meta().set_if_none_match(snapshot);
+        let reply = req.send().promise.await?;
+        let sample = decode::sample(reply.get()?.get_processes()?, reply.get()?.get_machine()?, spec)?;
+        snapshot = sample.snapshot;
         println!(
-            "round {round}: cpu={:.1}% mem_used={} kb mem_total={} kb cpu_mhz={}/{}",
-            machine.get_cpu_percent(),
-            machine.get_used_physical_kb(),
-            machine.get_total_physical_kb(),
-            machine.get_cpu_current_mhz(),
-            machine.get_cpu_max_mhz(),
+            "round {round}: sample {} after {:.0} ms, sampledAt {}, passport {:#x}, {} rows",
+            sample.snapshot,
+            started.elapsed().as_secs_f64() * 1000.0,
+            sample.sampled_at,
+            sample.passport_etag,
+            sample.pids.len(),
         );
-        println!(
-            "         disk r/w={}/{} bytes  net rx/tx={}/{} bytes",
-            machine.get_disk_read_bytes(),
-            machine.get_disk_write_bytes(),
-            machine.get_net_rx_bytes(),
-            machine.get_net_tx_bytes(),
-        );
+        println!("         machine {:?}", sample.machine);
+        if let Some(ws) = &sample.columns.working_set {
+            for (pid, ws) in sample.pids.iter().zip(ws.iter()).take(5) {
+                println!("         pid={pid} ws={} kb", ws >> 10);
+            }
+        }
 
         let mut req = client.get_services_request();
         req.get().init_meta().set_if_none_match(services_etag);
@@ -93,24 +108,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        let reply = client.get_process_metrics_request().send().promise.await?;
-        let metrics = reply.get()?.get_metrics()?;
+        let mut req = client.get_process_states_request();
+        req.get().init_meta().set_if_none_match(states_etag);
+        let reply = req.send().promise.await?;
+        let meta = reply.get()?.get_meta()?;
+        let states = decode::process_states(reply.get()?.get_states()?);
         println!(
-            "         getProcessMetrics: processesEtag {:#x}, {} rows",
-            reply.get()?.get_processes_etag(),
-            metrics.len(),
+            "         getProcessStates(ifNoneMatch {states_etag:#x}): {:?} etag {:#x}, passport {:#x}, {} states",
+            meta.get_status()?,
+            meta.get_etag(),
+            reply.get()?.get_passport_etag(),
+            states.len(),
         );
-        for m in metrics.iter().take(5) {
-            println!(
-                "         pid={} cpu={:.1}% ws={} kb",
-                m.get_pid(),
-                m.get_cpu_percent(),
-                m.get_working_set_kb(),
-            );
-        }
-
-        if round == 1 {
-            compio::time::sleep(Duration::from_secs(1)).await;
+        states_etag = meta.get_etag();
+        for s in states.iter().filter(|s| s.efficiency_mode == Some(true)).take(5) {
+            println!("         efficiency mode: {s:?}");
         }
     }
 

@@ -48,6 +48,7 @@ struct BatchSlot {
 
 #[derive(Clone, Copy)]
 enum Target {
+    #[allow(dead_code)]
     Handler(usize),
     Batch(usize),
 }
@@ -77,6 +78,7 @@ pub struct KernelRouterBuilder {
 }
 
 impl KernelRouterBuilder {
+    #[allow(dead_code)]
     pub fn on<F, I>(&mut self, providers: &'static [GUID], mut handler: F) -> &mut Self
     where
         F: FnMut(&EVENT_RECORD, &[u8]) -> I + Send + 'static,
@@ -134,6 +136,7 @@ impl KernelRouterBuilder {
 
     /// Manifest providers: own session per GUID, enabled via EnableTraceEx2.
     /// Events are matched by EventDescriptor.Id inside the handler.
+    #[allow(dead_code)]
     pub fn manifest(&mut self, provider: GUID) -> &mut Self {
         self.manifest.push(provider);
         self
@@ -340,9 +343,12 @@ pub fn to_user_data(record: &EVENT_RECORD) -> Option<&[u8]> {
 pub(crate) mod tests {
     use super::*;
     use crate::etw::vars::guid;
-    use crate::providers::process::KERNEL_PROCESS_PROVIDER;
     use crate::providers::provider::Provider;
+    use crate::state::events::{NetDelta, NetDeltas};
     use windows::Win32::EVENT_TRACE_FLAG_NETWORK_TCPIP;
+
+    const KERNEL_PROCESS_PROVIDER: GUID = guid!("22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716");
+    const EVENT_ID_PROCESS_START: u16 = 1;
 
     /// Only one NT Kernel Logger session can exist at a time, so ETW
     /// integration tests must not run concurrently.
@@ -382,7 +388,11 @@ pub(crate) mod tests {
 
         fn take(&mut self) -> Option<StateChange> {
             let n = std::mem::take(&mut self.0);
-            (n > 0).then_some(StateChange::ProcessStopped(n))
+            (n > 0).then(|| {
+                let mut deltas = NetDeltas::default();
+                deltas.insert(n, NetDelta::default());
+                StateChange::Network(deltas)
+            })
         }
     }
 
@@ -417,7 +427,7 @@ pub(crate) mod tests {
         assert!(rx.try_recv().is_err(), "not due before the window has passed");
 
         core.on_event(&event_at(CHATTY, 1_100, &payload));
-        assert!(matches!(rx.try_recv(), Ok(StateChange::ProcessStopped(2))));
+        assert!(matches!(rx.try_recv(), Ok(StateChange::Network(d)) if d.contains_key(&2)));
 
         core.on_event(&event_at(CHATTY, 5_000, &payload));
         assert!(rx.try_recv().is_err(), "an empty batch sends nothing");
@@ -492,7 +502,7 @@ pub(crate) mod tests {
 
     #[test]
     #[ignore = "requires admin and a real ETW session"]
-    fn a_session_left_behind_by_a_killed_agent_does_not_silence_disk_and_samples() {
+    fn a_session_left_behind_by_a_killed_agent_does_not_silence_disk_and_network() {
         let _guard = ETW_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::forget(
             crate::etw::session::EtwSession::start(KERNEL_SESSION_NAME, 0, SessionMode::SystemLogger)
@@ -504,15 +514,17 @@ pub(crate) mod tests {
         crate::providers::disk::KernelDiskProvider::new()
             .register(&mut builder)
             .unwrap();
-        crate::providers::cpu_sampler::CpuSamplerProvider::new()
+        crate::providers::network::KernelNetworkProvider::new()
             .register(&mut builder)
             .unwrap();
         let router = builder.start(sink).expect("router start");
 
         let path = std::env::temp_dir().join("uniproc-router-disk-test.bin");
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let (mut disk, mut samples) = (false, false);
-        while std::time::Instant::now() < deadline && !(disk && samples) {
+        let (mut disk, mut network) = (false, false);
+        while std::time::Instant::now() < deadline && !(disk && network) {
+            let _ = sock.send_to(b"x", "192.0.2.1:53");
             std::fs::write(&path, vec![7u8; 1 << 20]).unwrap();
             std::fs::OpenOptions::new()
                 .write(true)
@@ -523,7 +535,7 @@ pub(crate) mod tests {
             for change in rx.try_iter() {
                 match change {
                     StateChange::Disk(_) => disk = true,
-                    StateChange::CpuSamples(_) => samples = true,
+                    StateChange::Network(_) => network = true,
                     _ => {}
                 }
             }
@@ -533,7 +545,7 @@ pub(crate) mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert!(disk, "no StateChange::Disk after taking over a leftover kernel session");
-        assert!(samples, "no StateChange::CpuSamples after taking over a leftover kernel session");
+        assert!(network, "no StateChange::Network after taking over a leftover kernel session");
     }
 
     #[test]
@@ -545,16 +557,20 @@ pub(crate) mod tests {
             .try_init();
 
         let (sink, rx) = Sink::bounded(4096);
+        let started = Arc::new(AtomicBool::new(false));
         let mut builder = KernelRouter::builder();
         crate::providers::network::KernelNetworkProvider::new()
             .register(&mut builder)
             .unwrap();
-        crate::providers::process::KernelProcessProvider::with_queue(
-            crossbeam_channel::unbounded(),
-            String::new(),
-        )
-        .register(&mut builder)
-        .unwrap();
+        builder.manifest(KERNEL_PROCESS_PROVIDER).on(&[KERNEL_PROCESS_PROVIDER], {
+            let started = started.clone();
+            move |record, _| {
+                if record.EventHeader.EventDescriptor.Id == EVENT_ID_PROCESS_START {
+                    started.store(true, Ordering::SeqCst);
+                }
+                None
+            }
+        });
         let router = builder.start(sink).expect("router start");
 
         let sock = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
@@ -562,31 +578,20 @@ pub(crate) mod tests {
             .args(["/c", "exit", "0"])
             .spawn()
             .expect("spawn child");
-        let child_pid = child.id();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut total = 0usize;
         let mut network = false;
-        let mut process = false;
-        while std::time::Instant::now() < deadline && !(network && process) {
+        while std::time::Instant::now() < deadline && !(network && started.load(Ordering::SeqCst)) {
             for _ in 0..10 {
                 let _ = sock.send_to(b"x", "192.0.2.1:53");
             }
-            for change in rx.try_iter() {
-                total += 1;
-                match change {
-                    StateChange::Network(_) => network = true,
-                    StateChange::ProcessStarted(e) if e.pid == child_pid => process = true,
-                    _ => {}
-                }
-            }
+            network |= rx.try_iter().any(|change| matches!(change, StateChange::Network(_)));
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let _ = child.wait();
         drop(router);
-        eprintln!("total={total} network={network} process={process}");
 
         assert!(network, "no StateChange::Network on the merged router");
-        assert!(process, "no ProcessStarted on the merged router");
+        assert!(started.load(Ordering::SeqCst), "no process start on the merged router");
     }
 }

@@ -3,8 +3,8 @@
 //!   cargo run --release --example pingpong -- [rounds] [seconds] [pingers] [refreshers]
 //!
 //! Each round connects, keeps `pingers` pings and `refreshers` UI-style
-//! refreshes (getMachine, conditional getServices and getProcesses,
-//! getProcessMetrics) in flight on one session for `seconds`, checking every
+//! refreshes (a sample, conditional getServices, getProcesses and
+//! getProcessStates) in flight on one session for `seconds`, checking every
 //! reply, then fires a burst and drops the session in the middle of it. The
 //! next round's connect is the check that the agent survived the drop. Every
 //! violation is printed with the request and reply it concerns; nothing is
@@ -19,9 +19,10 @@ use ogurpchik::auth::handshake::HandshakeMode;
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::{RpcSession, connect_session};
 use uniproc_protocol::meta_capnp::{ResponseStatus, response_meta};
-use uniproc_protocol::windows_capnp::windows_agent;
+use uniproc_protocol::windows_capnp::{sampler, windows_agent};
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
-use uniproc_windows_agent::wire::PROTOCOL;
+use uniproc_windows_agent::api::{MachineMetric, MetricSpec, ProcessMetric};
+use uniproc_windows_agent::wire::{PROTOCOL, encode};
 
 const RECONNECT_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -55,6 +56,7 @@ impl Tally {
 struct Seen {
     epoch: Cell<u32>,
     processes: Cell<u32>,
+    states: Cell<u32>,
     services: Cell<u32>,
 }
 
@@ -158,10 +160,15 @@ struct View {
     services_etag: u64,
     processes_etag: u64,
     pids: HashSet<u32>,
+    states_etag: u64,
+    states_passport: u64,
+    state_pids: HashSet<u32>,
+    snapshot: u64,
 }
 
 struct Ctx {
     client: windows_agent::Client,
+    sampler: sampler::Client,
     tally: Rc<Tally>,
     seen: Rc<Seen>,
     origin: Instant,
@@ -189,23 +196,51 @@ impl Ctx {
         }
     }
 
-    async fn machine(&self) -> bool {
-        let sent = Sent::new(&self.tally, "getMachine", String::new());
-        let outcome = match self.client.get_machine_request().send().promise.await {
+    async fn sample(&self, view: &mut View) -> bool {
+        let floor = view.snapshot;
+        let sent = Sent::new(&self.tally, "sample", format!("holding snapshot {floor}"));
+        let outcome = match self.sampler.sample_request().send().promise.await {
             Ok(reply) => (|| {
                 let r = reply.get().map_err(|e| format!("results unreadable: {e}"))?;
-                check_unconditional(r.get_meta().map_err(|e| format!("meta unreadable: {e}"))?)?;
+                let meta = r.get_meta().map_err(|e| format!("meta unreadable: {e}"))?;
+                let processes = r.get_processes().map_err(|e| format!("columns unreadable: {e}"))?;
                 let machine = r.get_machine().map_err(|e| format!("machine unreadable: {e}"))?;
-                if machine.get_total_physical_kb() == 0 {
-                    return Err("machine stats missing, likely another call's reply".to_string());
+                let snapshot = processes.get_snapshot();
+                if meta.get_etag() != snapshot || machine.get_snapshot() != snapshot {
+                    return Err(format!(
+                        "etag {:#x}, columns {snapshot}, machine {}: one sample must carry one number",
+                        meta.get_etag(),
+                        machine.get_snapshot()
+                    ));
                 }
-                Ok(())
+                if snapshot < floor {
+                    return Err(format!("snapshot went back from {floor} to {snapshot}"));
+                }
+                let pids = processes.get_pids().map_err(|e| format!("pids unreadable: {e}"))?.len();
+                let rows = processes
+                    .get_working_set()
+                    .map_err(|e| format!("working set unreadable: {e}"))?
+                    .len();
+                if pids == 0 || pids != rows {
+                    return Err(format!("{pids} pids but {rows} working-set rows"));
+                }
+                if processes.has_threads() || !machine.has_memory() || machine.has_cpu() {
+                    return Err("the sample carries other columns than the subscription asked for".into());
+                }
+                Ok(snapshot)
             })(),
             Err(e) => Err(format!("call failed: {e}")),
         };
-        outcome
-            .map_err(|what| violation(&self.tally, self.origin, &what, &sent))
-            .is_ok()
+        match outcome {
+            Ok(snapshot) => {
+                view.snapshot = snapshot;
+                true
+            }
+            Err(what) => {
+                violation(&self.tally, self.origin, &what, &sent);
+                false
+            }
+        }
     }
 
     async fn services(&self, view: &mut View) -> bool {
@@ -293,37 +328,55 @@ impl Ctx {
         }
     }
 
-    async fn metrics(&self, view: &mut View) -> bool {
-        let floor = self.seen.processes.get();
+    async fn states(&self, view: &mut View) -> bool {
+        let if_none_match = view.states_etag;
+        let floor = self.seen.states.get();
+        let passport_floor = self.seen.processes.get();
         let sent = Sent::new(
             &self.tally,
-            "getProcessMetrics",
-            format!("holding processes {:#x}", view.processes_etag),
+            "getProcessStates",
+            format!("ifNoneMatch {if_none_match:#x}, holding processes {:#x}", view.processes_etag),
         );
-        let outcome = match self.client.get_process_metrics_request().send().promise.await {
+        let mut req = self.client.get_process_states_request();
+        req.get().init_meta().set_if_none_match(if_none_match);
+        let outcome = match req.send().promise.await {
             Ok(reply) => (|| {
                 let r = reply.get().map_err(|e| format!("results unreadable: {e}"))?;
-                check_unconditional(r.get_meta().map_err(|e| format!("meta unreadable: {e}"))?)?;
-                let tag = r.get_processes_etag();
-                self.seen.check(tag, floor, &self.seen.processes)?;
-                let metrics = r.get_metrics().map_err(|e| format!("metrics unreadable: {e}"))?;
-                let mut pids = HashSet::with_capacity(metrics.len() as usize);
-                for m in metrics.iter() {
-                    if !pids.insert(m.get_pid()) {
-                        return Err(format!("metrics list pid {} twice under {tag:#x}", m.get_pid()));
+                let meta = r.get_meta().map_err(|e| format!("meta unreadable: {e}"))?;
+                let fresh = check_conditional(meta, if_none_match, r.has_states())?;
+                self.seen.check(meta.get_etag(), floor, &self.seen.states)?;
+                if !fresh {
+                    Tally::bump(&self.tally.not_modified);
+                    return Ok((meta.get_etag(), None));
+                }
+                let tag = r.get_passport_etag();
+                self.seen.check(tag, passport_floor, &self.seen.processes)?;
+                let states = r.get_states().map_err(|e| format!("states unreadable: {e}"))?;
+                let mut pids = HashSet::with_capacity(states.len() as usize);
+                for s in states.iter() {
+                    if !pids.insert(s.get_pid()) {
+                        return Err(format!("states list pid {} twice under {tag:#x}", s.get_pid()));
                     }
                 }
-                Ok((tag, pids))
+                Ok((meta.get_etag(), Some((tag, pids))))
             })(),
             Err(e) => Err(format!("call failed: {e}")),
         };
-        let (tag, pids) = match outcome {
-            Ok(ok) => ok,
+        let fresh = match outcome {
+            Ok((etag, fresh)) => {
+                view.states_etag = etag;
+                fresh
+            }
             Err(what) => {
                 violation(&self.tally, self.origin, &what, &sent);
                 return false;
             }
         };
+        if let Some((tag, pids)) = fresh {
+            view.states_passport = tag;
+            view.state_pids = pids;
+        }
+        let (tag, pids) = (view.states_passport, view.state_pids.clone());
 
         if tag != view.processes_etag {
             Tally::bump(&self.tally.refetches);
@@ -343,7 +396,7 @@ impl Ctx {
                 &self.tally,
                 self.origin,
                 &format!(
-                    "metrics under {tag:#x} cover {} pids, the process list under the same tag {}; extra {extra:?}, missing {missing:?}",
+                    "states under {tag:#x} cover {} pids, the process list under the same tag {}; extra {extra:?}, missing {missing:?}",
                     pids.len(),
                     view.pids.len()
                 ),
@@ -355,14 +408,29 @@ impl Ctx {
     }
 
     async fn refresh(&self, view: &mut View) {
-        let ok = self.machine().await
+        let ok = self.sample(view).await
             && self.services(view).await
             && self.processes(view).await
-            && self.metrics(view).await;
+            && self.states(view).await;
         if ok {
             Tally::bump(&self.tally.refreshes);
         }
     }
+}
+
+async fn subscribe(client: &windows_agent::Client) -> Result<sampler::Client, String> {
+    let spec = MetricSpec {
+        interval: Duration::from_millis(250),
+        processes: [ProcessMetric::WorkingSet].into_iter().collect(),
+        machine: [MachineMetric::Memory].into_iter().collect(),
+    };
+    let mut req = client.subscribe_request();
+    encode::metric_spec(&spec, req.get().init_spec());
+    let reply = req.send().promise.await.map_err(|e| format!("subscribe failed: {e}"))?;
+    reply
+        .get()
+        .and_then(|r| r.get_sampler())
+        .map_err(|e| format!("subscribe unreadable: {e}"))
 }
 
 async fn connect() -> Result<(RpcSession<windows_agent::Client>, u32, Duration), String> {
@@ -442,7 +510,13 @@ async fn run(rounds: u64, length: Duration, pingers: usize, refreshers: usize) -
     let mut rng = Rng((seed ^ 0x9E37_79B9_7F4A_7C15) | 1);
 
     for round in 1..=rounds {
-        let (session, attempts, took) = match connect().await {
+        let connected = match connect().await {
+            Ok((session, attempts, took)) => subscribe(session.remote())
+                .await
+                .map(|sampler| (session, sampler, attempts, took)),
+            Err(what) => Err(what),
+        };
+        let (session, sampler, attempts, took) = match connected {
             Ok(connected) => connected,
             Err(what) => {
                 Tally::bump(&tally.violations);
@@ -452,6 +526,7 @@ async fn run(rounds: u64, length: Duration, pingers: usize, refreshers: usize) -
         };
         let ctx = Rc::new(Ctx {
             client: session.remote().clone(),
+            sampler,
             tally: tally.clone(),
             seen: seen.clone(),
             origin,
@@ -489,10 +564,17 @@ async fn run(rounds: u64, length: Duration, pingers: usize, refreshers: usize) -
         );
     }
 
-    match connect().await {
-        Ok((session, attempts, took)) => {
+    let connected = match connect().await {
+        Ok((session, attempts, took)) => subscribe(session.remote())
+            .await
+            .map(|sampler| (session, sampler, attempts, took)),
+        Err(what) => Err(what),
+    };
+    match connected {
+        Ok((session, sampler, attempts, took)) => {
             let ctx = Ctx {
                 client: session.remote().clone(),
+                sampler,
                 tally: tally.clone(),
                 seen: seen.clone(),
                 origin,

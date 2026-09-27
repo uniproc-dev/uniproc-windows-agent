@@ -10,7 +10,7 @@ use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::accept_session;
 use uniproc_protocol::windows_capnp::windows_agent;
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
-use uniproc_windows_agent::local::{ATTACHED_MEMORY_INTERVAL, IDLE_MEMORY_INTERVAL, Local};
+use uniproc_windows_agent::local::Local;
 use uniproc_windows_agent::wire::PROTOCOL;
 
 use crate::handler::AgentImpl;
@@ -38,7 +38,7 @@ pub async fn run(agent: Arc<Local>) -> Result<()> {
             }
         };
         attached.set(attached.get() + 1);
-        agent.set_memory_interval(ATTACHED_MEMORY_INTERVAL);
+        agent.set_attached(true);
 
         let agent = agent.clone();
         let attached = attached.clone();
@@ -48,7 +48,7 @@ pub async fn run(agent: Arc<Local>) -> Result<()> {
             }
             attached.set(attached.get() - 1);
             if attached.get() == 0 {
-                agent.set_memory_interval(IDLE_MEMORY_INTERVAL);
+                agent.set_attached(false);
             }
         })
         .detach();

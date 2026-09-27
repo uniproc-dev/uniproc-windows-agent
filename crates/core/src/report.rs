@@ -1,6 +1,10 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crate::model::{
+    Architecture, DpiAwareness, Isolation, Mitigations, ProcessState, UacVirtualization,
+};
+use crate::sample::Sample;
 use crate::state::SystemState;
 use crate::state::events::ProcessSignature;
 use uniproc_agent_kit::Tagged;
@@ -8,13 +12,16 @@ use uniproc_agent_kit::Tagged;
 /// What the state held at one tick. Never changes once built.
 #[derive(Clone, Debug)]
 pub struct Report {
-    pub machine: MachineStats,
+    /// Sorted by pid.
     pub processes: Tagged<Arc<[Process]>>,
-    /// Exactly the pids in `processes`, in the same order.
-    pub metrics: Vec<ProcessMetrics>,
-    pub samples: Samples,
+    /// One per process, in the same order, as of the last sample.
+    pub states: Arc<[ProcessState]>,
+    /// The last sample; its rows are exactly `processes`.
+    pub sample: Arc<Sample>,
     pub dropped_by_sink: u64,
     pub sessions: Vec<SessionHealth>,
+    /// What each probe costs the tick.
+    pub costs: Vec<ProbeCost>,
     pub taken_at: Instant,
 }
 
@@ -40,12 +47,24 @@ impl SessionHealth {
     }
 }
 
-/// Profile samples folded at the last machine snapshot.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Samples {
-    pub attributed: u64,
-    pub unattributed: u64,
-    pub idle: u64,
+/// How long one probe takes, over every tick that ran it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProbeCost {
+    pub name: &'static str,
+    pub runs: u64,
+    pub last: Duration,
+    pub mean: Duration,
+    pub max: Duration,
+}
+
+impl ProbeCost {
+    pub fn record(&mut self, took: Duration) {
+        self.runs += 1;
+        self.last = took;
+        self.max = self.max.max(took);
+        let total = self.mean.as_nanos() * (self.runs as u128 - 1) + took.as_nanos();
+        self.mean = Duration::from_nanos((total / self.runs as u128) as u64);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -56,27 +75,6 @@ pub enum SignatureStatus {
     Unsigned,
     Microsoft,
     ThirdParty,
-}
-
-/// The machine as a whole. Disk and network are running totals since the agent started.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct MachineStats {
-    pub total_physical_kb: u64,
-    pub available_physical_kb: u64,
-    pub used_physical_kb: u64,
-    pub cpu_percent: f32,
-    pub cpu_max_mhz: u64,
-    pub cpu_current_mhz: u64,
-    pub cpu_interrupt_percent: f32,
-    pub cpu_dpc_percent: f32,
-
-    pub disk_read_bytes: u64,
-    pub disk_write_bytes: u64,
-    pub disk_read_iops: u64,
-    pub disk_write_iops: u64,
-
-    pub net_rx_bytes: u64,
-    pub net_tx_bytes: u64,
 }
 
 /// What a process is. Fixed for its lifetime.
@@ -102,59 +100,22 @@ pub struct Process {
 
     /// Pid of the conhost serving the process's console, or 0.
     pub console_host_pid: u32,
-}
 
-/// What a process is doing right now, joined to its [`Process`] by pid.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ProcessMetrics {
-    pub pid: u32,
-    pub cpu_percent: f32,
-    pub working_set_kb: u64,
-    pub private_bytes_kb: u64,
-    pub peak_working_set_kb: u64,
-    /// Resident pages no one else shares; the only memory figure that sums across processes.
-    pub private_working_set_kb: u64,
-
-    pub disk_read_bytes: u64,
-    pub disk_write_bytes: u64,
-    pub disk_read_iops: u64,
-    pub disk_write_iops: u64,
-
-    pub net_rx_bytes: u64,
-    pub net_tx_bytes: u64,
-}
-
-impl Report {
-    /// The process list is taken from `previous` while its etag holds, not rebuilt.
-    pub(crate) fn build(
-        state: &SystemState,
-        previous: Option<&Report>,
-        dropped_by_sink: u64,
-        sessions: Vec<SessionHealth>,
-    ) -> Self {
-        let etag = state.processes_etag();
-        let processes = match previous {
-            Some(previous) if previous.processes.etag == etag => previous.processes.clone(),
-            _ => Tagged {
-                etag,
-                value: processes(state),
-            },
-        };
-        let (attributed, unattributed, idle) = state.sample_counts();
-        Self {
-            machine: machine(state),
-            processes,
-            metrics: metrics(state),
-            samples: Samples {
-                attributed,
-                unattributed,
-                idle,
-            },
-            dropped_by_sink,
-            sessions,
-            taken_at: Instant::now(),
-        }
-    }
+    /// FILETIME; 0 when unknown.
+    pub start_time: u64,
+    /// Never reused within a boot; 0 only for the Idle process.
+    pub sequence_number: u64,
+    /// `DOMAIN\name` of the token's user.
+    pub user: String,
+    pub architecture: Architecture,
+    pub elevated: Option<bool>,
+    pub uac_virtualization: UacVirtualization,
+    pub isolation: Isolation,
+    pub dpi_awareness: DpiAwareness,
+    /// `None` when the process could not be queried.
+    pub mitigations: Option<Mitigations>,
+    /// A package's PublisherDisplayName, otherwise the signer's subject name.
+    pub publisher: String,
 }
 
 fn signature(s: ProcessSignature) -> SignatureStatus {
@@ -166,8 +127,13 @@ fn signature(s: ProcessSignature) -> SignatureStatus {
     }
 }
 
-fn processes(state: &SystemState) -> Arc<[Process]> {
-    state
+/// The passports, taken from `previous` while the etag holds, sorted by pid.
+pub(crate) fn processes(state: &SystemState, previous: Option<&Tagged<Arc<[Process]>>>) -> Tagged<Arc<[Process]>> {
+    let etag = state.processes_etag();
+    if let Some(previous) = previous.filter(|p| p.etag == etag) {
+        return previous.clone();
+    }
+    let mut value: Vec<Process> = state
         .entries()
         .map(|e| Process {
             pid: e.pid,
@@ -183,127 +149,89 @@ fn processes(state: &SystemState) -> Arc<[Process]> {
             image_path: e.image_path.clone(),
             display_name: e.display_name.clone(),
             console_host_pid: e.console_host_pid,
+            start_time: e.start_time,
+            sequence_number: e.sequence_number,
+            user: e.user.clone(),
+            architecture: e.architecture,
+            elevated: e.elevated,
+            uac_virtualization: e.uac_virtualization,
+            isolation: e.isolation,
+            dpi_awareness: e.dpi_awareness,
+            mitigations: e.mitigations,
+            publisher: e.publisher.clone(),
         })
-        .collect()
-}
-
-fn metrics(state: &SystemState) -> Vec<ProcessMetrics> {
-    state
-        .entries()
-        .map(|e| {
-            let mem = e.memory.as_ref();
-            ProcessMetrics {
-                pid: e.pid,
-                cpu_percent: e.cpu.total_percent as f32,
-                working_set_kb: mem.map_or(0, |m| m.working_set_bytes / 1024),
-                private_bytes_kb: mem.map_or(0, |m| m.private_bytes / 1024),
-                peak_working_set_kb: mem.map_or(0, |m| m.peak_working_set_bytes / 1024),
-                private_working_set_kb: mem.map_or(0, |m| m.private_working_set_bytes / 1024),
-                disk_read_bytes: e.disk.read_bytes,
-                disk_write_bytes: e.disk.write_bytes,
-                disk_read_iops: e.disk.read_ops,
-                disk_write_iops: e.disk.write_ops,
-                net_rx_bytes: e.network.recv_bytes,
-                net_tx_bytes: e.network.sent_bytes,
-            }
-        })
-        .collect()
-}
-
-fn machine(state: &SystemState) -> MachineStats {
-    let totals = state.machine_totals();
-    let mut out = MachineStats {
-        disk_read_bytes: totals.disk_read_bytes,
-        disk_write_bytes: totals.disk_write_bytes,
-        disk_read_iops: totals.disk_read_ops,
-        disk_write_iops: totals.disk_write_ops,
-        net_rx_bytes: totals.net_rx_bytes,
-        net_tx_bytes: totals.net_tx_bytes,
-        ..Default::default()
-    };
-    if let Some(m) = state.machine() {
-        out.total_physical_kb = m.total_physical_kb;
-        out.available_physical_kb = m.available_physical_kb;
-        out.used_physical_kb = m.used_physical_kb;
-        out.cpu_percent = m.cpu_percent;
-        out.cpu_max_mhz = m.cpu_max_mhz;
-        out.cpu_current_mhz = m.cpu_current_mhz;
-        out.cpu_interrupt_percent = m.cpu_interrupt_percent;
-        out.cpu_dpc_percent = m.cpu_dpc_percent;
+        .collect();
+    value.sort_unstable_by_key(|p| p.pid);
+    Tagged {
+        etag,
+        value: value.into(),
     }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::events::{MemorySnapshot, ProcessStarted, StateChange};
+    use crate::snapshot::Row;
+    use crate::state::events::{ProcessEnriched, StateChange};
+    use crate::state::process::Sighted;
 
-    fn state() -> SystemState {
+    fn state(pids: &[u32]) -> SystemState {
         let mut s = SystemState::new();
-        s.apply(StateChange::ProcessStarted(Box::new(ProcessStarted {
-            pid: 100,
-            parent_pid: 4,
-            session_id: 1,
-            image_name: "a.exe".to_string(),
-            command_line: vec!["a.exe".to_string(), "-x".to_string()],
-            package_full_name: String::new(),
-            package_relative_app_id: String::new(),
-            is_kernel_process: false,
-        })));
-        s.apply(StateChange::Memory(vec![MemorySnapshot {
-            pid: 100,
-            working_set_bytes: 8192,
-            private_working_set_bytes: 4096,
+        let rows: Vec<Row> = pids
+            .iter()
+            .map(|&pid| Row {
+                pid,
+                parent_pid: 4,
+                sequence_number: pid as u64 + 1000,
+                create_time: 42,
+                ..Default::default()
+            })
+            .collect();
+        s.reconcile(&rows, |row| Sighted {
+            image_name: format!("p{}.exe", row.pid),
             ..Default::default()
-        }]));
+        });
         s
     }
 
     #[test]
     fn a_process_is_listed_with_what_it_is() {
-        let listed = processes(&state());
-        assert_eq!(listed.len(), 1);
-        let p = &listed[0];
-        assert_eq!((p.pid, p.parent_pid, p.session_id), (100, 4, 1));
-        assert_eq!(p.name, "a.exe");
+        let mut s = state(&[100]);
+        s.apply(StateChange::ProcessEnriched(Box::new(ProcessEnriched {
+            pid: 100,
+            sequence_number: 1100,
+            command_line: vec!["a.exe".into(), "-x".into()],
+            ..Default::default()
+        })));
+        let listed = processes(&s, None);
+        let p = &listed.value[0];
+        assert_eq!((p.pid, p.parent_pid, p.sequence_number, p.start_time), (100, 4, 1100, 42));
+        assert_eq!(p.name, "p100.exe");
         assert_eq!(*p.cmdline, ["a.exe", "-x"]);
     }
 
     #[test]
-    fn metrics_are_in_kilobytes_and_cover_the_list() {
-        let s = state();
-        let report = Report::build(&s, None, 0, Vec::new());
-        assert_eq!(report.processes.etag, s.processes_etag());
-        assert_eq!(report.metrics.len(), report.processes.value.len());
-        assert_eq!(report.metrics[0].working_set_kb, 8);
-        assert_eq!(report.metrics[0].private_working_set_kb, 4);
+    fn the_list_is_sorted_by_pid() {
+        let listed = processes(&state(&[300, 100, 200]), None);
+        let pids: Vec<u32> = listed.value.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [100, 200, 300]);
     }
 
     #[test]
     fn an_unchanged_list_is_taken_from_the_previous_report() {
-        let s = state();
-        let first = Report::build(&s, None, 0, Vec::new());
-        let again = Report::build(&s, Some(&first), 0, Vec::new());
-        assert!(Arc::ptr_eq(&first.processes.value, &again.processes.value));
+        let s = state(&[100]);
+        let first = processes(&s, None);
+        let again = processes(&s, Some(&first));
+        assert!(Arc::ptr_eq(&first.value, &again.value));
     }
 
     #[test]
-    fn a_moved_tag_builds_the_list_again() {
-        let mut s = state();
-        let first = Report::build(&s, None, 0, Vec::new());
-        s.apply(StateChange::ProcessStarted(Box::new(ProcessStarted {
-            pid: 200,
-            image_name: "b.exe".to_string(),
-            ..Default::default()
-        })));
-        let next = Report::build(&s, Some(&first), 0, Vec::new());
-        assert_ne!(next.processes.etag, first.processes.etag);
-        assert_eq!(next.processes.value.len(), 2);
-    }
-
-    #[test]
-    fn a_machine_not_sampled_yet_is_all_zero() {
-        assert_eq!(machine(&SystemState::new()), MachineStats::default());
+    fn a_probe_cost_keeps_its_mean_and_worst() {
+        let mut cost = ProbeCost::default();
+        for ms in [10, 20, 30] {
+            cost.record(Duration::from_millis(ms));
+        }
+        assert_eq!((cost.runs, cost.last, cost.max), (3, Duration::from_millis(30), Duration::from_millis(30)));
+        assert_eq!(cost.mean, Duration::from_millis(20));
     }
 }

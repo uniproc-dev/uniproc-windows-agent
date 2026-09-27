@@ -1,21 +1,30 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use capnp::struct_list;
 use uniproc_protocol::windows_capnp::{
-    ProcessPriority as WirePriority, ServiceState as WireServiceState, SignatureStatus as WireSignature,
-    machine_stats, process_info, process_metrics, service_stats, service_status,
+    Architecture as WireArchitecture, DpiAwareness as WireDpi, ExtendedCfg as WireExtendedCfg,
+    IoPriority as WireIoPriority, Isolation as WireIsolation, MachineMetric as WireMachineMetric,
+    ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority, ServiceState as WireServiceState,
+    SignatureStatus as WireSignature, StackProtection as WireStackProtection, Toggle,
+    UacVirtualization as WireUac, machine_sample, metric_spec, process_columns, process_info,
+    process_state, service_stats, service_status,
 };
 
 use crate::api::{
-    MachineStats, ProcessInfo, ProcessMetrics, ProcessPriority, ServiceState, ServiceStats,
-    ServiceStatus, SignatureStatus,
+    Architecture, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
+    MachineDisk, MachineMemory, MachineMetric, MachineNetwork, MachineSample, MetricSpec,
+    Mitigations, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState, Sample, ServiceState,
+    ServiceStats, ServiceStatus, SignatureStatus, StackProtection, UacVirtualization,
 };
+
+type Wire<T> = Result<T, capnp::NotInSchema>;
 
 fn text(reader: capnp::Result<capnp::text::Reader<'_>>) -> capnp::Result<String> {
     Ok(reader?.to_str()?.to_owned())
 }
 
-fn signature(s: Result<WireSignature, capnp::NotInSchema>) -> SignatureStatus {
+fn signature(s: Wire<WireSignature>) -> SignatureStatus {
     match s {
         Ok(WireSignature::Unsigned) => SignatureStatus::Unsigned,
         Ok(WireSignature::Microsoft) => SignatureStatus::Microsoft,
@@ -24,7 +33,7 @@ fn signature(s: Result<WireSignature, capnp::NotInSchema>) -> SignatureStatus {
     }
 }
 
-fn service_state(s: Result<WireServiceState, capnp::NotInSchema>) -> ServiceState {
+fn service_state(s: Wire<WireServiceState>) -> ServiceState {
     match s {
         Ok(WireServiceState::Stopped) => ServiceState::Stopped,
         Ok(WireServiceState::StartPending) => ServiceState::StartPending,
@@ -37,14 +46,138 @@ fn service_state(s: Result<WireServiceState, capnp::NotInSchema>) -> ServiceStat
     }
 }
 
-pub fn priority(p: WirePriority) -> ProcessPriority {
+/// `None` for `unknown` or a value this build does not know.
+pub fn priority(p: Wire<WirePriority>) -> Option<ProcessPriority> {
     match p {
-        WirePriority::Idle => ProcessPriority::Idle,
-        WirePriority::BelowNormal => ProcessPriority::BelowNormal,
-        WirePriority::Normal => ProcessPriority::Normal,
-        WirePriority::AboveNormal => ProcessPriority::AboveNormal,
-        WirePriority::High => ProcessPriority::High,
-        WirePriority::Realtime => ProcessPriority::Realtime,
+        Ok(WirePriority::Idle) => Some(ProcessPriority::Idle),
+        Ok(WirePriority::BelowNormal) => Some(ProcessPriority::BelowNormal),
+        Ok(WirePriority::Normal) => Some(ProcessPriority::Normal),
+        Ok(WirePriority::AboveNormal) => Some(ProcessPriority::AboveNormal),
+        Ok(WirePriority::High) => Some(ProcessPriority::High),
+        Ok(WirePriority::Realtime) => Some(ProcessPriority::Realtime),
+        Ok(WirePriority::Unknown) | Err(_) => None,
+    }
+}
+
+fn toggle(t: Wire<Toggle>) -> Option<bool> {
+    match t {
+        Ok(Toggle::On) => Some(true),
+        Ok(Toggle::Off) => Some(false),
+        Ok(Toggle::Unknown) | Err(_) => None,
+    }
+}
+
+fn architecture(a: Wire<WireArchitecture>) -> Architecture {
+    match a {
+        Ok(WireArchitecture::X86) => Architecture::X86,
+        Ok(WireArchitecture::X64) => Architecture::X64,
+        Ok(WireArchitecture::Arm) => Architecture::Arm,
+        Ok(WireArchitecture::Arm64) => Architecture::Arm64,
+        Ok(WireArchitecture::Arm64X86Compatible) => Architecture::Arm64X86Compatible,
+        Ok(WireArchitecture::Arm64X64Compatible) => Architecture::Arm64X64Compatible,
+        Ok(WireArchitecture::Unknown) | Err(_) => Architecture::Unknown,
+    }
+}
+
+fn uac_virtualization(u: Wire<WireUac>) -> UacVirtualization {
+    match u {
+        Ok(WireUac::NotAllowed) => UacVirtualization::NotAllowed,
+        Ok(WireUac::Disabled) => UacVirtualization::Disabled,
+        Ok(WireUac::Enabled) => UacVirtualization::Enabled,
+        Ok(WireUac::Unknown) | Err(_) => UacVirtualization::Unknown,
+    }
+}
+
+fn isolation(i: Wire<WireIsolation>) -> Isolation {
+    match i {
+        Ok(WireIsolation::None) => Isolation::None,
+        Ok(WireIsolation::AppContainer) => Isolation::AppContainer,
+        Ok(WireIsolation::Uwp) => Isolation::Uwp,
+        Ok(WireIsolation::Silo) => Isolation::Silo,
+        Ok(WireIsolation::Unknown) | Err(_) => Isolation::Unknown,
+    }
+}
+
+fn dpi_awareness(d: Wire<WireDpi>) -> DpiAwareness {
+    match d {
+        Ok(WireDpi::Unaware) => DpiAwareness::Unaware,
+        Ok(WireDpi::System) => DpiAwareness::System,
+        Ok(WireDpi::PerMonitor) => DpiAwareness::PerMonitor,
+        Ok(WireDpi::PerMonitorV2) => DpiAwareness::PerMonitorV2,
+        Ok(WireDpi::UnawareGdiScaled) => DpiAwareness::UnawareGdiScaled,
+        Ok(WireDpi::Unknown) | Err(_) => DpiAwareness::Unknown,
+    }
+}
+
+fn stack_protection(s: Wire<WireStackProtection>) -> StackProtection {
+    match s {
+        Ok(WireStackProtection::Off) => StackProtection::Off,
+        Ok(WireStackProtection::Compatible) => StackProtection::Compatible,
+        Ok(WireStackProtection::Strict) => StackProtection::Strict,
+        Ok(WireStackProtection::CompatibleAudit) => StackProtection::CompatibleAudit,
+        Ok(WireStackProtection::StrictAudit) => StackProtection::StrictAudit,
+        Ok(WireStackProtection::Unknown) | Err(_) => StackProtection::Unknown,
+    }
+}
+
+fn extended_cfg(e: Wire<WireExtendedCfg>) -> ExtendedCfg {
+    match e {
+        Ok(WireExtendedCfg::Off) => ExtendedCfg::Off,
+        Ok(WireExtendedCfg::Audit) => ExtendedCfg::Audit,
+        Ok(WireExtendedCfg::On) => ExtendedCfg::On,
+        Ok(WireExtendedCfg::Unknown) | Err(_) => ExtendedCfg::Unknown,
+    }
+}
+
+fn io_priority(p: Wire<WireIoPriority>) -> IoPriority {
+    match p {
+        Ok(WireIoPriority::VeryLow) => IoPriority::VeryLow,
+        Ok(WireIoPriority::Low) => IoPriority::Low,
+        Ok(WireIoPriority::Normal) => IoPriority::Normal,
+        Ok(WireIoPriority::High) => IoPriority::High,
+        Ok(WireIoPriority::Critical) => IoPriority::Critical,
+        Ok(WireIoPriority::Unknown) | Err(_) => IoPriority::Unknown,
+    }
+}
+
+fn process_metric(m: WireProcessMetric) -> ProcessMetric {
+    match m {
+        WireProcessMetric::CpuUserTime => ProcessMetric::CpuUserTime,
+        WireProcessMetric::CpuKernelTime => ProcessMetric::CpuKernelTime,
+        WireProcessMetric::CpuCycles => ProcessMetric::CpuCycles,
+        WireProcessMetric::WorkingSet => ProcessMetric::WorkingSet,
+        WireProcessMetric::PeakWorkingSet => ProcessMetric::PeakWorkingSet,
+        WireProcessMetric::PrivateWorkingSet => ProcessMetric::PrivateWorkingSet,
+        WireProcessMetric::Commit => ProcessMetric::Commit,
+        WireProcessMetric::PagedPool => ProcessMetric::PagedPool,
+        WireProcessMetric::NonPagedPool => ProcessMetric::NonPagedPool,
+        WireProcessMetric::PageFaults => ProcessMetric::PageFaults,
+        WireProcessMetric::Handles => ProcessMetric::Handles,
+        WireProcessMetric::Threads => ProcessMetric::Threads,
+        WireProcessMetric::UserObjects => ProcessMetric::UserObjects,
+        WireProcessMetric::GdiObjects => ProcessMetric::GdiObjects,
+        WireProcessMetric::IoReadOps => ProcessMetric::IoReadOps,
+        WireProcessMetric::IoWriteOps => ProcessMetric::IoWriteOps,
+        WireProcessMetric::IoOtherOps => ProcessMetric::IoOtherOps,
+        WireProcessMetric::IoReadBytes => ProcessMetric::IoReadBytes,
+        WireProcessMetric::IoWriteBytes => ProcessMetric::IoWriteBytes,
+        WireProcessMetric::IoOtherBytes => ProcessMetric::IoOtherBytes,
+        WireProcessMetric::DiskReadOps => ProcessMetric::DiskReadOps,
+        WireProcessMetric::DiskWriteOps => ProcessMetric::DiskWriteOps,
+        WireProcessMetric::DiskFlushOps => ProcessMetric::DiskFlushOps,
+        WireProcessMetric::DiskReadBytes => ProcessMetric::DiskReadBytes,
+        WireProcessMetric::DiskWriteBytes => ProcessMetric::DiskWriteBytes,
+        WireProcessMetric::NetRxBytes => ProcessMetric::NetRxBytes,
+        WireProcessMetric::NetTxBytes => ProcessMetric::NetTxBytes,
+    }
+}
+
+fn machine_metric(m: WireMachineMetric) -> MachineMetric {
+    match m {
+        WireMachineMetric::Cpu => MachineMetric::Cpu,
+        WireMachineMetric::Memory => MachineMetric::Memory,
+        WireMachineMetric::Disk => MachineMetric::Disk,
+        WireMachineMetric::Network => MachineMetric::Network,
     }
 }
 
@@ -56,25 +189,6 @@ pub fn service_status(s: service_status::Reader<'_>) -> ServiceStatus {
         service_exit_code: s.get_service_exit_code(),
         checkpoint: s.get_checkpoint(),
         wait_hint_ms: s.get_wait_hint_ms(),
-    }
-}
-
-pub fn machine(m: machine_stats::Reader<'_>) -> MachineStats {
-    MachineStats {
-        total_physical_kb: m.get_total_physical_kb(),
-        available_physical_kb: m.get_available_physical_kb(),
-        used_physical_kb: m.get_used_physical_kb(),
-        cpu_percent: m.get_cpu_percent(),
-        cpu_max_mhz: m.get_cpu_max_mhz(),
-        cpu_current_mhz: m.get_cpu_current_mhz(),
-        cpu_interrupt_percent: m.get_cpu_interrupt_percent(),
-        cpu_dpc_percent: m.get_cpu_dpc_percent(),
-        disk_read_bytes: m.get_disk_read_bytes(),
-        disk_write_bytes: m.get_disk_write_bytes(),
-        disk_read_iops: m.get_disk_read_iops(),
-        disk_write_iops: m.get_disk_write_iops(),
-        net_rx_bytes: m.get_net_rx_bytes(),
-        net_tx_bytes: m.get_net_tx_bytes(),
     }
 }
 
@@ -116,26 +230,168 @@ pub fn processes(list: struct_list::Reader<'_, process_info::Owned>) -> capnp::R
                 image_path: text(p.get_image_path())?,
                 display_name: text(p.get_display_name())?,
                 console_host_pid: p.get_console_host_pid(),
+                start_time: p.get_start_time(),
+                sequence_number: p.get_sequence_number(),
+                user: text(p.get_user())?,
+                architecture: architecture(p.get_architecture()),
+                elevated: toggle(p.get_elevated()),
+                uac_virtualization: uac_virtualization(p.get_uac_virtualization()),
+                isolation: isolation(p.get_isolation()),
+                dpi_awareness: dpi_awareness(p.get_dpi_awareness()),
+                mitigations: if p.has_mitigations() {
+                    let m = p.get_mitigations()?;
+                    Some(Mitigations {
+                        dep: toggle(m.get_dep()),
+                        stack_protection: stack_protection(m.get_stack_protection()),
+                        extended_cfg: extended_cfg(m.get_extended_cfg()),
+                    })
+                } else {
+                    None
+                },
+                publisher: text(p.get_publisher())?,
             })
         })
         .collect()
 }
 
-pub fn metrics(list: struct_list::Reader<'_, process_metrics::Owned>) -> Vec<ProcessMetrics> {
+pub fn process_states(list: struct_list::Reader<'_, process_state::Owned>) -> Arc<[ProcessState]> {
     list.iter()
-        .map(|m| ProcessMetrics {
-            pid: m.get_pid(),
-            cpu_percent: m.get_cpu_percent(),
-            working_set_kb: m.get_working_set_kb(),
-            private_bytes_kb: m.get_private_bytes_kb(),
-            peak_working_set_kb: m.get_peak_working_set_kb(),
-            private_working_set_kb: m.get_private_working_set_kb(),
-            disk_read_bytes: m.get_disk_read_bytes(),
-            disk_write_bytes: m.get_disk_write_bytes(),
-            disk_read_iops: m.get_disk_read_iops(),
-            disk_write_iops: m.get_disk_write_iops(),
-            net_rx_bytes: m.get_net_rx_bytes(),
-            net_tx_bytes: m.get_net_tx_bytes(),
+        .map(|s| ProcessState {
+            pid: s.get_pid(),
+            sequence_number: s.get_sequence_number(),
+            suspended: toggle(s.get_suspended()),
+            efficiency_mode: toggle(s.get_efficiency_mode()),
+            base_priority: priority(s.get_base_priority()),
+            power_throttling: toggle(s.get_power_throttling()),
+            job_object_id: s.get_job_object_id(),
+            io_priority: io_priority(s.get_io_priority()),
         })
         .collect()
+}
+
+/// Metrics this build does not know are left out.
+pub fn metric_spec(spec: metric_spec::Reader<'_>) -> capnp::Result<MetricSpec> {
+    Ok(MetricSpec {
+        interval: Duration::from_millis(spec.get_interval_ms() as u64),
+        processes: spec
+            .get_processes()?
+            .iter()
+            .filter_map(Result::ok)
+            .map(process_metric)
+            .collect(),
+        machine: spec
+            .get_machine()?
+            .iter()
+            .filter_map(Result::ok)
+            .map(machine_metric)
+            .collect(),
+    })
+}
+
+macro_rules! columns {
+    ($reader:ident, $($field:ident => ($has:ident, $get:ident),)*) => {
+        Columns {
+            $($field: if $reader.$has() {
+                Some($reader.$get()?.iter().collect())
+            } else {
+                None
+            },)*
+        }
+    };
+}
+
+/// A sample as the agent sent it, for a subscription that asked for `wanted`.
+pub fn sample(
+    processes: process_columns::Reader<'_>,
+    machine: machine_sample::Reader<'_>,
+    wanted: MetricSpec,
+) -> capnp::Result<Sample> {
+    let p = processes;
+    Ok(Sample {
+        snapshot: p.get_snapshot(),
+        sampled_at: p.get_sampled_at(),
+        period: wanted.period(),
+        wanted,
+        passport_etag: p.get_passport_etag(),
+        pids: p.get_pids()?.iter().collect(),
+        sequence_numbers: p.get_sequence_numbers()?.iter().collect(),
+        columns: columns!(p,
+            cpu_user_time => (has_cpu_user_time, get_cpu_user_time),
+            cpu_kernel_time => (has_cpu_kernel_time, get_cpu_kernel_time),
+            cpu_cycles => (has_cpu_cycles, get_cpu_cycles),
+            working_set => (has_working_set, get_working_set),
+            peak_working_set => (has_peak_working_set, get_peak_working_set),
+            private_working_set => (has_private_working_set, get_private_working_set),
+            commit => (has_commit, get_commit),
+            paged_pool => (has_paged_pool, get_paged_pool),
+            non_paged_pool => (has_non_paged_pool, get_non_paged_pool),
+            page_faults => (has_page_faults, get_page_faults),
+            handles => (has_handles, get_handles),
+            threads => (has_threads, get_threads),
+            user_objects => (has_user_objects, get_user_objects),
+            gdi_objects => (has_gdi_objects, get_gdi_objects),
+            io_read_ops => (has_io_read_ops, get_io_read_ops),
+            io_write_ops => (has_io_write_ops, get_io_write_ops),
+            io_other_ops => (has_io_other_ops, get_io_other_ops),
+            io_read_bytes => (has_io_read_bytes, get_io_read_bytes),
+            io_write_bytes => (has_io_write_bytes, get_io_write_bytes),
+            io_other_bytes => (has_io_other_bytes, get_io_other_bytes),
+            disk_read_ops => (has_disk_read_ops, get_disk_read_ops),
+            disk_write_ops => (has_disk_write_ops, get_disk_write_ops),
+            disk_flush_ops => (has_disk_flush_ops, get_disk_flush_ops),
+            disk_read_bytes => (has_disk_read_bytes, get_disk_read_bytes),
+            disk_write_bytes => (has_disk_write_bytes, get_disk_write_bytes),
+            net_rx_bytes => (has_net_rx_bytes, get_net_rx_bytes),
+            net_tx_bytes => (has_net_tx_bytes, get_net_tx_bytes),
+        ),
+        machine: machine_groups(machine)?,
+    })
+}
+
+fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample> {
+    Ok(MachineSample {
+        cpu: if m.has_cpu() {
+            let c = m.get_cpu()?;
+            Some(MachineCpu {
+                idle_time: c.get_idle_time(),
+                kernel_time: c.get_kernel_time(),
+                user_time: c.get_user_time(),
+                interrupt_time: c.get_interrupt_time(),
+                dpc_time: c.get_dpc_time(),
+                max_mhz: c.get_max_mhz(),
+                current_mhz: c.get_current_mhz(),
+            })
+        } else {
+            None
+        },
+        memory: if m.has_memory() {
+            let mem = m.get_memory()?;
+            Some(MachineMemory {
+                total_physical: mem.get_total_physical(),
+                available_physical: mem.get_available_physical(),
+            })
+        } else {
+            None
+        },
+        disk: if m.has_disk() {
+            let d = m.get_disk()?;
+            Some(MachineDisk {
+                read_ops: d.get_read_ops(),
+                write_ops: d.get_write_ops(),
+                read_bytes: d.get_read_bytes(),
+                write_bytes: d.get_write_bytes(),
+            })
+        } else {
+            None
+        },
+        network: if m.has_network() {
+            let n = m.get_network()?;
+            Some(MachineNetwork {
+                rx_bytes: n.get_rx_bytes(),
+                tx_bytes: n.get_tx_bytes(),
+            })
+        } else {
+            None
+        },
+    })
 }

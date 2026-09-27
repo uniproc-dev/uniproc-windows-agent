@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use uniproc_windows_agent::agent::Agent;
-use uniproc_windows_agent::api::{Command, ProcessPriority, ServiceState, Snapshot};
+use uniproc_windows_agent::api::{
+    Command, MachineMetrics, MetricSpec, ProcessMetric, ProcessPriority, ServiceState, Snapshot,
+};
 
 fn main() -> anyhow::Result<()> {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "remote".into());
@@ -35,16 +37,80 @@ async fn run(mode: &str) -> anyhow::Result<()> {
     println!("{mode}: ping ok");
 
     let first = snapshot(&agent).await?;
-    assert_eq!(first.metrics.len(), first.processes.value.len(), "metrics cover the list");
-    assert!(first.metrics.iter().zip(first.processes.value.iter()).all(|(m, p)| m.pid == p.pid));
-    assert!(first.machine.used_physical_kb > 0, "the first snapshot has the machine's memory");
+    let states = &first.states.value;
+    assert_eq!(states.passport_etag, first.processes.etag, "the states are joined with the list");
+    assert_eq!(states.states.len(), first.processes.value.len(), "states cover the list");
+    assert!(
+        states
+            .states
+            .iter()
+            .zip(first.processes.value.iter())
+            .all(|(s, p)| (s.pid, s.sequence_number) == (p.pid, p.sequence_number))
+    );
+    if let Some(p) = first.processes.value.iter().find(|p| !p.package_full_name.is_empty()) {
+        println!(
+            "{mode}: packaged {} app {:?} shown as {:?} by {:?}, isolation {:?}",
+            p.package_full_name, p.package_relative_app_id, p.display_name, p.publisher, p.isolation
+        );
+        assert!(!p.package_relative_app_id.is_empty(), "a packaged process names its app");
+        assert!(!p.publisher.is_empty(), "a package names its publisher");
+    }
+    let passports = first.processes.value.iter().filter(|p| !p.user.is_empty()).count();
     println!(
-        "{mode}: {} processes, {} services, cpu {:.1}%, used {} kb",
+        "{mode}: {} processes ({passports} with a user), {} services",
         first.processes.value.len(),
         first.services.value.len(),
-        first.machine.cpu_percent,
-        first.machine.used_physical_kb,
     );
+
+    let spec = MetricSpec {
+        interval: Duration::from_millis(500),
+        processes: [
+            ProcessMetric::WorkingSet,
+            ProcessMetric::CpuUserTime,
+            ProcessMetric::Handles,
+            ProcessMetric::GdiObjects,
+            ProcessMetric::UserObjects,
+        ]
+        .into_iter()
+        .collect(),
+        machine: MachineMetrics::all(),
+    };
+    let mut sampler = agent.subscribe(spec).await?;
+    let a = sampler.next().await?;
+    let b = sampler.next().await?;
+    assert!(b.snapshot > a.snapshot && b.sampled_at > a.sampled_at, "each next is a newer sample");
+    assert_eq!(b.pids.len(), b.columns.working_set.as_ref().map_or(0, |c| c.len()));
+    assert!(b.columns.threads.is_none(), "only the asked columns come");
+    let memory = b.machine.memory.expect("the machine's memory was asked for");
+    assert!(memory.total_physical > memory.available_physical);
+    println!(
+        "{mode}: samples {} and {} {:.0} ms apart, {} rows, {} MB of {} MB available",
+        a.snapshot,
+        b.snapshot,
+        (b.sampled_at - a.sampled_at) as f64 / 10_000.0,
+        b.pids.len(),
+        memory.available_physical >> 20,
+        memory.total_physical >> 20,
+    );
+    let explorer = first
+        .processes
+        .value
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case("explorer.exe"))
+        .expect("a desktop session");
+    let row = b.pids.iter().position(|&pid| pid == explorer.pid).expect("explorer sampled");
+    match (&b.columns.gdi_objects, &b.columns.user_objects) {
+        (Some(gdi), Some(user)) => {
+            println!(
+                "{mode}: explorer in session {} has {} GDI and {} USER objects",
+                explorer.session_id, gdi[row], user[row]
+            );
+            assert!(gdi[row] > 0 && user[row] > 0, "the desktop's session shows its GUI objects");
+        }
+        (None, None) => println!("{mode}: no GUI object counts outside the desktop's session"),
+        _ => panic!("GDI and USER objects come together"),
+    }
+    drop(sampler);
 
     let second = snapshot(&agent).await?;
     if second.processes.etag == first.processes.etag {
@@ -56,11 +122,6 @@ async fn run(mode: &str) -> anyhow::Result<()> {
     if second.services.etag == first.services.etag {
         assert!(Arc::ptr_eq(&first.services.value, &second.services.value));
     }
-
-    agent
-        .set_intervals(Some(Duration::from_millis(1000)), None)
-        .await?;
-    println!("{mode}: set_intervals ok");
 
     let mut child = std::process::Command::new("ping")
         .args(["-n", "30", "127.0.0.1"])

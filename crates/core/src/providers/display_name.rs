@@ -23,9 +23,9 @@
 use std::ptr::addr_of;
 use windows::Win32::{
     ERROR_SUCCESS, FILE_ATTRIBUTE_NORMAL, GetFileVersionInfoSizeW, GetFileVersionInfoW,
-    GetPackagePathByFullName, PACKAGE_ID, PACKAGE_INFORMATION_BASIC, PACKAGE_INFORMATION_FULL,
-    PackageIdFromFullName, SHFILEINFOW, SHGFI_DISPLAYNAME, SHGFI_USEFILEATTRIBUTES,
-    SHGetFileInfoW, SHLoadIndirectString, VerQueryValueW,
+    GetPackagePathByFullName, GetStagedPackagePathByFullName, PACKAGE_ID, PACKAGE_INFORMATION_BASIC,
+    PACKAGE_INFORMATION_FULL, PackageIdFromFullName, SHFILEINFOW, SHGFI_DISPLAYNAME,
+    SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHLoadIndirectString, VerQueryValueW,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
@@ -109,6 +109,26 @@ pub fn package_publisher(package_full_name: &str) -> Option<String> {
     }
 }
 
+/// The publisher the package's manifest names for people
+/// (`Properties/PublisherDisplayName`), the one Task Manager shows.
+pub fn package_publisher_display_name(package_full_name: &str) -> Option<String> {
+    let dir = package_path(package_full_name)?;
+    let base_name = package_base_name(package_full_name)?;
+    let xml = std::fs::read_to_string(dir.join("AppxManifest.xml")).ok()?;
+    let doc = roxmltree::Document::parse(&xml).ok()?;
+    let value = doc
+        .descendants()
+        .find(|n| n.tag_name().name() == "Properties")
+        .and_then(|props| props.children().find(|c| c.tag_name().name() == "PublisherDisplayName"))
+        .and_then(|name| name.text())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    match resource_uris(value, &base_name) {
+        Some(uris) => uris.iter().find_map(|uri| load_indirect(package_full_name, uri)),
+        None => Some(value.to_string()),
+    }
+}
+
 /// The name the package's manifest declares for this application, the one
 /// Start and Task Manager show.
 ///
@@ -141,27 +161,34 @@ fn package_display_name(
     }
 }
 
-/// Where the package is installed.
+/// Where the package is installed. SYSTEM has no packages registered to it,
+/// so for the service the staged path is the one that answers.
 fn package_path(package_full_name: &str) -> Option<std::path::PathBuf> {
     let full_name = HSTRING::from(package_full_name);
-    let mut len = 0u32;
-    unsafe {
-        let _ = GetPackagePathByFullName(PCWSTR(full_name.as_ptr()), &mut len, None);
-    }
-    if len == 0 {
-        return None;
-    }
-
-    let mut buf = vec![0u16; len as usize];
-    let status = unsafe {
-        GetPackagePathByFullName(PCWSTR(full_name.as_ptr()), &mut len, Some(PWSTR(buf.as_mut_ptr())))
+    let by = |query: PathQuery| {
+        let mut len = 0u32;
+        let _ = query(PCWSTR(full_name.as_ptr()), &mut len, None);
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; len as usize];
+        if query(PCWSTR(full_name.as_ptr()), &mut len, Some(PWSTR(buf.as_mut_ptr()))) != ERROR_SUCCESS {
+            return None;
+        }
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..end])))
     };
-    if status != ERROR_SUCCESS {
-        return None;
-    }
+    by(installed_path).or_else(|| by(staged_path))
+}
 
-    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..end])))
+type PathQuery = fn(PCWSTR, &mut u32, Option<PWSTR>) -> i32;
+
+fn installed_path(full_name: PCWSTR, len: &mut u32, path: Option<PWSTR>) -> i32 {
+    unsafe { GetPackagePathByFullName(full_name, len, path) }
+}
+
+fn staged_path(full_name: PCWSTR, len: &mut u32, path: Option<PWSTR>) -> i32 {
+    unsafe { GetStagedPackagePathByFullName(full_name, len, path) }
 }
 
 fn is_inside(path: &str, dir: &str) -> bool {

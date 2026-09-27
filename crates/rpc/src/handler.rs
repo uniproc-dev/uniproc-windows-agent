@@ -1,15 +1,14 @@
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::oneshot;
 use futures::future::{Either, select};
 use uniproc_protocol::meta_capnp::{self, ResponseStatus};
-use uniproc_protocol::windows_capnp::{service_watcher, watch_handle, windows_agent};
+use uniproc_protocol::windows_capnp::{sampler, service_watcher, watch_handle, windows_agent};
 
 use uniproc_windows_agent::api::{Command, CommandResult};
-use uniproc_windows_agent::local::{Local, ServiceWatch};
+use uniproc_windows_agent::local::{Local, LocalSampler, ServiceWatch};
 use uniproc_windows_agent::wire::{decode, encode};
 
 #[derive(Clone)]
@@ -28,6 +27,27 @@ impl AgentImpl {
             .run(command)
             .await
             .map_err(|e| capnp::Error::failed(format!("{e:#}")))
+    }
+}
+
+const ERROR_INVALID_PARAMETER: u32 = 87;
+
+struct SamplerImpl {
+    sampler: LocalSampler,
+}
+
+impl sampler::Server for SamplerImpl {
+    async fn sample(
+        self: Rc<Self>,
+        params: sampler::SampleParams,
+        mut results: sampler::SampleResults,
+    ) -> Result<(), capnp::Error> {
+        let if_none_match = params.get()?.get_meta()?.get_if_none_match();
+        let sample = self.sampler.sample(if_none_match).await;
+        let mut meta = results.get().init_meta();
+        meta.set_etag(sample.snapshot);
+        meta.set_status(ResponseStatus::Ok);
+        encode::sample(&sample, results.get())
     }
 }
 
@@ -112,17 +132,6 @@ impl windows_agent::Server for AgentImpl {
         Ok(())
     }
 
-    async fn get_machine(
-        self: Rc<Self>,
-        _: windows_agent::GetMachineParams,
-        mut results: windows_agent::GetMachineResults,
-    ) -> Result<(), capnp::Error> {
-        let machine = self.agent.machine();
-        unconditional(results.get().init_meta());
-        encode::machine(&machine, results.get().init_machine());
-        Ok(())
-    }
-
     async fn get_services(
         self: Rc<Self>,
         params: windows_agent::GetServicesParams,
@@ -149,34 +158,30 @@ impl windows_agent::Server for AgentImpl {
         Ok(())
     }
 
-    async fn get_process_metrics(
+    async fn get_process_states(
         self: Rc<Self>,
-        _: windows_agent::GetProcessMetricsParams,
-        mut results: windows_agent::GetProcessMetricsResults,
+        params: windows_agent::GetProcessStatesParams,
+        mut results: windows_agent::GetProcessStatesResults,
     ) -> Result<(), capnp::Error> {
-        let snapshot = self.agent.process_metrics();
-        unconditional(results.get().init_meta());
-        encode::process_metrics(&snapshot, results.get());
+        let if_none_match = params.get()?.get_meta()?.get_if_none_match();
+        let states = self.agent.states();
+        if conditional(results.get().init_meta(), if_none_match, states.etag) {
+            encode::process_states(&states.value, results.get());
+        }
         Ok(())
     }
 
-    async fn set_config(
+    async fn subscribe(
         self: Rc<Self>,
-        params: windows_agent::SetConfigParams,
-        mut results: windows_agent::SetConfigResults,
+        params: windows_agent::SubscribeParams,
+        mut results: windows_agent::SubscribeResults,
     ) -> Result<(), capnp::Error> {
+        let spec = decode::metric_spec(params.get()?.get_spec()?)?;
+        let sampler = SamplerImpl {
+            sampler: self.agent.subscribe(spec),
+        };
         unconditional(results.get().init_meta());
-        let params = params.get()?;
-        let memory_interval_ms = params.get_memory_interval_ms();
-        let cpu_interval_ms = params.get_cpu_interval_ms();
-        if memory_interval_ms > 0 {
-            self.agent
-                .set_memory_interval(Duration::from_millis(memory_interval_ms));
-        }
-        if cpu_interval_ms > 0 {
-            self.agent
-                .set_cpu_interval(Duration::from_millis(cpu_interval_ms));
-        }
+        results.get().set_sampler(capnp_rpc::new_client(sampler));
         Ok(())
     }
 
@@ -223,8 +228,10 @@ impl windows_agent::Server for AgentImpl {
     ) -> Result<(), capnp::Error> {
         let params = params.get()?;
         let pid = params.get_pid();
-        let priority = decode::priority(params.get_priority()?);
-        let outcome = self.run(Command::SetPriority { pid, priority }).await?;
+        let outcome = match decode::priority(params.get_priority()) {
+            Some(priority) => self.run(Command::SetPriority { pid, priority }).await?,
+            None => Err(ERROR_INVALID_PARAMETER),
+        };
         unconditional(results.get().init_meta());
         results.get().set_code(code(outcome));
         Ok(())

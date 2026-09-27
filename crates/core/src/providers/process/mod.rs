@@ -1,6 +1,5 @@
-mod events;
+pub mod passport;
 mod signature_cache;
-mod vars;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,37 +9,31 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
-use crate::etw::router::KernelRouterBuilder;
-use crate::etw::signatures::utils::parse;
-use crate::providers::process::events::{ProcessStartV4Header, ProcessStopData, ThreadTypeGroup1};
-use crate::providers::process::vars::*;
-use crate::providers::provider::{LivePids, Provider};
 use crate::providers::display_name;
+use crate::providers::process::passport::SidNames;
+use crate::providers::provider::Provider;
 use crate::providers::utils::{
-    check_signature, get_process_package_info, is_windows_process, parse_cmd_line,
+    check_signer, get_process_package_info, is_windows_process, parse_cmd_line,
     query_command_line, query_console_host_pid, query_image_path,
 };
 use crate::sink::Sink;
-use crate::state::events::{ProcessEnriched, ProcessSignature, ProcessStarted, StateChange};
+use crate::state::events::{EnrichRequest, ProcessEnriched, ProcessSignature, StateChange};
 
-pub use vars::KERNEL_PROCESS_PROVIDER;
-
-/// Resolving a command line is OpenProcess + 3x ReadProcessMemory — far too
-/// slow for the shared ETW pump thread (part 3 merged this session's pump
-/// with disk/network, so blocking here stalls every other route too).
-/// The manifest handler only queues the pid; a dedicated worker thread does
-/// the actual (blocking) enrichment and emits a follow-up StateChange.
-pub struct KernelProcessProvider {
-    tx: Sender<u32>,
-    rx: Receiver<u32>,
+/// Reads what a process's passport needs off the tick's thread: opening the
+/// process, its memory and its image file is far too slow to do there. The
+/// tick queues each process it sees for the first time, and the worker sends
+/// back a follow-up change.
+pub struct Enricher {
+    tx: Sender<EnrichRequest>,
+    rx: Receiver<EnrichRequest>,
     signature_store: String,
     running: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl KernelProcessProvider {
-    /// Shared enrichment queue: bootstrap also feeds pids into it.
-    pub fn with_queue((tx, rx): (Sender<u32>, Receiver<u32>), signature_store: String) -> Self {
+impl Enricher {
+    pub fn new(signature_store: String) -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded();
         Self {
             tx,
             rx,
@@ -48,6 +41,11 @@ impl KernelProcessProvider {
             running: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(None),
         }
+    }
+
+    /// Where the tick queues the processes it sees for the first time.
+    pub fn queue(&self) -> Sender<EnrichRequest> {
+        self.tx.clone()
     }
 }
 
@@ -62,34 +60,34 @@ struct PathVerdict {
     signature: ProcessSignature,
     is_windows_process: bool,
     display_name: String,
+    signer: String,
 }
 
-
 fn enrich(
-    pid: u32,
+    request: &EnrichRequest,
     persisted: &Option<signature_cache::PersistentSignatures>,
+    names: &mut SidNames,
 ) -> ProcessEnriched {
+    let pid = request.pid;
     // Per-process by nature (different instances of one exe differ), not cached.
     let command_line = unsafe { query_command_line(pid) }
         .map(|s| unsafe { parse_cmd_line(&s) })
         .unwrap_or_default();
 
     let image_path = unsafe { query_image_path(pid) }.unwrap_or_default();
-    // Only needed to resolve a packaged app's manifest name; classic
-    // binaries have none and fall through to the version resource.
-    let (package_full_name, package_app_id) =
-        unsafe { get_process_package_info(pid) }.unwrap_or_default();
+    let (package_full_name, package_app_id) = match unsafe { get_process_package_info(pid) } {
+        Some(package) => package,
+        None => (request.package_full_name.clone(), request.package_relative_app_id.clone()),
+    };
     let path_missing = image_path.is_empty() || !std::path::Path::new(&image_path).exists();
 
     // A file replaced while its process is alive keeps the stale verdict — fine.
     let verdict = if path_missing {
-        // No file to inspect: no signature, no version resource. That says
-        // nothing about what the process is - kernel pseudo-processes are
-        // decided at rundown, and anything else just could not be read.
         PathVerdict {
             signature: ProcessSignature::Unknown,
             is_windows_process: false,
             display_name: String::new(),
+            signer: String::new(),
         }
     } else {
         let cache = persisted.as_ref().map(|p| p.cache());
@@ -105,9 +103,10 @@ fn enrich(
                 signature: signature_cache::signature_from_code(hit.signature),
                 is_windows_process: hit.is_windows_process,
                 display_name: hit.display_name,
+                signer: hit.signer,
             },
             None => {
-                let signature = signature_of(&image_path, &package_full_name);
+                let (signature, signer) = signature_of(&image_path, &package_full_name);
                 let verdict = PathVerdict {
                     signature,
                     is_windows_process: is_windows_process(false, signature),
@@ -121,6 +120,7 @@ fn enrich(
                         &package_app_id,
                     )
                     .unwrap_or_default(),
+                    signer: signer.unwrap_or_default(),
                 };
 
                 if let (Some(stamp), Some(cache)) = (stamp, cache) {
@@ -130,6 +130,7 @@ fn enrich(
                             signature: signature_cache::signature_to_code(verdict.signature),
                             is_windows_process: verdict.is_windows_process,
                             display_name: verdict.display_name.clone(),
+                            signer: verdict.signer.clone(),
                             size: stamp.0,
                             modified_ms: stamp.1,
                             resolver: signature_cache::RESOLVER,
@@ -142,99 +143,55 @@ fn enrich(
         }
     };
 
+    let publisher = if package_full_name.is_empty() {
+        verdict.signer
+    } else {
+        display_name::package_publisher_display_name(&package_full_name).unwrap_or_default()
+    };
+    let passport = passport::probe(
+        pid,
+        request.user_sid.as_deref(),
+        !package_full_name.is_empty(),
+        names,
+    );
+
     ProcessEnriched {
         pid,
+        sequence_number: request.sequence_number,
         command_line,
         image_path,
+        package_full_name,
+        package_relative_app_id: package_app_id,
         display_name: verdict.display_name,
         signature: verdict.signature,
         is_windows_process: verdict.is_windows_process,
         console_host_pid: unsafe { query_console_host_pid(pid) },
+        publisher,
+        passport,
     }
 }
 
-/// The signature verdict for one image.
+/// The signature verdict for one image, and who signed it.
 ///
 /// Files inside an MSIX package carry no signature of their own - the
 /// package is signed as a whole - so per-file verification honestly reports
 /// them unsigned. For those, the package publisher is the signer, and it is
 /// one the OS already validated at install time.
-fn signature_of(image_path: &str, package_full_name: &str) -> ProcessSignature {
-    let signature = check_signature(image_path);
+fn signature_of(image_path: &str, package_full_name: &str) -> (ProcessSignature, Option<String>) {
+    let (signature, signer) = check_signer(image_path);
     if signature != ProcessSignature::Unsigned || package_full_name.is_empty() {
-        return signature;
+        return (signature, signer);
     }
 
     match display_name::package_publisher(package_full_name) {
-        Some(publisher) if publisher.contains("Microsoft") => ProcessSignature::Microsoft,
-        Some(_) => ProcessSignature::ThirdParty,
-        None => signature,
+        Some(publisher) if publisher.contains("Microsoft") => (ProcessSignature::Microsoft, None),
+        Some(_) => (ProcessSignature::ThirdParty, None),
+        None => (signature, signer),
     }
 }
 
-/// ETW reports the image as a full NT path (`\Device\HarddiskVolume3\...\
-/// foo.exe`), while the bootstrap snapshot reports a bare file name. Left
-/// alone, the two sources give the same process different names depending on
-/// whether it started before or after the agent did. Everything downstream
-/// wants the file name, so normalise here, at the edge.
-///
-/// Deliberately not translated into a DOS path: nothing needs the directory,
-/// and mapping device names to drive letters would mean a `QueryDosDevice`
-/// table that can go stale under a mount change.
-fn image_file_name(image_name: &str) -> String {
-    image_name
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or(image_name)
-        .to_string()
-}
-
-impl Provider for KernelProcessProvider {
-    fn register(&self, b: &mut KernelRouterBuilder) -> Result<()> {
-        let tx = self.tx.clone();
-        b.manifest(KERNEL_PROCESS_PROVIDER)
-            .on(&[KERNEL_PROCESS_PROVIDER], move |record, data| {
-                let change = match record.EventHeader.EventDescriptor.Id {
-                    EVENT_ID_PROCESS_START => {
-                        let hdr = parse::<ProcessStartV4Header>(data)?;
-                        // Non-blocking: worst case the channel is full/closed
-                        // (provider shutting down) and command_line stays empty.
-                        let _ = tx.send(hdr.process_id);
-
-                        StateChange::ProcessStarted(Box::new(ProcessStarted {
-                            pid: hdr.process_id,
-                            parent_pid: hdr.parent_process_id,
-                            session_id: hdr.session_id,
-                            image_name: image_file_name(&hdr.image_name.to_string()),
-                            package_full_name: hdr.package_full_name.to_string(),
-                            package_relative_app_id: hdr.package_relative_app_id.to_string(),
-                            command_line: Vec::new(),
-                            is_kernel_process: false,
-                        }))
-                    }
-                    EVENT_ID_PROCESS_STOP => {
-                        let hdr = parse::<ProcessStopData>(data)?;
-                        StateChange::ProcessStopped(hdr.process_id)
-                    }
-                    EVENT_ID_THREAD_START => {
-                        let hdr = parse::<ThreadTypeGroup1>(data)?;
-                        StateChange::ThreadStarted {
-                            pid: hdr.process_id,
-                            tid: hdr.thread_id,
-                        }
-                    }
-                    EVENT_ID_THREAD_STOP => {
-                        let hdr = parse::<ThreadTypeGroup1>(data)?;
-                        StateChange::ThreadStopped { tid: hdr.thread_id }
-                    }
-                    _ => return None,
-                };
-                Some(change)
-            });
-        Ok(())
-    }
-
-    fn start(&self, _: LivePids, sink: Sink) -> Result<()> {
+impl Provider for Enricher {
+    fn start(&self, sink: Sink) -> Result<()> {
         if self.running.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
@@ -245,11 +202,16 @@ impl Provider for KernelProcessProvider {
         let worker = std::thread::Builder::new()
             .name("process-enrich".into())
             .spawn(move || {
-                while let Ok(pid) = rx.recv() {
+                let mut names = SidNames::default();
+                while let Ok(request) = rx.recv() {
                     if !running.load(Ordering::Relaxed) {
                         break;
                     }
-                    sink.emit(StateChange::ProcessEnriched(Box::new(enrich(pid, &persisted))));
+                    sink.emit(StateChange::ProcessEnriched(Box::new(enrich(
+                        &request,
+                        &persisted,
+                        &mut names,
+                    ))));
                 }
             })?;
 
@@ -259,61 +221,38 @@ impl Provider for KernelProcessProvider {
 
     fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
-        let _ = self.tx.send(WAKE_PID);
+        let _ = self.tx.send(EnrichRequest::default());
         if let Some(worker) = self.worker.lock().take() {
             let _ = worker.join();
         }
     }
 }
 
-const WAKE_PID: u32 = u32::MAX;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::etw::router::KernelRouter;
-    use crate::etw::router::tests::ETW_TEST_LOCK;
-    use crate::sink::Sink;
-    use std::time::{Duration, Instant};
 
-    /// Requires admin and real ETW sessions. Spawns child processes and
-    /// expects the manifest route to deliver start/stop events for them.
-    /// Run: `cargo test -- --ignored`
     #[test]
-    #[ignore = "requires admin and a real ETW session"]
-    fn process_events_flow_end_to_end() {
-        let _guard = ETW_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn this_process_is_enriched_with_its_passport() {
+        let request = EnrichRequest {
+            pid: std::process::id(),
+            sequence_number: 7,
+            ..Default::default()
+        };
+        let enriched = enrich(&request, &None, &mut SidNames::default());
+        assert_eq!(enriched.sequence_number, 7);
+        assert!(enriched.image_path.ends_with(".exe"), "{}", enriched.image_path);
+        assert!(!enriched.command_line.is_empty());
+        assert!(enriched.passport.user.contains('\\'));
+        assert_ne!(enriched.passport.architecture, crate::model::Architecture::Unknown);
+    }
 
-        let (sink, rx) = Sink::bounded(1024);
-        let mut builder = KernelRouter::builder();
-        KernelProcessProvider::with_queue(crossbeam_channel::unbounded(), String::new())
-            .register(&mut builder)
-            .unwrap();
-        let router = builder.start(sink).expect("router start");
-
-        let mut child = std::process::Command::new("cmd")
-            .args(["/c", "exit", "0"])
-            .spawn()
-            .expect("spawn child");
-        let child_pid = child.id();
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut started = false;
-        let mut stopped = false;
-        while Instant::now() < deadline && !(started && stopped) {
-            for change in rx.try_iter() {
-                match change {
-                    StateChange::ProcessStarted(e) if e.pid == child_pid => started = true,
-                    StateChange::ProcessStopped(pid) if pid == child_pid => stopped = true,
-                    _ => {}
-                }
-            }
-            std::thread::sleep(Duration::from_millis(50));
+    #[test]
+    fn a_windows_binary_names_microsoft_as_its_publisher() {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| String::from(r"C:\Windows"));
+        let (signature, signer) = signature_of(&format!(r"{system_root}\System32\notepad.exe"), "");
+        if signature == ProcessSignature::Microsoft {
+            assert!(signer.is_some_and(|s| s.contains("Microsoft")));
         }
-        let _ = child.wait();
-        drop(router);
-
-        assert!(started, "no ProcessStarted for child pid {child_pid}");
-        assert!(stopped, "no ProcessStopped for child pid {child_pid}");
     }
 }

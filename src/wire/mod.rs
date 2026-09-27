@@ -16,13 +16,21 @@ pub const PROTOCOL: Protocol = Protocol::new(
 
 #[cfg(test)]
 mod tests {
-    use uniproc_protocol::windows_capnp::{machine_stats, service_status, windows_agent};
-    use windows_agent::{get_process_metrics_results, get_processes_results, get_services_results};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use uniproc_protocol::windows_capnp::{
+        ProcessPriority as WirePriority, metric_spec, sampler, service_status, windows_agent,
+    };
+    use windows_agent::{get_process_states_results, get_processes_results, get_services_results};
 
     use super::{decode, encode};
     use crate::api::{
-        MachineStats, ProcessInfo, ProcessMetrics, ProcessMetricsSnapshot, ProcessPriority,
-        ServiceState, ServiceStats, ServiceStatus, SignatureStatus,
+        Architecture, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
+        MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineSample,
+        MetricSpec, Mitigations, ProcessInfo, ProcessMetric, ProcessMetrics, ProcessPriority,
+        ProcessState, ProcessStates, Sample, ServiceState, ServiceStats, ServiceStatus,
+        SignatureStatus, StackProtection, UacVirtualization,
     };
 
     fn process(pid: u32) -> ProcessInfo {
@@ -41,12 +49,32 @@ mod tests {
             image_path: "C:\\a.exe".into(),
             display_name: "A".into(),
             console_host_pid: 77,
+            start_time: 133_000_000_000_000_000,
+            sequence_number: pid as u64 * 3,
+            user: "HOST\\user".into(),
+            architecture: Architecture::X86,
+            elevated: Some(true),
+            uac_virtualization: UacVirtualization::Disabled,
+            isolation: Isolation::AppContainer,
+            dpi_awareness: DpiAwareness::PerMonitorV2,
+            mitigations: Some(Mitigations {
+                dep: Some(true),
+                stack_protection: StackProtection::StrictAudit,
+                extended_cfg: ExtendedCfg::Audit,
+            }),
+            publisher: "Publisher".into(),
         }
     }
 
     #[test]
     fn a_process_list_survives_the_wire() {
-        let sent = [process(100), process(200)];
+        let unknown = ProcessInfo {
+            elevated: None,
+            architecture: Architecture::Unknown,
+            mitigations: None,
+            ..process(300)
+        };
+        let sent = [process(100), process(200), unknown];
         let mut message = capnp::message::Builder::new_default();
         encode::processes(&sent, message.init_root::<get_processes_results::Builder>());
         let reader = message.get_root_as_reader::<get_processes_results::Reader>().unwrap();
@@ -71,53 +99,159 @@ mod tests {
     }
 
     #[test]
-    fn metrics_survive_the_wire() {
-        let sent = ProcessMetricsSnapshot {
-            processes_etag: 42,
-            metrics: vec![ProcessMetrics {
-                pid: 100,
-                cpu_percent: 12.5,
-                working_set_kb: 1,
-                private_bytes_kb: 2,
-                peak_working_set_kb: 3,
-                private_working_set_kb: 4,
-                disk_read_bytes: 5,
-                disk_write_bytes: 6,
-                disk_read_iops: 7,
-                disk_write_iops: 8,
-                net_rx_bytes: 9,
-                net_tx_bytes: 10,
-            }],
+    fn process_states_survive_the_wire() {
+        let sent = ProcessStates {
+            passport_etag: 42,
+            states: Arc::from([
+                ProcessState {
+                    pid: 100,
+                    sequence_number: 300,
+                    suspended: Some(false),
+                    efficiency_mode: Some(true),
+                    base_priority: Some(ProcessPriority::Idle),
+                    power_throttling: Some(true),
+                    job_object_id: 7,
+                    io_priority: IoPriority::VeryLow,
+                },
+                ProcessState {
+                    pid: 200,
+                    ..ProcessState::default()
+                },
+            ]),
         };
         let mut message = capnp::message::Builder::new_default();
-        encode::process_metrics(&sent, message.init_root::<get_process_metrics_results::Builder>());
-        let reader = message.get_root_as_reader::<get_process_metrics_results::Reader>().unwrap();
-        assert_eq!(reader.get_processes_etag(), 42);
-        assert_eq!(decode::metrics(reader.get_metrics().unwrap()), sent.metrics);
+        encode::process_states(&sent, message.init_root::<get_process_states_results::Builder>());
+        let reader = message.get_root_as_reader::<get_process_states_results::Reader>().unwrap();
+        assert_eq!(reader.get_passport_etag(), 42);
+        assert_eq!(decode::process_states(reader.get_states().unwrap()), sent.states);
+    }
+
+    fn spec(processes: &[ProcessMetric], machine: &[MachineMetric]) -> MetricSpec {
+        MetricSpec {
+            interval: Duration::from_millis(1500),
+            processes: processes.iter().copied().collect(),
+            machine: machine.iter().copied().collect(),
+        }
     }
 
     #[test]
-    fn the_machine_survives_the_wire() {
-        let sent = MachineStats {
-            total_physical_kb: 1,
-            available_physical_kb: 2,
-            used_physical_kb: 3,
-            cpu_percent: 4.5,
-            cpu_max_mhz: 5,
-            cpu_current_mhz: 6,
-            cpu_interrupt_percent: 7.5,
-            cpu_dpc_percent: 8.5,
-            disk_read_bytes: 9,
-            disk_write_bytes: 10,
-            disk_read_iops: 11,
-            disk_write_iops: 12,
-            net_rx_bytes: 13,
-            net_tx_bytes: 14,
-        };
+    fn a_metric_spec_survives_the_wire() {
+        for sent in [
+            spec(&ProcessMetric::ALL, &MachineMetric::ALL),
+            spec(&[ProcessMetric::PageFaults], &[MachineMetric::Disk]),
+            spec(&[], &[]),
+        ] {
+            let mut message = capnp::message::Builder::new_default();
+            encode::metric_spec(&sent, message.init_root::<metric_spec::Builder>());
+            let reader = message.get_root_as_reader::<metric_spec::Reader>().unwrap();
+            assert_eq!(decode::metric_spec(reader).unwrap(), sent);
+        }
+    }
+
+    fn full_sample() -> Sample {
+        let rows = |base: u64| -> Option<Arc<[u64]>> { Some(Arc::from([base, base + 1])) };
+        let rows32 = |base: u32| -> Option<Arc<[u32]>> { Some(Arc::from([base, base + 1])) };
+        Sample {
+            snapshot: 9,
+            sampled_at: 123_456,
+            period: Duration::from_millis(1500),
+            wanted: spec(&ProcessMetric::ALL, &MachineMetric::ALL),
+            passport_etag: 5,
+            pids: Arc::from([4, 100]),
+            sequence_numbers: Arc::from([1, 300]),
+            columns: Columns {
+                cpu_user_time: rows(10),
+                cpu_kernel_time: rows(20),
+                cpu_cycles: rows(30),
+                working_set: rows(40),
+                peak_working_set: rows(50),
+                private_working_set: rows(60),
+                commit: rows(70),
+                paged_pool: rows(80),
+                non_paged_pool: rows(90),
+                page_faults: rows32(100),
+                handles: rows32(110),
+                threads: rows32(120),
+                user_objects: rows32(130),
+                gdi_objects: rows32(140),
+                io_read_ops: rows(150),
+                io_write_ops: rows(160),
+                io_other_ops: rows(170),
+                io_read_bytes: rows(180),
+                io_write_bytes: rows(190),
+                io_other_bytes: rows(200),
+                disk_read_ops: rows(210),
+                disk_write_ops: rows(220),
+                disk_flush_ops: rows(230),
+                disk_read_bytes: rows(240),
+                disk_write_bytes: rows(250),
+                net_rx_bytes: rows(260),
+                net_tx_bytes: rows(270),
+            },
+            machine: MachineSample {
+                cpu: Some(MachineCpu {
+                    idle_time: 1,
+                    kernel_time: 2,
+                    user_time: 3,
+                    interrupt_time: 4,
+                    dpc_time: 5,
+                    max_mhz: 6,
+                    current_mhz: 7,
+                }),
+                memory: Some(MachineMemory {
+                    total_physical: 8,
+                    available_physical: 9,
+                }),
+                disk: Some(MachineDisk {
+                    read_ops: 10,
+                    write_ops: 11,
+                    read_bytes: 12,
+                    write_bytes: 13,
+                }),
+                network: Some(MachineNetwork {
+                    rx_bytes: 14,
+                    tx_bytes: 15,
+                }),
+            },
+        }
+    }
+
+    fn round_trip(sent: &Sample) -> Sample {
         let mut message = capnp::message::Builder::new_default();
-        encode::machine(&sent, message.init_root::<machine_stats::Builder>());
-        let reader = message.get_root_as_reader::<machine_stats::Reader>().unwrap();
-        assert_eq!(decode::machine(reader), sent);
+        encode::sample(sent, message.init_root::<sampler::sample_results::Builder>()).unwrap();
+        let reader = message.get_root_as_reader::<sampler::sample_results::Reader>().unwrap();
+        decode::sample(reader.get_processes().unwrap(), reader.get_machine().unwrap(), sent.wanted).unwrap()
+    }
+
+    #[test]
+    fn a_sample_survives_the_wire() {
+        let sent = full_sample();
+        assert_eq!(round_trip(&sent), sent);
+    }
+
+    #[test]
+    fn a_projected_sample_carries_only_its_own_metrics() {
+        let full = full_sample();
+        for wanted in [
+            spec(&[ProcessMetric::PageFaults, ProcessMetric::NetTxBytes], &[MachineMetric::Memory]),
+            spec(&[], &[MachineMetric::Cpu, MachineMetric::Network]),
+            spec(&[ProcessMetric::Handles], &[]),
+            spec(&[], &[]),
+        ] {
+            let sent = full.project(&wanted);
+            assert_eq!(round_trip(&sent), sent);
+        }
+    }
+
+    #[test]
+    fn a_projection_without_process_metrics_has_no_rows() {
+        let sent = full_sample().project(&spec(&[], &[MachineMetric::Cpu]));
+        assert!(sent.pids.is_empty() && sent.sequence_numbers.is_empty());
+        assert_eq!(sent.columns, Columns::default());
+        assert_eq!(sent.machine.cpu, full_sample().machine.cpu);
+        assert_eq!(sent.machine.memory, None);
+        assert_eq!(ProcessMetrics::NONE, sent.wanted.processes);
+        assert_eq!([MachineMetric::Cpu].into_iter().collect::<MachineMetrics>(), sent.wanted.machine);
     }
 
     #[test]
@@ -146,7 +280,8 @@ mod tests {
             ProcessPriority::High,
             ProcessPriority::Realtime,
         ] {
-            assert_eq!(decode::priority(encode::priority(p)), p);
+            assert_eq!(decode::priority(Ok(encode::priority(p))), Some(p));
         }
+        assert_eq!(decode::priority(Ok(WirePriority::Unknown)), None);
     }
 }

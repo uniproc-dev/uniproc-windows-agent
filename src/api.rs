@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
-pub use uniproc_windows_core::{MachineStats, ProcessMetrics, SignatureStatus, Tagged};
+pub use uniproc_windows_core::{
+    Architecture, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
+    MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineSample,
+    MetricSpec, Mitigations, ProcessMetric, ProcessMetrics, ProcessPriority, ProcessState,
+    Sample, SignatureStatus, StackProtection, Tagged, UacVirtualization,
+};
 
 /// Name the agent's Windows service is registered under.
 pub const SERVICE_NAME: &str = "UniprocProcessMonitor";
@@ -11,20 +16,19 @@ pub const SERVICE_DISPLAY_NAME: &str = "Uniproc Process Monitor";
 /// Ok, or the Win32 error code; an NTSTATUS for suspend and resume.
 pub type CommandResult = Result<(), u32>;
 
-/// Metrics for exactly the processes listed under `processes_etag`.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ProcessMetricsSnapshot {
-    pub processes_etag: u64,
-    pub metrics: Vec<ProcessMetrics>,
+/// How every process runs, for exactly the processes listed under `passport_etag`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessStates {
+    pub passport_etag: u64,
+    pub states: Arc<[ProcessState]>,
 }
 
-/// Everything at one moment: `metrics` covers exactly the pids in `processes`.
+/// The conditional lists at one moment: `states` covers exactly `processes`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
-    pub machine: MachineStats,
     pub services: Tagged<Arc<[ServiceStats]>>,
     pub processes: Tagged<Arc<[ProcessInfo]>>,
-    pub metrics: Vec<ProcessMetrics>,
+    pub states: Tagged<ProcessStates>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,16 +57,6 @@ pub enum ServiceState {
     ContinuePending,
     PausePending,
     Paused,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ProcessPriority {
-    Idle,
-    BelowNormal,
-    Normal,
-    AboveNormal,
-    High,
-    Realtime,
 }
 
 /// One service right now, as the SCM reports it.
@@ -126,4 +120,21 @@ pub struct ProcessInfo {
 
     /// Pid of the conhost serving the process's console, or 0.
     pub console_host_pid: u32,
+
+    /// FILETIME; 0 when unknown.
+    pub start_time: u64,
+    /// The join key for states and samples: never reused within a boot, 0
+    /// only for the Idle process.
+    pub sequence_number: u64,
+    /// `DOMAIN\name` of the token's user.
+    pub user: String,
+    pub architecture: Architecture,
+    pub elevated: Option<bool>,
+    pub uac_virtualization: UacVirtualization,
+    pub isolation: Isolation,
+    pub dpi_awareness: DpiAwareness,
+    /// `None` when the process could not be queried.
+    pub mitigations: Option<Mitigations>,
+    /// A package's PublisherDisplayName, otherwise the signer's subject name.
+    pub publisher: String,
 }

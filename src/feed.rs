@@ -3,35 +3,43 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
-use uniproc_agent_kit::Versioned;
-use uniproc_windows_core::{Epoch, MachineStats, Process, Report, Samples, SessionHealth};
+use uniproc_agent_kit::{Notify, Versioned};
+use uniproc_windows_core::{Epoch, Process, ProbeCost, Report, SessionHealth};
 
-use crate::api::{ProcessInfo, ServiceState, ServiceStats, ServiceStatus, Snapshot};
+use crate::api::{
+    ProcessInfo, ProcessStates, Sample, ServiceState, ServiceStats, ServiceStatus, Snapshot,
+};
 
 /// Everything the agent shows at one moment. Never changes once published.
 #[derive(Clone, Debug)]
 pub struct Published {
     pub snapshot: Snapshot,
-    /// Profile samples the core folded last time.
-    pub samples: Samples,
+    /// The last sample, its rows exactly the processes under its `passport_etag`.
+    pub sample: Arc<Sample>,
     /// Events the core lost to a full channel since it started.
     pub dropped_by_sink: u64,
     pub sessions: Vec<SessionHealth>,
+    /// What each of the core's probes costs a tick.
+    pub costs: Vec<ProbeCost>,
     /// When the core took its report; None before the first.
     pub reported_at: Option<Instant>,
 }
 
 /// The core's latest report joined with the latest service inventory,
-/// joined again whenever either moves. Readers take the latest whole.
+/// joined again whenever either moves. Readers take the latest whole, and
+/// can wait for the next.
 pub struct Feed {
     join: Mutex<Join>,
     latest: Mutex<Arc<Published>>,
+    published: Notify,
 }
 
 struct Join {
     report: Option<Arc<Report>>,
     service_pids: HashSet<u32>,
     processes: Versioned<Arc<[ProcessInfo]>>,
+    states: Versioned<ProcessStates>,
+    sample: Arc<Sample>,
     services: Versioned<Arc<[ServiceStats]>>,
     followed: HashMap<String, (ServiceState, u32)>,
 }
@@ -43,6 +51,7 @@ impl Feed {
         Self {
             join: Mutex::new(join),
             latest: Mutex::new(latest),
+            published: Notify::new(),
         }
     }
 
@@ -50,16 +59,26 @@ impl Feed {
         self.latest.lock().clone()
     }
 
+    /// Moves with every publish; wait on it with [`published`](Self::published).
+    pub fn generation(&self) -> u64 {
+        self.published.generation()
+    }
+
+    /// Resolves once something was published after `generation`.
+    pub async fn published(&self, generation: u64) {
+        self.published.changed(generation).await;
+    }
+
     pub fn report(&self, report: Arc<Report>) {
         let mut join = self.join.lock();
         join.report(report);
-        *self.latest.lock() = Arc::new(join.publish());
+        self.store(join.publish());
     }
 
     pub fn services(&self, services: Vec<ServiceStats>) {
         let mut join = self.join.lock();
         join.services(services);
-        *self.latest.lock() = Arc::new(join.publish());
+        self.store(join.publish());
     }
 
     /// A followed service's status as it changes; it wins over an inventory
@@ -67,7 +86,12 @@ impl Feed {
     pub fn service_status(&self, name: &str, status: Option<&ServiceStatus>) {
         let mut join = self.join.lock();
         join.service_status(name, status);
-        *self.latest.lock() = Arc::new(join.publish());
+        self.store(join.publish());
+    }
+
+    fn store(&self, published: Published) {
+        *self.latest.lock() = Arc::new(published);
+        self.published.notify();
     }
 }
 
@@ -78,6 +102,8 @@ impl Join {
             report: None,
             service_pids: HashSet::new(),
             processes: Versioned::new(epoch, Arc::from([])),
+            states: Versioned::new(epoch, ProcessStates::default()),
+            sample: Arc::default(),
             services: Versioned::new(epoch, Arc::from([])),
             followed: HashMap::new(),
         }
@@ -88,10 +114,31 @@ impl Join {
             .report
             .as_ref()
             .is_none_or(|held| held.processes.etag != report.processes.etag);
+        let sampled = self
+            .report
+            .as_ref()
+            .is_none_or(|held| !Arc::ptr_eq(&held.sample, &report.sample));
         self.report = Some(report);
         if moved {
             self.list_processes();
+        } else if sampled {
+            self.stamp();
         }
+    }
+
+    fn stamp(&mut self) {
+        let Some(report) = &self.report else {
+            return;
+        };
+        let passport_etag = self.processes.get().etag;
+        self.sample = Arc::new(Sample {
+            passport_etag,
+            ..(*report.sample).clone()
+        });
+        self.states.set(ProcessStates {
+            passport_etag,
+            states: report.states.clone(),
+        });
     }
 
     fn service_status(&mut self, name: &str, status: Option<&ServiceStatus>) {
@@ -132,20 +179,21 @@ impl Join {
             .map(|p| info(p, self.service_pids.contains(&p.pid)))
             .collect();
         self.processes.replace(value);
+        self.stamp();
     }
 
     fn publish(&self) -> Published {
         let report = self.report.as_deref();
         Published {
             snapshot: Snapshot {
-                machine: report.map_or_else(MachineStats::default, |r| r.machine.clone()),
                 services: self.services.get().clone(),
                 processes: self.processes.get().clone(),
-                metrics: report.map_or_else(Vec::new, |r| r.metrics.clone()),
+                states: self.states.get().clone(),
             },
-            samples: report.map_or_else(Samples::default, |r| r.samples),
+            sample: self.sample.clone(),
             dropped_by_sink: report.map_or(0, |r| r.dropped_by_sink),
             sessions: report.map_or_else(Vec::new, |r| r.sessions.clone()),
+            costs: report.map_or_else(Vec::new, |r| r.costs.clone()),
             reported_at: report.map(|r| r.taken_at),
         }
     }
@@ -167,39 +215,63 @@ fn info(p: &Process, is_service: bool) -> ProcessInfo {
         image_path: p.image_path.clone(),
         display_name: p.display_name.clone(),
         console_host_pid: p.console_host_pid,
+        start_time: p.start_time,
+        sequence_number: p.sequence_number,
+        user: p.user.clone(),
+        architecture: p.architecture,
+        elevated: p.elevated,
+        uac_virtualization: p.uac_virtualization,
+        isolation: p.isolation,
+        dpi_awareness: p.dpi_awareness,
+        mitigations: p.mitigations,
+        publisher: p.publisher.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uniproc_windows_core::{ProcessMetrics, Tagged};
+    use uniproc_windows_core::{ProcessState, Tagged};
 
-    fn report(etag: u64, pids: &[u32]) -> Arc<Report> {
+    fn report_with(etag: u64, pids: &[u32], sample: Arc<Sample>) -> Arc<Report> {
         Arc::new(Report {
-            machine: MachineStats::default(),
             processes: Tagged {
                 etag,
                 value: pids
                     .iter()
                     .map(|&pid| Process {
                         pid,
+                        sequence_number: pid as u64 + 1000,
                         ..Default::default()
                     })
                     .collect(),
             },
-            metrics: pids
+            states: pids
                 .iter()
-                .map(|&pid| ProcessMetrics {
+                .map(|&pid| ProcessState {
                     pid,
+                    sequence_number: pid as u64 + 1000,
                     ..Default::default()
                 })
                 .collect(),
-            samples: Samples::default(),
+            sample,
             dropped_by_sink: 0,
             sessions: Vec::new(),
+            costs: Vec::new(),
             taken_at: Instant::now(),
         })
+    }
+
+    fn sample(snapshot: u64, pids: &[u32]) -> Arc<Sample> {
+        Arc::new(Sample {
+            snapshot,
+            pids: pids.into(),
+            ..Default::default()
+        })
+    }
+
+    fn report(etag: u64, pids: &[u32]) -> Arc<Report> {
+        report_with(etag, pids, sample(etag, pids))
     }
 
     fn service(name: &str, pid: u32) -> ServiceStats {
@@ -335,10 +407,60 @@ mod tests {
     }
 
     #[test]
-    fn metrics_come_with_the_list_they_cover() {
+    fn a_sample_carries_the_tag_of_the_list_it_was_taken_against() {
         let feed = Feed::new();
-        feed.report(report(1, &[10, 20, 30]));
+        feed.report(report(1, &[10, 20]));
         let latest = feed.latest();
-        assert_eq!(latest.snapshot.metrics.len(), latest.snapshot.processes.value.len());
+        assert_eq!(latest.sample.passport_etag, latest.snapshot.processes.etag);
+        assert_eq!(latest.snapshot.states.value.passport_etag, latest.snapshot.processes.etag);
+        assert_eq!(latest.snapshot.states.value.states.len(), 2);
+    }
+
+    #[test]
+    fn a_passport_change_without_a_sample_restamps_the_same_rows() {
+        let feed = Feed::new();
+        let taken = sample(1, &[10]);
+        feed.report(report_with(1, &[10], taken.clone()));
+        let sampled_against = feed.latest().sample.passport_etag;
+
+        feed.report(report_with(2, &[10], taken));
+        let latest = feed.latest();
+        assert_ne!(latest.snapshot.processes.etag, sampled_against, "the passport moved");
+        assert_eq!(latest.sample.snapshot, 1, "no new sample");
+        assert_eq!(latest.sample.passport_etag, latest.snapshot.processes.etag);
+        assert_eq!(latest.snapshot.states.value.passport_etag, latest.snapshot.processes.etag);
+    }
+
+    #[test]
+    fn a_service_moving_the_list_restamps_the_states_and_the_sample() {
+        let feed = Feed::new();
+        feed.report(report(1, &[10, 20]));
+        feed.services(vec![service("a", 20)]);
+        let latest = feed.latest();
+        assert!(latest.snapshot.processes.value[1].is_service);
+        assert_eq!(latest.sample.passport_etag, latest.snapshot.processes.etag);
+        assert_eq!(latest.snapshot.states.value.passport_etag, latest.snapshot.processes.etag);
+    }
+
+    #[test]
+    fn states_that_did_not_change_keep_their_tag() {
+        let feed = Feed::new();
+        feed.report(report_with(1, &[10], sample(1, &[10])));
+        let states = feed.latest().snapshot.states.etag;
+        feed.report(report_with(1, &[10], sample(2, &[10])));
+        assert_eq!(feed.latest().snapshot.states.etag, states);
+    }
+
+    #[test]
+    fn every_publish_wakes_a_waiter() {
+        let feed = Arc::new(Feed::new());
+        let seen = feed.generation();
+        let waiter = {
+            let feed = feed.clone();
+            std::thread::spawn(move || futures::executor::block_on(feed.published(seen)))
+        };
+        feed.report(report(1, &[10]));
+        waiter.join().unwrap();
+        assert!(feed.generation() > seen);
     }
 }

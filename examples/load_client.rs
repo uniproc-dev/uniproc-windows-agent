@@ -1,5 +1,5 @@
 //! Load generator against a running agent, for profiling its request path:
-//!   cargo run --release --example load_client -- [processes|metrics|refresh|ping] [inflight] [seconds]
+//!   cargo run --release --example load_client -- [processes|states|sample|refresh|ping] [inflight] [seconds]
 //!
 //! Opens one session (the agent serves one at a time) and keeps `inflight`
 //! requests outstanding on it until the deadline, then prints throughput and
@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 use ogurpchik::auth::handshake::HandshakeMode;
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::connect_session;
-use uniproc_protocol::windows_capnp::windows_agent;
+use uniproc_protocol::windows_capnp::{sampler, windows_agent};
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
-use uniproc_windows_agent::wire::PROTOCOL;
+use uniproc_windows_agent::api::{MachineMetrics, MetricSpec, ProcessMetrics};
+use uniproc_windows_agent::wire::{PROTOCOL, encode};
 
 struct ClientStub;
 impl windows_agent::Server for ClientStub {}
@@ -23,7 +24,8 @@ impl windows_agent::Server for ClientStub {}
 #[derive(Clone, Copy)]
 enum Method {
     Processes,
-    Metrics,
+    States,
+    Sample,
     Refresh,
     Ping,
 }
@@ -32,7 +34,8 @@ impl Method {
     fn name(self) -> &'static str {
         match self {
             Method::Processes => "getProcesses",
-            Method::Metrics => "getProcessMetrics",
+            Method::States => "getProcessStates",
+            Method::Sample => "sample",
             Method::Refresh => "refresh",
             Method::Ping => "ping",
         }
@@ -43,10 +46,11 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let method = match args.next().as_deref() {
         None | Some("processes") => Method::Processes,
-        Some("metrics") => Method::Metrics,
+        Some("states") => Method::States,
+        Some("sample") => Method::Sample,
         Some("refresh") => Method::Refresh,
         Some("ping") => Method::Ping,
-        Some(other) => panic!("unknown method {other:?}, expected processes, metrics, refresh or ping"),
+        Some(other) => panic!("unknown method {other:?}, expected processes, states, sample, refresh or ping"),
     };
     let inflight: usize = args.next().map_or(16, |s| s.parse().expect("inflight"));
     let seconds: u64 = args.next().map_or(15, |s| s.parse().expect("seconds"));
@@ -61,9 +65,15 @@ fn main() {
 struct Tags {
     services: u64,
     processes: u64,
+    states: u64,
 }
 
-async fn call(client: &windows_agent::Client, method: Method, tags: &mut Tags) -> Result<u64, capnp::Error> {
+async fn call(
+    client: &windows_agent::Client,
+    sampler: &sampler::Client,
+    method: Method,
+    tags: &mut Tags,
+) -> Result<u64, capnp::Error> {
     match method {
         Method::Ping => {
             client.ping_request().send().promise.await?;
@@ -73,13 +83,17 @@ async fn call(client: &windows_agent::Client, method: Method, tags: &mut Tags) -
             let reply = client.get_processes_request().send().promise.await?;
             Ok(reply.get()?.total_size()?.word_count * 8)
         }
-        Method::Metrics => {
-            let reply = client.get_process_metrics_request().send().promise.await?;
+        Method::States => {
+            let reply = client.get_process_states_request().send().promise.await?;
+            Ok(reply.get()?.total_size()?.word_count * 8)
+        }
+        Method::Sample => {
+            let reply = sampler.sample_request().send().promise.await?;
             Ok(reply.get()?.total_size()?.word_count * 8)
         }
         Method::Refresh => {
-            let machine = client.get_machine_request().send().promise.await?;
-            let mut bytes = machine.get()?.total_size()?.word_count * 8;
+            let sample = sampler.sample_request().send().promise.await?;
+            let mut bytes = sample.get()?.total_size()?.word_count * 8;
 
             let mut req = client.get_services_request();
             req.get().init_meta().set_if_none_match(tags.services);
@@ -93,8 +107,11 @@ async fn call(client: &windows_agent::Client, method: Method, tags: &mut Tags) -
             tags.processes = processes.get()?.get_meta()?.get_etag();
             bytes += processes.get()?.total_size()?.word_count * 8;
 
-            let metrics = client.get_process_metrics_request().send().promise.await?;
-            bytes += metrics.get()?.total_size()?.word_count * 8;
+            let mut req = client.get_process_states_request();
+            req.get().init_meta().set_if_none_match(tags.states);
+            let states = req.send().promise.await?;
+            tags.states = states.get()?.get_meta()?.get_etag();
+            bytes += states.get()?.total_size()?.word_count * 8;
             Ok(bytes)
         }
     }
@@ -111,8 +128,16 @@ async fn run(method: Method, inflight: usize, length: Duration) -> Result<(), Bo
     .await
     .map_err(|e| format!("{e:?}"))?;
     let client = session.remote().clone();
+    let mut req = client.subscribe_request();
+    let every = MetricSpec {
+        interval: Duration::from_secs(1),
+        processes: ProcessMetrics::all(),
+        machine: MachineMetrics::all(),
+    };
+    encode::metric_spec(&every, req.get().init_spec());
+    let sampler = req.send().promise.await?.get()?.get_sampler()?;
 
-    call(&client, method, &mut Tags::default()).await?;
+    call(&client, &sampler, method, &mut Tags::default()).await?;
 
     let latencies = Rc::new(RefCell::new(Vec::<u32>::with_capacity(1 << 20)));
     let errors = Rc::new(RefCell::new(0u64));
@@ -123,6 +148,7 @@ async fn run(method: Method, inflight: usize, length: Duration) -> Result<(), Bo
     let workers: Vec<_> = (0..inflight)
         .map(|_| {
             let client = client.clone();
+            let sampler = sampler.clone();
             let latencies = latencies.clone();
             let errors = errors.clone();
             let bytes = bytes.clone();
@@ -130,7 +156,7 @@ async fn run(method: Method, inflight: usize, length: Duration) -> Result<(), Bo
                 let mut tags = Tags::default();
                 while Instant::now() < deadline {
                     let sent = Instant::now();
-                    match call(&client, method, &mut tags).await {
+                    match call(&client, &sampler, method, &mut tags).await {
                         Ok(n) => {
                             *bytes.borrow_mut() += n;
                             latencies

@@ -10,7 +10,7 @@ windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", 
     "processthreadsapi", "winbase", "securitybaseapi", "winternl", "ntddk", "memoryapi",
     "profileapi", "pdh", "powerbase", "sysinfoapi",
     "winver", "fileapi", "appmodel", "shellapi", "shlwapi",
-    "mscat", "mssip", "wincrypt", "wintrust", "ntsecapi"] }
+    "mscat", "mssip", "wincrypt", "wintrust", "ntsecapi", "winuser", "wow64apiset"] }
 ntapi = "0.4.3"
 fxhash = "0.2.1"
 binrw = "0.15.0"
@@ -20,9 +20,8 @@ anyhow = "1"
 tracing = "0.1"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
-uniproc-agent-kit = { git = "https://github.com/uniproc-dev/uniproc-agent-kit", tag = "v0.1.0" }
+uniproc-agent-kit = { git = "https://github.com/uniproc-dev/uniproc-agent-kit", tag = "v0.1.2" }
 roxmltree = "0.20"
-dashmap = "6.1.0"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

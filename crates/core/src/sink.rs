@@ -6,11 +6,11 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::state::events::StateChange;
 
-/// Channel capacity. Sized for the bootstrap rundown (~400 processes with
-/// ~8k threads in one burst) with 2x headroom; a full channel degrades to
-/// counted drops instead of growth. 65k slots cost 8 MB resident for no
-/// benefit, so keep it tight.
-pub const DEFAULT_CAPACITY: usize = 16_384;
+/// Channel capacity. What passes through is an enrichment per new process
+/// and a disk and a network batch per window; the process list itself is read
+/// by the tick, so no burst of thousands of events arrives any more. A full
+/// channel degrades to counted drops instead of growth.
+pub const DEFAULT_CAPACITY: usize = 4096;
 
 #[derive(Clone)]
 pub struct Sink {
@@ -42,13 +42,7 @@ impl Sink {
     }
 
     pub fn emit(&self, change: StateChange) {
-        let reported = matches!(
-            change,
-            StateChange::ProcessStarted(_)
-                | StateChange::ProcessEnriched(_)
-                | StateChange::Machine(_)
-                | StateChange::Memory(_)
-        );
+        let reported = matches!(change, StateChange::ProcessEnriched(_));
         if self.tx.try_send(change).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -75,6 +69,10 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    fn traffic() -> StateChange {
+        StateChange::Network(Default::default())
+    }
+
     #[test]
     fn a_half_full_channel_wakes_the_drainer() {
         let (sink, _rx) = Sink::bounded(4);
@@ -85,15 +83,15 @@ mod tests {
         });
         sink.set_drainer(drainer.thread().clone());
 
-        sink.emit(StateChange::ProcessStopped(1));
-        sink.emit(StateChange::ProcessStopped(2));
+        sink.emit(traffic());
+        sink.emit(traffic());
 
         let parked = drainer.join().unwrap();
         assert!(parked < Duration::from_secs(5), "parked {parked:?}");
     }
 
     #[test]
-    fn a_process_start_wakes_the_drainer_at_once() {
+    fn an_enrichment_wakes_the_drainer_at_once() {
         let (sink, _rx) = Sink::bounded(1024);
         let drainer = std::thread::spawn(|| {
             let started = Instant::now();
@@ -102,7 +100,7 @@ mod tests {
         });
         sink.set_drainer(drainer.thread().clone());
 
-        sink.emit(StateChange::ProcessStarted(Box::default()));
+        sink.emit(StateChange::ProcessEnriched(Box::default()));
 
         let parked = drainer.join().unwrap();
         assert!(parked < Duration::from_secs(5), "parked {parked:?}");
@@ -111,8 +109,8 @@ mod tests {
     #[test]
     fn a_full_channel_counts_what_it_drops() {
         let (sink, _rx) = Sink::bounded(1);
-        sink.emit(StateChange::ProcessStopped(1));
-        sink.emit(StateChange::ProcessStopped(2));
+        sink.emit(traffic());
+        sink.emit(traffic());
         assert_eq!(sink.dropped(), 1);
     }
 }

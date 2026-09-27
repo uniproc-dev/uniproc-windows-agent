@@ -2,77 +2,109 @@ mod processor_times;
 mod sample;
 mod vars;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use ntapi::ntpoapi::PROCESSOR_POWER_INFORMATION;
 
-use anyhow::Result;
+use crate::providers::machine::sample::{PdhProcessorPerformance, cpu_frequency_mhz, physical_memory};
+use crate::sample::{MachineCpu, MachineDisk, MachineMetric, MachineMetrics, MachineNetwork, MachineSample};
+use crate::state::MachineTotals;
 
-use crate::providers::machine::processor_times::ProcessorTimes;
-use crate::providers::machine::sample::{PdhProcessorPerformance, sample_machine};
-use crate::providers::provider::{LivePids, Provider};
-use crate::sink::Sink;
-use crate::state::events::StateChange;
-
-const FIRST_SAMPLE_WAIT: Duration = Duration::from_secs(2);
-
-pub struct MachineProvider {
-    running: Arc<AtomicBool>,
-    interval_ms: Arc<AtomicU64>,
+/// Reads the machine's counters when a tick asks for them.
+pub struct MachineProbe {
+    pdh: Option<PdhProcessorPerformance>,
+    power: Vec<PROCESSOR_POWER_INFORMATION>,
 }
 
-impl MachineProvider {
-    pub fn new(interval_ms: Arc<AtomicU64>) -> Self {
-        Self {
-            running: Arc::new(AtomicBool::new(false)),
-            interval_ms,
-        }
-    }
-}
-
-impl Default for MachineProvider {
+impl Default for MachineProbe {
     fn default() -> Self {
-        Self::new(Arc::new(AtomicU64::new(crate::settings::DEFAULT_INTERVAL_MS)))
+        Self::new()
     }
 }
 
-impl Provider for MachineProvider {
-    fn start(&self, _: LivePids, sink: Sink) -> Result<()> {
-        if self.running.swap(true, Ordering::SeqCst) {
-            return Ok(());
+impl MachineProbe {
+    pub fn new() -> Self {
+        Self {
+            pdh: None,
+            power: Vec::new(),
         }
-
-        let running = self.running.clone();
-        let interval_ms = self.interval_ms.clone();
-        let (sampled, first) = std::sync::mpsc::sync_channel(1);
-
-        std::thread::Builder::new()
-            .name("machine-poller".into())
-            .spawn(move || {
-                let mut prev_cpu_times: Option<ProcessorTimes> = None;
-                let mut pdh = PdhProcessorPerformance::open();
-                let mut power_info = Vec::new();
-                while running.load(Ordering::Relaxed) {
-                    sink.emit(StateChange::Machine(Box::new(sample_machine(
-                        &mut prev_cpu_times,
-                        pdh.as_mut(),
-                        &mut power_info,
-                    ))));
-                    let _ = sampled.try_send(());
-                    let ms = interval_ms.load(Ordering::Relaxed);
-                    crate::settings::park_while(
-                        &running,
-                        std::time::Instant::now() + Duration::from_millis(ms),
-                    );
-                }
-            })
-            .expect("failed to spawn machine-poller");
-
-        let _ = first.recv_timeout(FIRST_SAMPLE_WAIT);
-        Ok(())
     }
 
-    fn stop(&self) {
-        self.running.store(false, Ordering::SeqCst);
+    /// The wanted groups; disk and network come from the ETW totals.
+    pub fn sample(&mut self, wanted: MachineMetrics, totals: &MachineTotals) -> MachineSample {
+        let mut sample = MachineSample::default();
+        if wanted.contains(MachineMetric::Cpu) {
+            sample.cpu = self.cpu();
+        }
+        if wanted.contains(MachineMetric::Memory) {
+            sample.memory = physical_memory();
+        }
+        if wanted.contains(MachineMetric::Disk) {
+            sample.disk = Some(MachineDisk {
+                read_ops: totals.disk_read_ops,
+                write_ops: totals.disk_write_ops,
+                read_bytes: totals.disk_read_bytes,
+                write_bytes: totals.disk_write_bytes,
+            });
+        }
+        if wanted.contains(MachineMetric::Network) {
+            sample.network = Some(MachineNetwork {
+                rx_bytes: totals.net_rx_bytes,
+                tx_bytes: totals.net_tx_bytes,
+            });
+        }
+        sample
+    }
+
+    fn cpu(&mut self) -> Option<MachineCpu> {
+        let times = match processor_times::read_totals() {
+            Ok(times) => times,
+            Err(error) => {
+                tracing::warn!(%error, "could not read the processor times");
+                return None;
+            }
+        };
+        if self.pdh.is_none() {
+            self.pdh = PdhProcessorPerformance::open();
+        }
+        let (max_mhz, current_mhz) = cpu_frequency_mhz(self.pdh.as_mut(), &mut self.power);
+        Some(MachineCpu {
+            idle_time: times.idle,
+            kernel_time: times.kernel,
+            user_time: times.user,
+            interrupt_time: times.interrupt,
+            dpc_time: times.dpc,
+            max_mhz,
+            current_mhz,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_wanted_groups_are_read() {
+        let mut probe = MachineProbe::new();
+        let totals = MachineTotals {
+            net_rx_bytes: 5,
+            ..Default::default()
+        };
+        let wanted: MachineMetrics = [MachineMetric::Memory, MachineMetric::Network].into_iter().collect();
+        let sample = probe.sample(wanted, &totals);
+        assert!(sample.cpu.is_none() && sample.disk.is_none());
+        let memory = sample.memory.expect("memory");
+        assert!(memory.total_physical > memory.available_physical);
+        assert_eq!(sample.network.unwrap().rx_bytes, 5);
+    }
+
+    #[test]
+    fn the_cpu_group_carries_the_processor_times() {
+        let mut probe = MachineProbe::new();
+        let cpu = probe
+            .sample([MachineMetric::Cpu].into_iter().collect(), &MachineTotals::default())
+            .cpu
+            .expect("cpu");
+        assert!(cpu.kernel_time >= cpu.idle_time && cpu.user_time > 0);
+        assert!(cpu.max_mhz > 0);
     }
 }

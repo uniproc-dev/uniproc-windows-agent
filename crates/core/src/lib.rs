@@ -3,18 +3,27 @@
 
 mod aligned;
 mod etw;
+mod model;
 mod privileges;
+mod probes;
 mod providers;
 mod report;
-mod settings;
+mod sample;
 mod sink;
+mod snapshot;
 mod state;
 mod supervisor;
 mod win;
 
-pub use report::{
-    MachineStats, Process, ProcessMetrics, Report, Samples, SessionHealth, SignatureStatus,
+pub use model::{
+    Architecture, DpiAwareness, ExtendedCfg, IoPriority, Isolation, Mitigations, ProcessPriority,
+    ProcessState, StackProtection, UacVirtualization,
 };
-pub use settings::CollectorSettings;
+pub use report::{Process, ProbeCost, Report, SessionHealth, SignatureStatus};
+pub use sample::{
+    Columns, Demand, MAX_INTERVAL, MIN_INTERVAL, MachineCpu, MachineDisk, MachineMemory,
+    MachineMetric, MachineMetrics, MachineNetwork, MachineSample, MetricSpec, ProcessMetric,
+    ProcessMetrics, Sample,
+};
 pub use supervisor::{Supervisor, SupervisorConfig};
 pub use uniproc_agent_kit::{Epoch, Tagged};

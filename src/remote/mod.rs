@@ -13,11 +13,12 @@ use ogurpchik::auth::handshake::{HandshakeMode, authenticate_client};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::{RpcSession, Side, spawn_session};
 use uniproc_protocol::meta_capnp::{ResponseStatus, response_meta};
-use uniproc_protocol::windows_capnp::{service_watcher, windows_agent};
+use uniproc_protocol::windows_capnp::{sampler, service_watcher, windows_agent};
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
 
 use crate::api::{
-    Command, CommandResult, ProcessInfo, ServiceStats, ServiceStatus, Snapshot, Tagged,
+    Command, CommandResult, MetricSpec, ProcessInfo, ProcessStates, Sample, ServiceStats,
+    ServiceStatus, Snapshot, Tagged,
 };
 use crate::wire::{PROTOCOL, decode, encode};
 
@@ -27,7 +28,10 @@ const JOIN_ATTEMPTS: usize = 3;
 enum Request {
     Ping,
     Snapshot,
-    SetIntervals { memory_ms: u64, cpu_ms: u64 },
+    Subscribe {
+        spec: MetricSpec,
+        calls: mpsc::UnboundedReceiver<SampleCall>,
+    },
     Run(Command),
     Watch {
         name: String,
@@ -39,9 +43,14 @@ enum Request {
 enum Reply {
     Pong,
     Snapshot(Option<Snapshot>),
-    Done,
+    Subscribed,
     Code(CommandResult),
     Watching,
+}
+
+struct SampleCall {
+    if_none_match: u64,
+    reply: oneshot::Sender<Result<Sample>>,
 }
 
 struct Envelope {
@@ -99,7 +108,7 @@ impl Remote {
         }
     }
 
-    /// None when the process list kept changing under the metrics for every attempt to join them.
+    /// None when the process list kept changing under the states for every attempt to join them.
     pub async fn snapshot(&self) -> Result<Option<Snapshot>> {
         match self.call(Request::Snapshot).await? {
             Reply::Snapshot(snapshot) => Ok(snapshot),
@@ -107,16 +116,12 @@ impl Remote {
         }
     }
 
-    /// `None` leaves that interval as it is.
-    pub async fn set_intervals(&self, memory: Option<Duration>, cpu: Option<Duration>) -> Result<()> {
-        let ms = |d: Option<Duration>| d.map_or(0, |d| (d.as_millis() as u64).max(1));
-        let request = Request::SetIntervals {
-            memory_ms: ms(memory),
-            cpu_ms: ms(cpu),
-        };
-        match self.call(request).await? {
-            Reply::Done => Ok(()),
-            _ => bail!("set_intervals answered with something else"),
+    /// The agent samples for it until the sampler is dropped.
+    pub async fn subscribe(&self, spec: MetricSpec) -> Result<RemoteSampler> {
+        let (tx, calls) = mpsc::unbounded();
+        match self.call(Request::Subscribe { spec, calls }).await? {
+            Reply::Subscribed => Ok(RemoteSampler { calls: tx }),
+            _ => bail!("a subscribe answered with something else"),
         }
     }
 
@@ -141,6 +146,24 @@ impl Remote {
             Reply::Watching => Ok(Watch { rx, _release: release }),
             _ => bail!("a watch answered with something else"),
         }
+    }
+}
+
+/// One subscription over the pipe; the agent releases it when this is dropped.
+pub struct RemoteSampler {
+    calls: mpsc::UnboundedSender<SampleCall>,
+}
+
+impl RemoteSampler {
+    /// The latest sample, or the next one when the latest is `if_none_match`.
+    pub async fn sample(&self, if_none_match: u64) -> Result<Sample> {
+        let (reply, answer) = oneshot::channel();
+        self.calls
+            .unbounded_send(SampleCall { if_none_match, reply })
+            .map_err(|_| anyhow!("the agent connection is closed"))?;
+        answer
+            .await
+            .map_err(|_| anyhow!("the agent connection dropped the call"))?
     }
 }
 
@@ -223,6 +246,28 @@ async fn serve(
     }
 }
 
+async fn answer_samples(
+    sampler: sampler::Client,
+    spec: MetricSpec,
+    mut calls: mpsc::UnboundedReceiver<SampleCall>,
+) {
+    let timeout = spec.period() + CALL_TIMEOUT;
+    while let Some(call) = calls.next().await {
+        let result = compio::time::timeout(timeout, fetch_sample(&sampler, spec, call.if_none_match))
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("no sample from the agent within {timeout:?}")));
+        let _ = call.reply.send(result);
+    }
+}
+
+async fn fetch_sample(sampler: &sampler::Client, spec: MetricSpec, if_none_match: u64) -> Result<Sample> {
+    let mut request = sampler.sample_request();
+    request.get().init_meta().set_if_none_match(if_none_match);
+    let reply = request.send().promise.await?;
+    let reply = reply.get()?;
+    Ok(decode::sample(reply.get_processes()?, reply.get_machine()?, spec)?)
+}
+
 struct ClientStub;
 impl windows_agent::Server for ClientStub {}
 
@@ -263,6 +308,7 @@ impl service_watcher::Server for WatcherImpl {
 struct Cache {
     services: Option<Tagged<Arc<[ServiceStats]>>>,
     processes: Option<Tagged<Arc<[ProcessInfo]>>>,
+    states: Option<Tagged<ProcessStates>>,
 }
 
 fn etag<T>(held: &Option<Tagged<T>>) -> u64 {
@@ -304,12 +350,12 @@ impl Session {
         match request {
             Request::Ping => self.ping().await.map(|()| Reply::Pong),
             Request::Snapshot => self.snapshot().await.map(Reply::Snapshot),
-            Request::SetIntervals { memory_ms, cpu_ms } => {
-                let mut request = self.client().set_config_request();
-                request.get().set_memory_interval_ms(memory_ms);
-                request.get().set_cpu_interval_ms(cpu_ms);
-                request.send().promise.await?;
-                Ok(Reply::Done)
+            Request::Subscribe { spec, calls } => {
+                let mut request = self.client().subscribe_request();
+                encode::metric_spec(&spec, request.get().init_spec());
+                let sampler = request.send().promise.await?.get()?.get_sampler()?;
+                compio::runtime::spawn(answer_samples(sampler, spec, calls)).detach();
+                Ok(Reply::Subscribed)
             }
             Request::Run(command) => self.run(command).await.map(Reply::Code),
             Request::Watch {
@@ -379,54 +425,79 @@ impl Session {
         Ok(())
     }
 
+    async fn fetch_states(
+        &self,
+        if_none_match: u64,
+    ) -> Result<Response<windows_agent::get_process_states_results::Owned>> {
+        let mut request = self.client().get_process_states_request();
+        request.get().init_meta().set_if_none_match(if_none_match);
+        Ok(request.send().promise.await?)
+    }
+
+    fn keep_states(&self, reply: &Response<windows_agent::get_process_states_results::Owned>) -> Result<()> {
+        let reply = reply.get()?;
+        let meta = reply.get_meta()?;
+        if !not_modified(meta) {
+            self.cache.borrow_mut().states = Some(Tagged {
+                etag: meta.get_etag(),
+                value: ProcessStates {
+                    passport_etag: reply.get_passport_etag(),
+                    states: decode::process_states(reply.get_states()?),
+                },
+            });
+        }
+        Ok(())
+    }
+
+    fn joined(&self) -> Option<u64> {
+        let cache = self.cache.borrow();
+        let passport_etag = cache.states.as_ref()?.value.passport_etag;
+        (etag(&cache.processes) == passport_etag).then_some(passport_etag)
+    }
+
     async fn snapshot(&self) -> Result<Option<Snapshot>> {
-        let (services_etag, processes_etag) = {
+        let (services_etag, processes_etag, states_etag) = {
             let cache = self.cache.borrow();
-            (etag(&cache.services), etag(&cache.processes))
+            (etag(&cache.services), etag(&cache.processes), etag(&cache.states))
         };
 
-        let client = self.client();
-        let machine = client.get_machine_request().send().promise;
-        let mut services = client.get_services_request();
+        let mut services = self.client().get_services_request();
         services.get().init_meta().set_if_none_match(services_etag);
         let services = services.send().promise;
         let processes = self.fetch_processes(processes_etag);
-        let metrics = client.get_process_metrics_request().send().promise;
-        let (machine, services, processes, metrics) =
-            futures::join!(machine, services, processes, metrics);
+        let states = self.fetch_states(states_etag);
+        let (services, processes, states) = futures::join!(services, processes, states);
 
-        let machine = decode::machine(machine?.get()?.get_machine()?);
         self.keep_services(&services?)?;
         self.keep_processes(&processes?)?;
+        self.keep_states(&states?)?;
 
-        let mut metrics = metrics?;
         for _ in 0..JOIN_ATTEMPTS {
-            let wanted = metrics.get()?.get_processes_etag();
+            if self.joined().is_some() {
+                break;
+            }
             let held = etag(&self.cache.borrow().processes);
-            if held == wanted {
-                break;
-            }
             self.keep_processes(&self.fetch_processes(held).await?)?;
-            if etag(&self.cache.borrow().processes) == wanted {
+            if self.joined().is_some() {
                 break;
             }
-            metrics = client.get_process_metrics_request().send().promise.await?;
+            let held = etag(&self.cache.borrow().states);
+            self.keep_states(&self.fetch_states(held).await?)?;
         }
 
-        let metrics = metrics.get()?;
-        let wanted = metrics.get_processes_etag();
+        if self.joined().is_none() {
+            return Ok(None);
+        }
         let cache = self.cache.borrow();
-        let (Some(processes), Some(services)) = (
-            cache.processes.clone().filter(|p| p.etag == wanted),
-            cache.services.clone(),
-        ) else {
+        let (Some(services), Some(processes), Some(states)) =
+            (cache.services.clone(), cache.processes.clone(), cache.states.clone())
+        else {
             return Ok(None);
         };
         Ok(Some(Snapshot {
-            machine,
             services,
             processes,
-            metrics: decode::metrics(metrics.get_metrics()?),
+            states,
         }))
     }
 

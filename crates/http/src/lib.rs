@@ -1,6 +1,7 @@
 //! A read-only window into what the agent publishes, for people rather than clients.
 //! One thread with its own tokio runtime; it shares nothing with the capnp side but the feed.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
@@ -15,6 +16,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
 
+use uniproc_windows_agent::api::{
+    MachineMetrics, MachineSample, MetricSpec, ProcessMetric, ProcessState,
+};
 use uniproc_windows_agent::local::Local;
 
 /// Where it listens unless `UNIPROC_AGENT_HTTP` says otherwise; any free port
@@ -52,92 +56,149 @@ struct Snapshot {
     processes: usize,
     services: usize,
     processes_etag: u64,
+    states_etag: u64,
     services_etag: u64,
     dropped_by_sink: u64,
-    samples: Samples,
-    machine: Machine,
-    totals: Totals,
+    sample: SampleHeader,
+    machine: MachineSample,
     rows: Vec<Row>,
 }
 
 #[derive(Serialize)]
-struct Samples {
-    attributed: u64,
-    unattributed: u64,
-    idle: u64,
-}
-
-#[derive(Serialize)]
-struct Machine {
-    total_physical_kb: u64,
-    available_physical_kb: u64,
-    used_physical_kb: u64,
-    cpu_percent: f32,
-    cpu_max_mhz: u64,
-    cpu_current_mhz: u64,
-    cpu_interrupt_percent: f32,
-    cpu_dpc_percent: f32,
-}
-
-#[derive(Serialize)]
-struct Totals {
-    disk_read_bytes: u64,
-    disk_write_bytes: u64,
-    disk_read_ops: u64,
-    disk_write_ops: u64,
-    net_rx_bytes: u64,
-    net_tx_bytes: u64,
+struct SampleHeader {
+    snapshot: u64,
+    sampled_at: u64,
+    period_ms: u64,
+    processes: Vec<String>,
+    machine: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct Row {
     pid: u32,
     parent_pid: u32,
+    sequence_number: u64,
     name: String,
     display_name: String,
     image_path: String,
     cmdline_args: usize,
-    cpu_percent: f32,
-    working_set_kb: u64,
-    private_bytes_kb: u64,
-    disk_read_bytes: u64,
-    disk_write_bytes: u64,
-    net_rx_bytes: u64,
-    net_tx_bytes: u64,
+    user: String,
+    publisher: String,
+    architecture: String,
+    elevated: Option<bool>,
+    isolation: String,
     is_service: bool,
     is_kernel_process: bool,
     is_windows_process: bool,
     signature: String,
+    suspended: Option<bool>,
+    efficiency_mode: Option<bool>,
+    base_priority: Option<String>,
+    io_priority: String,
+    cpu_user_time: Option<u64>,
+    cpu_kernel_time: Option<u64>,
+    working_set: Option<u64>,
+    private_working_set: Option<u64>,
+    commit: Option<u64>,
+    handles: Option<u32>,
+    threads: Option<u32>,
+    io_read_bytes: Option<u64>,
+    io_write_bytes: Option<u64>,
+    net_rx_bytes: Option<u64>,
+    net_tx_bytes: Option<u64>,
 }
 
+fn cell<T: Copy>(column: &Option<Arc<[T]>>, row: Option<usize>) -> Option<T> {
+    column.as_ref()?.get(row?).copied()
+}
+
+const SHOWN: [ProcessMetric; 11] = [
+    ProcessMetric::CpuUserTime,
+    ProcessMetric::CpuKernelTime,
+    ProcessMetric::WorkingSet,
+    ProcessMetric::PrivateWorkingSet,
+    ProcessMetric::Commit,
+    ProcessMetric::Handles,
+    ProcessMetric::Threads,
+    ProcessMetric::IoReadBytes,
+    ProcessMetric::IoWriteBytes,
+    ProcessMetric::NetRxBytes,
+    ProcessMetric::NetTxBytes,
+];
+
+/// Nothing is sampled for nobody: a request subscribes for as long as it waits.
+const SAMPLE_WAIT: Duration = Duration::from_secs(3);
+
 async fn snapshot(State(agent): State<Arc<Local>>) -> Json<Snapshot> {
+    let sampler = agent.subscribe(MetricSpec {
+        interval: Duration::from_secs(1),
+        processes: SHOWN.into_iter().collect(),
+        machine: MachineMetrics::all(),
+    });
+    let sample = tokio::time::timeout(SAMPLE_WAIT, sampler.sample(0))
+        .await
+        .unwrap_or_default();
+    drop(sampler);
     let latest = agent.latest();
     let s = &latest.snapshot;
-    let m = &s.machine;
+    let c = &sample.columns;
+
+    let sampled: HashMap<(u32, u64), usize> = sample
+        .pids
+        .iter()
+        .zip(sample.sequence_numbers.iter())
+        .enumerate()
+        .map(|(i, (&pid, &sequence_number))| ((pid, sequence_number), i))
+        .collect();
+    let states: HashMap<(u32, u64), &ProcessState> = s
+        .states
+        .value
+        .states
+        .iter()
+        .map(|state| ((state.pid, state.sequence_number), state))
+        .collect();
 
     let rows = s
         .processes
         .value
         .iter()
-        .zip(&s.metrics)
-        .map(|(p, metrics)| Row {
-            pid: p.pid,
-            parent_pid: p.parent_pid,
-            name: p.name.clone(),
-            display_name: p.display_name.clone(),
-            image_path: p.image_path.clone(),
-            cmdline_args: p.cmdline.len(),
-            cpu_percent: metrics.cpu_percent,
-            working_set_kb: metrics.working_set_kb,
-            private_bytes_kb: metrics.private_bytes_kb,
-            disk_read_bytes: metrics.disk_read_bytes,
-            disk_write_bytes: metrics.disk_write_bytes,
-            net_rx_bytes: metrics.net_rx_bytes,
-            net_tx_bytes: metrics.net_tx_bytes,
-            is_service: p.is_service,
-            is_kernel_process: p.is_kernel_process,
-            is_windows_process: p.is_windows_process,
-            signature: format!("{:?}", p.signature),
+        .map(|p| {
+            let key = (p.pid, p.sequence_number);
+            let at = sampled.get(&key).copied();
+            let state = states.get(&key).copied().copied().unwrap_or_default();
+            Row {
+                pid: p.pid,
+                parent_pid: p.parent_pid,
+                sequence_number: p.sequence_number,
+                name: p.name.clone(),
+                display_name: p.display_name.clone(),
+                image_path: p.image_path.clone(),
+                cmdline_args: p.cmdline.len(),
+                user: p.user.clone(),
+                publisher: p.publisher.clone(),
+                architecture: format!("{:?}", p.architecture),
+                elevated: p.elevated,
+                isolation: format!("{:?}", p.isolation),
+                is_service: p.is_service,
+                is_kernel_process: p.is_kernel_process,
+                is_windows_process: p.is_windows_process,
+                signature: format!("{:?}", p.signature),
+                suspended: state.suspended,
+                efficiency_mode: state.efficiency_mode,
+                base_priority: state.base_priority.map(|p| format!("{p:?}")),
+                io_priority: format!("{:?}", state.io_priority),
+                cpu_user_time: cell(&c.cpu_user_time, at),
+                cpu_kernel_time: cell(&c.cpu_kernel_time, at),
+                working_set: cell(&c.working_set, at),
+                private_working_set: cell(&c.private_working_set, at),
+                commit: cell(&c.commit, at),
+                handles: cell(&c.handles, at),
+                threads: cell(&c.threads, at),
+                io_read_bytes: cell(&c.io_read_bytes, at),
+                io_write_bytes: cell(&c.io_write_bytes, at),
+                net_rx_bytes: cell(&c.net_rx_bytes, at),
+                net_tx_bytes: cell(&c.net_tx_bytes, at),
+            }
         })
         .collect();
 
@@ -145,31 +206,17 @@ async fn snapshot(State(agent): State<Arc<Local>>) -> Json<Snapshot> {
         processes: s.processes.value.len(),
         services: s.services.value.len(),
         processes_etag: s.processes.etag,
+        states_etag: s.states.etag,
         services_etag: s.services.etag,
         dropped_by_sink: latest.dropped_by_sink,
-        samples: Samples {
-            attributed: latest.samples.attributed,
-            unattributed: latest.samples.unattributed,
-            idle: latest.samples.idle,
+        sample: SampleHeader {
+            snapshot: sample.snapshot,
+            sampled_at: sample.sampled_at,
+            period_ms: sample.period.as_millis() as u64,
+            processes: sample.wanted.processes.iter().map(|m| format!("{m:?}")).collect(),
+            machine: sample.wanted.machine.iter().map(|m| format!("{m:?}")).collect(),
         },
-        machine: Machine {
-            total_physical_kb: m.total_physical_kb,
-            available_physical_kb: m.available_physical_kb,
-            used_physical_kb: m.used_physical_kb,
-            cpu_percent: m.cpu_percent,
-            cpu_max_mhz: m.cpu_max_mhz,
-            cpu_current_mhz: m.cpu_current_mhz,
-            cpu_interrupt_percent: m.cpu_interrupt_percent,
-            cpu_dpc_percent: m.cpu_dpc_percent,
-        },
-        totals: Totals {
-            disk_read_bytes: m.disk_read_bytes,
-            disk_write_bytes: m.disk_write_bytes,
-            disk_read_ops: m.disk_read_iops,
-            disk_write_ops: m.disk_write_iops,
-            net_rx_bytes: m.net_rx_bytes,
-            net_tx_bytes: m.net_tx_bytes,
-        },
+        machine: sample.machine,
         rows,
     })
 }
@@ -183,6 +230,16 @@ struct Health {
     report_age_ms: Option<u64>,
     dropped_by_sink: u64,
     sessions: Vec<Session>,
+    costs: Vec<Cost>,
+}
+
+#[derive(Serialize)]
+struct Cost {
+    name: &'static str,
+    runs: u64,
+    last_us: u64,
+    mean_us: u64,
+    max_us: u64,
 }
 
 #[derive(Serialize)]
@@ -221,6 +278,17 @@ async fn health(State(agent): State<Arc<Local>>) -> (StatusCode, Json<Health>) {
                 buffers_written: s.buffers_written,
                 buffers: s.buffers,
                 free_buffers: s.free_buffers,
+            })
+            .collect(),
+        costs: latest
+            .costs
+            .iter()
+            .map(|c| Cost {
+                name: c.name,
+                runs: c.runs,
+                last_us: c.last.as_micros() as u64,
+                mean_us: c.mean.as_micros() as u64,
+                max_us: c.max.as_micros() as u64,
             })
             .collect(),
     };

@@ -5,9 +5,9 @@ use anyhow::Result;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use crate::api::{Command, CommandResult, ServiceStatus, Snapshot};
-use crate::local::{Local, StartError};
-use crate::remote::Remote;
+use crate::api::{Command, CommandResult, MetricSpec, Sample, ServiceStatus, Snapshot};
+use crate::local::{Local, LocalSampler, StartError};
+use crate::remote::{Remote, RemoteSampler};
 
 /// The agent either way: running in this process or behind the service's pipe.
 /// Both answer the same calls with the same `api` structs.
@@ -36,8 +36,8 @@ impl Agent {
         }
     }
 
-    /// In process it is always there; over the pipe it is None when the
-    /// process list kept changing under the metrics.
+    /// Services, processes and their states. In process it is always there;
+    /// over the pipe it is None when the process list kept changing under the states.
     pub async fn snapshot(&self) -> Result<Option<Snapshot>> {
         match self {
             Self::Local(agent) => Ok(Some(agent.snapshot())),
@@ -45,20 +45,13 @@ impl Agent {
         }
     }
 
-    /// `None` leaves that interval as it is.
-    pub async fn set_intervals(&self, memory: Option<Duration>, cpu: Option<Duration>) -> Result<()> {
-        match self {
-            Self::Local(agent) => {
-                if let Some(memory) = memory {
-                    agent.set_memory_interval(memory);
-                }
-                if let Some(cpu) = cpu {
-                    agent.set_cpu_interval(cpu);
-                }
-                Ok(())
-            }
-            Self::Remote(remote) => remote.set_intervals(memory, cpu).await,
-        }
+    /// Samples what `spec` asks for until the sampler is dropped.
+    pub async fn subscribe(&self, spec: MetricSpec) -> Result<Sampler> {
+        let inner = match self {
+            Self::Local(agent) => Inner::Local(agent.subscribe(spec)),
+            Self::Remote(remote) => Inner::Remote(remote.subscribe(spec).await?),
+        };
+        Ok(Sampler { inner, last: 0 })
     }
 
     /// Awaiting it never blocks an executor: in process the command runs on the agent's own threads.
@@ -79,6 +72,31 @@ impl Agent {
     }
 }
 
+/// One subscription; the agent stops sampling for it when it is dropped.
+pub struct Sampler {
+    inner: Inner,
+    last: u64,
+}
+
+enum Inner {
+    Local(LocalSampler),
+    Remote(RemoteSampler),
+}
+
+impl Sampler {
+    /// The first call answers with the latest sample; every later one waits
+    /// for the next, paced at the subscription's interval. Over the pipe an
+    /// error means the session is gone.
+    pub async fn next(&mut self) -> Result<Sample> {
+        let sample = match &self.inner {
+            Inner::Local(sampler) => sampler.sample(self.last).await,
+            Inner::Remote(sampler) => sampler.sample(self.last).await?,
+        };
+        self.last = sample.snapshot;
+        Ok(sample)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,12 +105,13 @@ mod tests {
 
     #[test]
     fn every_call_can_be_awaited_on_any_executor() {
-        fn calls(agent: &Agent) {
+        fn calls(agent: &Agent, sampler: &mut Sampler) {
             send(agent.ping());
             send(agent.snapshot());
-            send(agent.set_intervals(None, None));
+            send(agent.subscribe(MetricSpec::default()));
             send(agent.run(Command::Kill { pid: 0 }));
             send(agent.watch_service("svc"));
+            send(sampler.next());
         }
         let _ = calls;
     }
@@ -101,5 +120,6 @@ mod tests {
     fn the_agent_can_be_shared_between_threads() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Agent>();
+        assert_send_sync::<Sampler>();
     }
 }

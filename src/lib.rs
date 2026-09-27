@@ -11,5 +11,6 @@ mod commands;
 mod feed;
 mod privileges;
 mod profile;
+mod sampler;
 mod scm;
 mod win;

@@ -1,7 +1,7 @@
 //! Manual end-to-end check against a running agent:
 //!   cargo run --example rpc_client -- [service_name]
 //!
-//! Calls ping, getMachine, getProcesses, process commands on a self-spawned child, and a
+//! Calls ping, getProcesses, getProcessStates, process commands on a self-spawned child, and a
 //! service restart (default: Spooler) with a concurrent ping to prove the
 //! RPC thread is not blocked by Win32 calls.
 
@@ -40,17 +40,16 @@ async fn run(service: String) -> Result<(), Box<dyn std::error::Error>> {
     client.ping_request().send().promise.await?;
     println!("ping: ok");
 
-    let reply = client.get_machine_request().send().promise.await?;
-    let machine = reply.get()?.get_machine()?;
     let processes_reply = client.get_processes_request().send().promise.await?;
     let processes = processes_reply.get()?.get_processes()?;
+    let states_reply = client.get_process_states_request().send().promise.await?;
+    let states = states_reply.get()?;
     println!(
-        "getProcesses: {} processes; getMachine: cpu {:.1}%, mem used {} kb, net rx {} tx {}",
+        "getProcesses: {} processes (etag {}); getProcessStates: {} states under passport {}",
         processes.len(),
-        machine.get_cpu_percent(),
-        machine.get_used_physical_kb(),
-        machine.get_net_rx_bytes(),
-        machine.get_net_tx_bytes(),
+        processes_reply.get()?.get_meta()?.get_etag(),
+        states.get_states()?.len(),
+        states.get_passport_etag(),
     );
 
     for p in processes

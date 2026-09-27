@@ -1,11 +1,16 @@
 use uniproc_protocol::windows_capnp::{
-    ProcessPriority as WirePriority, ServiceState as WireServiceState, SignatureStatus as WireSignature,
-    machine_stats, service_status, windows_agent,
+    Architecture as WireArchitecture, DpiAwareness as WireDpi, ExtendedCfg as WireExtendedCfg,
+    IoPriority as WireIoPriority, Isolation as WireIsolation, MachineMetric as WireMachineMetric,
+    ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority, ServiceState as WireServiceState,
+    SignatureStatus as WireSignature, StackProtection as WireStackProtection, Toggle,
+    UacVirtualization as WireUac, machine_sample, metric_spec, process_columns, sampler,
+    service_status, windows_agent,
 };
 
 use crate::api::{
-    MachineStats, ProcessInfo, ProcessMetricsSnapshot, ProcessPriority, ServiceState, ServiceStats,
-    ServiceStatus, SignatureStatus,
+    Architecture, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineMetric, MachineSample,
+    MetricSpec, ProcessInfo, ProcessMetric, ProcessPriority, ProcessStates, Sample, ServiceState,
+    ServiceStats, ServiceStatus, SignatureStatus, StackProtection, UacVirtualization,
 };
 
 fn signature(s: SignatureStatus) -> WireSignature {
@@ -41,6 +46,128 @@ pub fn priority(p: ProcessPriority) -> WirePriority {
     }
 }
 
+fn toggle(value: Option<bool>) -> Toggle {
+    match value {
+        None => Toggle::Unknown,
+        Some(false) => Toggle::Off,
+        Some(true) => Toggle::On,
+    }
+}
+
+fn architecture(a: Architecture) -> WireArchitecture {
+    match a {
+        Architecture::Unknown => WireArchitecture::Unknown,
+        Architecture::X86 => WireArchitecture::X86,
+        Architecture::X64 => WireArchitecture::X64,
+        Architecture::Arm => WireArchitecture::Arm,
+        Architecture::Arm64 => WireArchitecture::Arm64,
+        Architecture::Arm64X86Compatible => WireArchitecture::Arm64X86Compatible,
+        Architecture::Arm64X64Compatible => WireArchitecture::Arm64X64Compatible,
+    }
+}
+
+fn uac_virtualization(u: UacVirtualization) -> WireUac {
+    match u {
+        UacVirtualization::Unknown => WireUac::Unknown,
+        UacVirtualization::NotAllowed => WireUac::NotAllowed,
+        UacVirtualization::Disabled => WireUac::Disabled,
+        UacVirtualization::Enabled => WireUac::Enabled,
+    }
+}
+
+fn isolation(i: Isolation) -> WireIsolation {
+    match i {
+        Isolation::Unknown => WireIsolation::Unknown,
+        Isolation::None => WireIsolation::None,
+        Isolation::AppContainer => WireIsolation::AppContainer,
+        Isolation::Uwp => WireIsolation::Uwp,
+        Isolation::Silo => WireIsolation::Silo,
+    }
+}
+
+fn dpi_awareness(d: DpiAwareness) -> WireDpi {
+    match d {
+        DpiAwareness::Unknown => WireDpi::Unknown,
+        DpiAwareness::Unaware => WireDpi::Unaware,
+        DpiAwareness::System => WireDpi::System,
+        DpiAwareness::PerMonitor => WireDpi::PerMonitor,
+        DpiAwareness::PerMonitorV2 => WireDpi::PerMonitorV2,
+        DpiAwareness::UnawareGdiScaled => WireDpi::UnawareGdiScaled,
+    }
+}
+
+fn stack_protection(s: StackProtection) -> WireStackProtection {
+    match s {
+        StackProtection::Unknown => WireStackProtection::Unknown,
+        StackProtection::Off => WireStackProtection::Off,
+        StackProtection::Compatible => WireStackProtection::Compatible,
+        StackProtection::Strict => WireStackProtection::Strict,
+        StackProtection::CompatibleAudit => WireStackProtection::CompatibleAudit,
+        StackProtection::StrictAudit => WireStackProtection::StrictAudit,
+    }
+}
+
+fn extended_cfg(e: ExtendedCfg) -> WireExtendedCfg {
+    match e {
+        ExtendedCfg::Unknown => WireExtendedCfg::Unknown,
+        ExtendedCfg::Off => WireExtendedCfg::Off,
+        ExtendedCfg::Audit => WireExtendedCfg::Audit,
+        ExtendedCfg::On => WireExtendedCfg::On,
+    }
+}
+
+fn io_priority(p: IoPriority) -> WireIoPriority {
+    match p {
+        IoPriority::Unknown => WireIoPriority::Unknown,
+        IoPriority::VeryLow => WireIoPriority::VeryLow,
+        IoPriority::Low => WireIoPriority::Low,
+        IoPriority::Normal => WireIoPriority::Normal,
+        IoPriority::High => WireIoPriority::High,
+        IoPriority::Critical => WireIoPriority::Critical,
+    }
+}
+
+fn process_metric(m: ProcessMetric) -> WireProcessMetric {
+    match m {
+        ProcessMetric::CpuUserTime => WireProcessMetric::CpuUserTime,
+        ProcessMetric::CpuKernelTime => WireProcessMetric::CpuKernelTime,
+        ProcessMetric::CpuCycles => WireProcessMetric::CpuCycles,
+        ProcessMetric::WorkingSet => WireProcessMetric::WorkingSet,
+        ProcessMetric::PeakWorkingSet => WireProcessMetric::PeakWorkingSet,
+        ProcessMetric::PrivateWorkingSet => WireProcessMetric::PrivateWorkingSet,
+        ProcessMetric::Commit => WireProcessMetric::Commit,
+        ProcessMetric::PagedPool => WireProcessMetric::PagedPool,
+        ProcessMetric::NonPagedPool => WireProcessMetric::NonPagedPool,
+        ProcessMetric::PageFaults => WireProcessMetric::PageFaults,
+        ProcessMetric::Handles => WireProcessMetric::Handles,
+        ProcessMetric::Threads => WireProcessMetric::Threads,
+        ProcessMetric::UserObjects => WireProcessMetric::UserObjects,
+        ProcessMetric::GdiObjects => WireProcessMetric::GdiObjects,
+        ProcessMetric::IoReadOps => WireProcessMetric::IoReadOps,
+        ProcessMetric::IoWriteOps => WireProcessMetric::IoWriteOps,
+        ProcessMetric::IoOtherOps => WireProcessMetric::IoOtherOps,
+        ProcessMetric::IoReadBytes => WireProcessMetric::IoReadBytes,
+        ProcessMetric::IoWriteBytes => WireProcessMetric::IoWriteBytes,
+        ProcessMetric::IoOtherBytes => WireProcessMetric::IoOtherBytes,
+        ProcessMetric::DiskReadOps => WireProcessMetric::DiskReadOps,
+        ProcessMetric::DiskWriteOps => WireProcessMetric::DiskWriteOps,
+        ProcessMetric::DiskFlushOps => WireProcessMetric::DiskFlushOps,
+        ProcessMetric::DiskReadBytes => WireProcessMetric::DiskReadBytes,
+        ProcessMetric::DiskWriteBytes => WireProcessMetric::DiskWriteBytes,
+        ProcessMetric::NetRxBytes => WireProcessMetric::NetRxBytes,
+        ProcessMetric::NetTxBytes => WireProcessMetric::NetTxBytes,
+    }
+}
+
+fn machine_metric(m: MachineMetric) -> WireMachineMetric {
+    match m {
+        MachineMetric::Cpu => WireMachineMetric::Cpu,
+        MachineMetric::Memory => WireMachineMetric::Memory,
+        MachineMetric::Disk => WireMachineMetric::Disk,
+        MachineMetric::Network => WireMachineMetric::Network,
+    }
+}
+
 pub fn processes(processes: &[ProcessInfo], mut out: windows_agent::get_processes_results::Builder) {
     let mut list = out.reborrow().init_processes(processes.len() as u32);
     for (i, e) in processes.iter().enumerate() {
@@ -66,29 +193,37 @@ pub fn processes(processes: &[ProcessInfo], mut out: windows_agent::get_processe
         p.set_image_path(&e.image_path);
         p.set_display_name(&e.display_name);
         p.set_console_host_pid(e.console_host_pid);
+        p.set_start_time(e.start_time);
+        p.set_sequence_number(e.sequence_number);
+        p.set_user(&e.user);
+        p.set_architecture(architecture(e.architecture));
+        p.set_elevated(toggle(e.elevated));
+        p.set_uac_virtualization(uac_virtualization(e.uac_virtualization));
+        p.set_isolation(isolation(e.isolation));
+        p.set_dpi_awareness(dpi_awareness(e.dpi_awareness));
+        if let Some(m) = &e.mitigations {
+            let mut out = p.reborrow().init_mitigations();
+            out.set_dep(toggle(m.dep));
+            out.set_stack_protection(stack_protection(m.stack_protection));
+            out.set_extended_cfg(extended_cfg(m.extended_cfg));
+        }
+        p.set_publisher(&e.publisher);
     }
 }
 
-pub fn process_metrics(
-    snapshot: &ProcessMetricsSnapshot,
-    mut out: windows_agent::get_process_metrics_results::Builder,
-) {
-    out.set_processes_etag(snapshot.processes_etag);
-    let mut list = out.reborrow().init_metrics(snapshot.metrics.len() as u32);
-    for (i, e) in snapshot.metrics.iter().enumerate() {
-        let mut m = list.reborrow().get(i as u32);
-        m.set_pid(e.pid);
-        m.set_cpu_percent(e.cpu_percent);
-        m.set_working_set_kb(e.working_set_kb);
-        m.set_private_bytes_kb(e.private_bytes_kb);
-        m.set_peak_working_set_kb(e.peak_working_set_kb);
-        m.set_private_working_set_kb(e.private_working_set_kb);
-        m.set_disk_read_bytes(e.disk_read_bytes);
-        m.set_disk_write_bytes(e.disk_write_bytes);
-        m.set_disk_read_iops(e.disk_read_iops);
-        m.set_disk_write_iops(e.disk_write_iops);
-        m.set_net_rx_bytes(e.net_rx_bytes);
-        m.set_net_tx_bytes(e.net_tx_bytes);
+pub fn process_states(states: &ProcessStates, mut out: windows_agent::get_process_states_results::Builder) {
+    out.set_passport_etag(states.passport_etag);
+    let mut list = out.reborrow().init_states(states.states.len() as u32);
+    for (i, e) in states.states.iter().enumerate() {
+        let mut s = list.reborrow().get(i as u32);
+        s.set_pid(e.pid);
+        s.set_sequence_number(e.sequence_number);
+        s.set_suspended(toggle(e.suspended));
+        s.set_efficiency_mode(toggle(e.efficiency_mode));
+        s.set_base_priority(e.base_priority.map_or(WirePriority::Unknown, priority));
+        s.set_power_throttling(toggle(e.power_throttling));
+        s.set_job_object_id(e.job_object_id);
+        s.set_io_priority(io_priority(e.io_priority));
     }
 }
 
@@ -115,19 +250,110 @@ pub fn service_status(s: &ServiceStatus, mut out: service_status::Builder) {
     out.set_wait_hint_ms(s.wait_hint_ms);
 }
 
-pub fn machine(m: &MachineStats, mut out: machine_stats::Builder) {
-    out.set_total_physical_kb(m.total_physical_kb);
-    out.set_available_physical_kb(m.available_physical_kb);
-    out.set_used_physical_kb(m.used_physical_kb);
-    out.set_cpu_percent(m.cpu_percent);
-    out.set_cpu_max_mhz(m.cpu_max_mhz);
-    out.set_cpu_current_mhz(m.cpu_current_mhz);
-    out.set_cpu_interrupt_percent(m.cpu_interrupt_percent);
-    out.set_cpu_dpc_percent(m.cpu_dpc_percent);
-    out.set_disk_read_bytes(m.disk_read_bytes);
-    out.set_disk_write_bytes(m.disk_write_bytes);
-    out.set_disk_read_iops(m.disk_read_iops);
-    out.set_disk_write_iops(m.disk_write_iops);
-    out.set_net_rx_bytes(m.net_rx_bytes);
-    out.set_net_tx_bytes(m.net_tx_bytes);
+pub fn metric_spec(spec: &MetricSpec, mut out: metric_spec::Builder) {
+    out.set_interval_ms(spec.interval.as_millis().min(u32::MAX as u128) as u32);
+    let processes: Vec<ProcessMetric> = spec.processes.iter().collect();
+    let mut list = out.reborrow().init_processes(processes.len() as u32);
+    for (i, &m) in processes.iter().enumerate() {
+        list.set(i as u32, process_metric(m));
+    }
+    let machine: Vec<MachineMetric> = spec.machine.iter().collect();
+    let mut list = out.reborrow().init_machine(machine.len() as u32);
+    for (i, &m) in machine.iter().enumerate() {
+        list.set(i as u32, machine_metric(m));
+    }
+}
+
+macro_rules! columns {
+    ($out:ident, $columns:expr, $($field:ident => $set:ident,)*) => {
+        $(if let Some(values) = &$columns.$field {
+            $out.$set(&values[..])?;
+        })*
+    };
+}
+
+pub fn sample(sample: &Sample, mut out: sampler::sample_results::Builder) -> capnp::Result<()> {
+    process_columns(sample, out.reborrow().init_processes())?;
+    machine_sample(sample, out.init_machine());
+    Ok(())
+}
+
+fn process_columns(sample: &Sample, mut out: process_columns::Builder) -> capnp::Result<()> {
+    out.set_snapshot(sample.snapshot);
+    out.set_sampled_at(sample.sampled_at);
+    out.set_passport_etag(sample.passport_etag);
+    if sample.wanted.processes.is_empty() {
+        return Ok(());
+    }
+    out.set_pids(&sample.pids[..])?;
+    out.set_sequence_numbers(&sample.sequence_numbers[..])?;
+    let c = &sample.columns;
+    columns!(out, c,
+        cpu_user_time => set_cpu_user_time,
+        cpu_kernel_time => set_cpu_kernel_time,
+        cpu_cycles => set_cpu_cycles,
+        working_set => set_working_set,
+        peak_working_set => set_peak_working_set,
+        private_working_set => set_private_working_set,
+        commit => set_commit,
+        paged_pool => set_paged_pool,
+        non_paged_pool => set_non_paged_pool,
+        page_faults => set_page_faults,
+        handles => set_handles,
+        threads => set_threads,
+        user_objects => set_user_objects,
+        gdi_objects => set_gdi_objects,
+        io_read_ops => set_io_read_ops,
+        io_write_ops => set_io_write_ops,
+        io_other_ops => set_io_other_ops,
+        io_read_bytes => set_io_read_bytes,
+        io_write_bytes => set_io_write_bytes,
+        io_other_bytes => set_io_other_bytes,
+        disk_read_ops => set_disk_read_ops,
+        disk_write_ops => set_disk_write_ops,
+        disk_flush_ops => set_disk_flush_ops,
+        disk_read_bytes => set_disk_read_bytes,
+        disk_write_bytes => set_disk_write_bytes,
+        net_rx_bytes => set_net_rx_bytes,
+        net_tx_bytes => set_net_tx_bytes,
+    );
+    Ok(())
+}
+
+fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
+    out.set_snapshot(sample.snapshot);
+    out.set_sampled_at(sample.sampled_at);
+    let MachineSample {
+        cpu,
+        memory,
+        disk,
+        network,
+    } = &sample.machine;
+    if let Some(cpu) = cpu {
+        let mut c = out.reborrow().init_cpu();
+        c.set_idle_time(cpu.idle_time);
+        c.set_kernel_time(cpu.kernel_time);
+        c.set_user_time(cpu.user_time);
+        c.set_interrupt_time(cpu.interrupt_time);
+        c.set_dpc_time(cpu.dpc_time);
+        c.set_max_mhz(cpu.max_mhz);
+        c.set_current_mhz(cpu.current_mhz);
+    }
+    if let Some(memory) = memory {
+        let mut m = out.reborrow().init_memory();
+        m.set_total_physical(memory.total_physical);
+        m.set_available_physical(memory.available_physical);
+    }
+    if let Some(disk) = disk {
+        let mut d = out.reborrow().init_disk();
+        d.set_read_ops(disk.read_ops);
+        d.set_write_ops(disk.write_ops);
+        d.set_read_bytes(disk.read_bytes);
+        d.set_write_bytes(disk.write_bytes);
+    }
+    if let Some(network) = network {
+        let mut n = out.reborrow().init_network();
+        n.set_rx_bytes(network.rx_bytes);
+        n.set_tx_bytes(network.tx_bytes);
+    }
 }
