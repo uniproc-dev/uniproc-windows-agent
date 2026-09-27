@@ -104,7 +104,7 @@ pub unsafe fn enum_processes() -> Result<Vec<StateChange>> {
 
         let threads_ptr = unsafe {
             start
-                .add(size_of::<SYSTEM_PROCESS_INFORMATION>())
+                .add(std::mem::offset_of!(SYSTEM_PROCESS_INFORMATION, Threads))
                 .cast::<SYSTEM_THREAD_INFORMATION>()
         };
 
