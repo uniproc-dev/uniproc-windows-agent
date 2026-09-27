@@ -5,14 +5,21 @@ use windows::Win32::{
     PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW, ProcessorInformation,
     STATUS_SUCCESS,
 };
+use std::time::{Duration, Instant};
+
 use windows::core::PCWSTR;
 
 use crate::providers::machine::vars::{PDH_CSTATUS_VALID_DATA, PDH_PROCESSOR_PERFORMANCE};
 use crate::sample::MachineMemory;
 
+/// The shortest span a rate is taken over; a shorter one reads as noise.
+const MIN_SPAN: Duration = Duration::from_millis(200);
+
 pub struct PdhProcessorPerformance {
     query: PDH_HQUERY,
     counter: PDH_HCOUNTER,
+    collected: Option<Instant>,
+    last: Option<f64>,
 }
 
 impl PdhProcessorPerformance {
@@ -29,28 +36,38 @@ impl PdhProcessorPerformance {
                 return None;
             }
 
-            // Prime the rate counter; the first formatted value is garbage.
-            let _ = PdhCollectQueryData(query);
-            Some(Self { query, counter })
+            Some(Self {
+                query,
+                counter,
+                collected: None,
+                last: None,
+            })
         }
     }
 
+    /// Percent of the rated clock since the previous collection. None on the
+    /// first call, which only sets the baseline; a call sooner than
+    /// [`MIN_SPAN`] after the last collection answers the last value.
     pub fn sample(&mut self) -> Option<f64> {
-        unsafe {
-            if PdhCollectQueryData(self.query).0 != 0 {
-                return None;
-            }
-
-            let mut value = PDH_FMT_COUNTERVALUE::default();
-            if PdhGetFormattedCounterValue(self.counter, PDH_FMT_DOUBLE, None, &mut value).0 != 0 {
-                return None;
-            }
-            if value.CStatus != PDH_CSTATUS_VALID_DATA {
-                return None;
-            }
-
-            Some(value.Anonymous.doubleValue.max(0.0))
+        let now = Instant::now();
+        let baseline = match self.collected {
+            Some(at) if now - at < MIN_SPAN => return self.last,
+            Some(_) => false,
+            None => true,
+        };
+        if unsafe { PdhCollectQueryData(self.query) }.0 != 0 {
+            return self.last;
         }
+        self.collected = Some(now);
+        if baseline {
+            return None;
+        }
+
+        let mut value = PDH_FMT_COUNTERVALUE::default();
+        let read = unsafe { PdhGetFormattedCounterValue(self.counter, PDH_FMT_DOUBLE, None, &mut value) }.0 == 0
+            && value.CStatus == PDH_CSTATUS_VALID_DATA;
+        self.last = read.then(|| unsafe { value.Anonymous.doubleValue }.max(0.0));
+        self.last
     }
 }
 
@@ -105,4 +122,30 @@ pub fn physical_memory() -> Option<MachineMemory> {
         total_physical: mem.ullTotalPhys.0,
         available_physical: mem.ullAvailPhys.0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_rate_is_only_a_baseline_and_a_quick_second_is_not_taken() {
+        let Some(mut pdh) = PdhProcessorPerformance::open() else {
+            return;
+        };
+        assert_eq!(pdh.sample(), None, "no baseline yet");
+        assert_eq!(pdh.sample(), None, "too soon after the baseline");
+        std::thread::sleep(MIN_SPAN + Duration::from_millis(50));
+        let percent = pdh.sample().expect("a rate over a whole span");
+        assert!(percent > 0.0 && percent < 400.0, "{percent}% of the rated clock");
+        assert_eq!(pdh.sample(), Some(percent), "too soon: the last value again");
+    }
+
+    #[test]
+    fn the_first_sample_falls_back_to_the_power_information() {
+        let mut pdh = PdhProcessorPerformance::open();
+        let (max_mhz, current_mhz) = cpu_frequency_mhz(pdh.as_mut(), &mut Vec::new());
+        assert!(max_mhz > 0);
+        assert!(current_mhz > 0 && current_mhz <= 4 * max_mhz, "{current_mhz} of {max_mhz} MHz");
+    }
 }

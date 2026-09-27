@@ -125,15 +125,16 @@ pub fn io_priority(handle: HANDLE) -> IoPriority {
     }
 }
 
-/// Whether [`gui_objects`] can be read from this process: win32k answers
-/// only within its own session, and session 0 has no user's desktop.
-pub fn sees_gui_objects() -> bool {
+/// The session this process runs in; [`gui_objects`] answers only for it.
+pub fn own_session() -> Option<u32> {
     let mut session = 0u32;
-    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) }.as_bool() && session != 0
+    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) }
+        .as_bool()
+        .then_some(session)
 }
 
-/// User objects and GDI objects the process holds; 0 for a process of
-/// another session.
+/// User objects and GDI objects the process holds. win32k answers only
+/// within the caller's session: for a process of another one this is 0.
 pub fn gui_objects(handle: HANDLE) -> (u32, u32) {
     unsafe {
         (

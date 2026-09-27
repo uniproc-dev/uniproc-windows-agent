@@ -1,24 +1,28 @@
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::channel::oneshot;
 use futures::future::{Either, select};
+use ogurpchik::auth::handshake::Version;
 use uniproc_protocol::meta_capnp::{self, ResponseStatus};
 use uniproc_protocol::windows_capnp::{sampler, service_watcher, watch_handle, windows_agent};
 
 use uniproc_windows_agent::api::{Command, CommandResult};
 use uniproc_windows_agent::local::{Local, LocalSampler, ServiceWatch};
-use uniproc_windows_agent::wire::{decode, encode};
+use uniproc_windows_agent::wire::{self, decode, encode};
 
 #[derive(Clone)]
 pub struct AgentImpl {
     agent: Arc<Local>,
+    peer: Rc<Cell<Option<Version>>>,
 }
 
 impl AgentImpl {
-    pub fn new(agent: Arc<Local>) -> Self {
-        Self { agent }
+    /// `peer` is the version the client presented, set once its handshake is done.
+    pub fn new(agent: Arc<Local>, peer: Rc<Cell<Option<Version>>>) -> Self {
+        Self { agent, peer }
     }
 
     /// A command that panicked fails the call rather than answer a code.
@@ -34,6 +38,7 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 
 struct SamplerImpl {
     sampler: LocalSampler,
+    gaps: bool,
 }
 
 impl sampler::Server for SamplerImpl {
@@ -43,7 +48,10 @@ impl sampler::Server for SamplerImpl {
         mut results: sampler::SampleResults,
     ) -> Result<(), capnp::Error> {
         let if_none_match = params.get()?.get_meta()?.get_if_none_match();
-        let sample = self.sampler.sample(if_none_match).await;
+        let mut sample = self.sampler.sample(if_none_match).await;
+        if !self.gaps {
+            sample.columns = sample.columns.without_gaps();
+        }
         let mut meta = results.get().init_meta();
         meta.set_etag(sample.snapshot);
         meta.set_status(ResponseStatus::Ok);
@@ -179,6 +187,7 @@ impl windows_agent::Server for AgentImpl {
         let spec = decode::metric_spec(params.get()?.get_spec()?)?;
         let sampler = SamplerImpl {
             sampler: self.agent.subscribe(spec),
+            gaps: wire::takes_gaps(self.peer.get()),
         };
         unconditional(results.get().init_meta());
         results.get().set_sampler(capnp_rpc::new_client(sampler));

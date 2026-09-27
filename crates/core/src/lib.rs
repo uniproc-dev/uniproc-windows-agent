@@ -22,8 +22,8 @@ pub use model::{
 pub use report::{Process, ProbeCost, Report, SessionHealth, SignatureStatus};
 pub use sample::{
     Columns, Demand, MAX_INTERVAL, MIN_INTERVAL, MachineCpu, MachineDisk, MachineMemory,
-    MachineMetric, MachineMetrics, MachineNetwork, MachineSample, MetricSpec, ProcessMetric,
-    ProcessMetrics, Sample,
+    MachineMetric, MachineMetrics, MachineNetwork, MachineSample, MetricSpec, NO_DATA_U32,
+    NO_DATA_U64, ProcessMetric, ProcessMetrics, Sample,
 };
 pub use supervisor::{Supervisor, SupervisorConfig};
 pub use uniproc_agent_kit::{Epoch, Tagged};

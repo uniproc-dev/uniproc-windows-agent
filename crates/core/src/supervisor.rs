@@ -15,7 +15,7 @@ use crate::providers::process::Enricher;
 use crate::providers::provider::Provider;
 use crate::report::{self, Process, ProbeCost, Report};
 use crate::sample::{
-    Columns, Demand, MachineSample, MetricSpec, ProcessMetric, ProcessMetrics, Sample, Source, now_100ns,
+    Columns, Demand, MachineSample, MetricSpec, NO_DATA_U32, ProcessMetric, Sample, Source, now_100ns,
 };
 use crate::sink::Sink;
 use crate::snapshot::{self, Processes, Row};
@@ -56,7 +56,7 @@ pub struct Supervisor {
     demand: Demand,
     snapshots: u64,
     sampled: Option<Instant>,
-    sees_gui: bool,
+    session: Option<u32>,
     costs: Vec<ProbeCost>,
     router: Option<KernelRouter>,
     sink: Option<Sink>,
@@ -86,7 +86,7 @@ impl Supervisor {
             demand,
             snapshots: 0,
             sampled: None,
-            sees_gui: probes::sees_gui_objects(),
+            session: probes::own_session(),
             costs: Vec::new(),
             router: None,
             sink: None,
@@ -250,18 +250,15 @@ impl Supervisor {
 
         let states: Arc<[ProcessState]> = self.time("states", |s| rows.iter().map(|row| s.state(row)).collect());
 
-        let readable: ProcessMetrics = spec
-            .processes
-            .iter()
-            .filter(|&m| self.sees_gui || !matches!(m, ProcessMetric::UserObjects | ProcessMetric::GdiObjects))
-            .collect();
-        let gui = readable.contains(ProcessMetric::UserObjects) || readable.contains(ProcessMetric::GdiObjects);
+        let gui = spec.processes.contains(ProcessMetric::UserObjects)
+            || spec.processes.contains(ProcessMetric::GdiObjects);
         let sources: Vec<Source> = self.time(if gui { "gui objects" } else { "sources" }, |s| {
             rows.iter()
                 .map(|row| {
                     let (user_objects, gdi_objects) = match s.handles.get(row.pid) {
-                        Some(handle) if gui => probes::gui_objects(handle),
-                        _ => (0, 0),
+                        _ if !gui => (0, 0),
+                        Some(handle) if s.session == Some(row.session_id) => probes::gui_objects(handle),
+                        _ => (NO_DATA_U32, NO_DATA_U32),
                     };
                     let network = s.state.network(row.pid, row.sequence_number);
                     Source {
@@ -274,7 +271,7 @@ impl Supervisor {
                 })
                 .collect()
         });
-        let columns = Columns::build(readable, &sources);
+        let columns = Columns::build(spec.processes, &sources);
         let machine = if spec.machine.is_empty() {
             MachineSample::default()
         } else {

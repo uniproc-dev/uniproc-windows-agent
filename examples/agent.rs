@@ -8,7 +8,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use uniproc_windows_agent::agent::Agent;
 use uniproc_windows_agent::api::{
-    Command, MachineMetrics, MetricSpec, ProcessMetric, ProcessPriority, ServiceState, Snapshot,
+    Command, MachineMetrics, MetricSpec, NO_DATA_U32, ProcessMetric, ProcessPriority, ServiceState,
+    Snapshot,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -47,7 +48,14 @@ async fn run(mode: &str) -> anyhow::Result<()> {
             .zip(first.processes.value.iter())
             .all(|(s, p)| (s.pid, s.sequence_number) == (p.pid, p.sequence_number))
     );
-    if let Some(p) = first.processes.value.iter().find(|p| !p.package_full_name.is_empty()) {
+    let enriched = |p: &&uniproc_windows_agent::api::ProcessInfo| !p.user.is_empty();
+    if let Some(p) = first
+        .processes
+        .value
+        .iter()
+        .filter(enriched)
+        .find(|p| !p.package_full_name.is_empty())
+    {
         println!(
             "{mode}: packaged {} app {:?} shown as {:?} by {:?}, isolation {:?}",
             p.package_full_name, p.package_relative_app_id, p.display_name, p.publisher, p.isolation
@@ -100,6 +108,19 @@ async fn run(mode: &str) -> anyhow::Result<()> {
         .expect("a desktop session");
     let row = b.pids.iter().position(|&pid| pid == explorer.pid).expect("explorer sampled");
     match (&b.columns.gdi_objects, &b.columns.user_objects) {
+        (Some(gdi), Some(user)) if gdi[row] == NO_DATA_U32 => {
+            assert_eq!(user[row], NO_DATA_U32);
+            let own = b
+                .pids
+                .iter()
+                .zip(gdi.iter())
+                .filter(|&(_, &g)| g != NO_DATA_U32 && g > 0)
+                .count();
+            println!(
+                "{mode}: explorer in session {} has no GUI object counts from here; {own} processes of the agent's session have some",
+                explorer.session_id
+            );
+        }
         (Some(gdi), Some(user)) => {
             println!(
                 "{mode}: explorer in session {} has {} GDI and {} USER objects",
@@ -107,8 +128,7 @@ async fn run(mode: &str) -> anyhow::Result<()> {
             );
             assert!(gdi[row] > 0 && user[row] > 0, "the desktop's session shows its GUI objects");
         }
-        (None, None) => println!("{mode}: no GUI object counts outside the desktop's session"),
-        _ => panic!("GDI and USER objects come together"),
+        _ => panic!("GDI and USER objects were asked for and come together"),
     }
     drop(sampler);
 

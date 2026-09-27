@@ -70,10 +70,21 @@ impl ProcessMetric {
         Self::NetTxBytes,
     ];
 
+    /// Whether a row of this column can hold [`NO_DATA_U32`] or
+    /// [`NO_DATA_U64`]; page faults wrap, so their maximum is a value.
+    pub fn has_gaps(self) -> bool {
+        self != Self::PageFaults
+    }
+
     fn bit(self) -> u32 {
         1 << self as u32
     }
 }
+
+/// A row with no data in a `u32` column that has data.
+pub const NO_DATA_U32: u32 = u32::MAX;
+/// A row with no data in a `u64` column that has data.
+pub const NO_DATA_U64: u64 = u64::MAX;
 
 /// A set of process counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -296,7 +307,9 @@ pub struct Source {
 macro_rules! columns {
     ($($field:ident: $ty:ty = $metric:ident, |$s:ident| $value:expr;)*) => {
         /// Process counters as columns, row i of each for the same process. A
-        /// column is `None` when nobody asked for it.
+        /// column is `None` when nobody asked for it or there is no data; a
+        /// row with no data holds the type's maximum, see
+        /// [`ProcessMetric::has_gaps`].
         #[derive(Clone, Debug, Default, PartialEq, Eq)]
         pub struct Columns {
             $(pub $field: Option<Arc<[$ty]>>,)*
@@ -320,6 +333,16 @@ macro_rules! columns {
                     } else {
                         None
                     },)*
+                }
+            }
+
+            /// For a reader that takes every value as data: a column with a
+            /// row that has none becomes `None`.
+            pub fn without_gaps(&self) -> Self {
+                Self {
+                    $($field: self.$field.clone().filter(|values| {
+                        !ProcessMetric::$metric.has_gaps() || !values.contains(&<$ty>::MAX)
+                    }),)*
                 }
             }
         }
@@ -479,6 +502,22 @@ pub fn now_100ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reader_without_gaps_loses_only_the_columns_that_have_them() {
+        let columns = Columns {
+            gdi_objects: Some(Arc::from([12, NO_DATA_U32])),
+            handles: Some(Arc::from([1, 2])),
+            page_faults: Some(Arc::from([u32::MAX, 3])),
+            working_set: Some(Arc::from([NO_DATA_U64, 5])),
+            ..Default::default()
+        };
+        let plain = columns.without_gaps();
+        assert_eq!(plain.gdi_objects, None);
+        assert_eq!(plain.working_set, None);
+        assert_eq!(plain.handles, columns.handles);
+        assert_eq!(plain.page_faults, columns.page_faults, "a wrapped count is a value");
+    }
 
     fn source(pid: u32, working_set: u64) -> Source {
         Source {

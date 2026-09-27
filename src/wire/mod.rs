@@ -3,7 +3,7 @@
 pub mod decode;
 pub mod encode;
 
-use ogurpchik::auth::handshake::Protocol;
+use ogurpchik::auth::handshake::{Protocol, Version};
 use uniproc_protocol::WINDOWS_PROTOCOL;
 
 /// What both ends of the service's pipe present in the handshake: the windows schema's id and version.
@@ -13,6 +13,12 @@ pub const PROTOCOL: Protocol = Protocol::new(
     WINDOWS_PROTOCOL.minor,
     WINDOWS_PROTOCOL.patch,
 );
+
+/// Whether a peer reads a column's maximum as "no data for this row"
+/// (windows.capnp 2.1); an older one would show it as a count.
+pub fn takes_gaps(peer: Option<Version>) -> bool {
+    peer.is_some_and(|v| (v.major, v.minor) >= (2, 1))
+}
 
 #[cfg(test)]
 mod tests {
@@ -268,6 +274,21 @@ mod tests {
         encode::service_status(&sent, message.init_root::<service_status::Builder>());
         let reader = message.get_root_as_reader::<service_status::Reader>().unwrap();
         assert_eq!(decode::service_status(reader), sent);
+    }
+
+    #[test]
+    fn only_a_2_1_peer_takes_gaps() {
+        let v = |major, minor| {
+            Some(ogurpchik::auth::handshake::Version {
+                major,
+                minor,
+                patch: 0,
+            })
+        };
+        assert!(!super::takes_gaps(None));
+        assert!(!super::takes_gaps(v(2, 0)));
+        assert!(super::takes_gaps(v(2, 1)));
+        assert!(super::takes_gaps(v(3, 0)));
     }
 
     #[test]

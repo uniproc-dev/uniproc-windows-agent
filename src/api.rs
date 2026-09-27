@@ -3,7 +3,7 @@ use std::sync::Arc;
 pub use uniproc_windows_core::{
     Architecture, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
     MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineSample,
-    MetricSpec, Mitigations, ProcessMetric, ProcessMetrics, ProcessPriority, ProcessState,
+    MetricSpec, Mitigations, NO_DATA_U32, NO_DATA_U64, ProcessMetric, ProcessMetrics, ProcessPriority, ProcessState,
     Sample, SignatureStatus, StackProtection, Tagged, UacVirtualization,
 };
 

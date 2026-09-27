@@ -23,11 +23,12 @@ pub async fn run(agent: Arc<Local>) -> Result<()> {
     let attached = Rc::new(Cell::new(0usize));
 
     loop {
+        let peer = Rc::new(Cell::new(None));
         let session = match accept_session::<windows_agent::Client, _>(
             &listener,
             &HandshakeMode::version_only(),
             PROTOCOL,
-            AgentImpl::new(agent.clone()),
+            AgentImpl::new(agent.clone(), peer.clone()),
         )
         .await
         {
@@ -37,6 +38,7 @@ pub async fn run(agent: Arc<Local>) -> Result<()> {
                 continue;
             }
         };
+        peer.set(session.peer_version());
         attached.set(attached.get() + 1);
         agent.set_attached(true);
 
