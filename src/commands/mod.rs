@@ -1,13 +1,10 @@
 pub mod process;
 
-use std::collections::HashSet;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossbeam_channel::Sender;
 use futures::channel::oneshot;
-use parking_lot::Mutex;
+use uniproc_agent_kit::{Busy, Runner};
 
 use crate::api::{Command, CommandResult};
 use crate::scm::{self, ScHandle, Scm, ServiceAction, Watching};
@@ -43,84 +40,39 @@ fn target(command: &Command) -> Target {
     }
 }
 
-type Job = Box<dyn FnOnce() + Send>;
-
 /// Where commands run: worker threads of its own, one command at a time
 /// for any one process or service. Cheap to clone.
 #[derive(Clone)]
 pub struct Commands {
+    runner: Runner<Target>,
     shared: Arc<Shared>,
 }
 
 struct Shared {
-    jobs: Sender<Job>,
-    busy: Mutex<HashSet<Target>>,
     scm: Scm,
     watching: Watching,
 }
 
 impl Commands {
     pub fn start(scm: Scm, watching: Watching) -> std::io::Result<Self> {
-        let (jobs, queue) = crossbeam_channel::unbounded::<Job>();
-        for worker in 0..WORKERS {
-            let queue = queue.clone();
-            std::thread::Builder::new()
-                .name(format!("command-{worker}"))
-                .spawn(move || {
-                    for job in queue {
-                        let _ = std::panic::catch_unwind(AssertUnwindSafe(job));
-                    }
-                })?;
-        }
         Ok(Self {
-            shared: Arc::new(Shared {
-                jobs,
-                busy: Mutex::default(),
-                scm,
-                watching,
-            }),
+            runner: Runner::start("command", WORKERS)?,
+            shared: Arc::new(Shared { scm, watching }),
         })
     }
 
     /// Answers `ERROR_BUSY` at once while another command runs for the same
     /// process or service. The answer fails only if the command panicked.
     pub fn run(&self, command: Command) -> oneshot::Receiver<CommandResult> {
-        self.submit(target(&command), move |shared| shared.execute(command))
-    }
-
-    fn submit(
-        &self,
-        target: Target,
-        work: impl FnOnce(&Shared) -> CommandResult + Send + 'static,
-    ) -> oneshot::Receiver<CommandResult> {
-        let (tx, rx) = oneshot::channel();
-        if !self.shared.busy.lock().insert(target.clone()) {
-            let _ = tx.send(Err(ERROR_BUSY));
-            return rx;
-        }
         let shared = self.shared.clone();
-        let job: Job = Box::new(move || {
-            let free = Free {
-                shared: shared.clone(),
-                target,
-            };
-            let result = work(&shared);
-            drop(free);
-            let _ = tx.send(result);
-        });
-        let _ = self.shared.jobs.send(job);
-        rx
-    }
-}
-
-struct Free {
-    shared: Arc<Shared>,
-    target: Target,
-}
-
-impl Drop for Free {
-    fn drop(&mut self) {
-        self.shared.busy.lock().remove(&self.target);
+        match self.runner.run(target(&command), move || shared.execute(command)) {
+            Ok(answer) => answer,
+            Err(Busy) => {
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(Err(ERROR_BUSY));
+                rx
+            }
+        }
     }
 }
 
@@ -166,54 +118,6 @@ mod tests {
 
     fn answer(rx: oneshot::Receiver<CommandResult>) -> CommandResult {
         futures::executor::block_on(rx).expect("answered")
-    }
-
-    #[test]
-    fn a_second_command_for_the_same_target_is_busy_until_the_first_is_done() {
-        let (commands, _watcher) = commands();
-        let (release, released) = crossbeam_channel::bounded::<()>(0);
-        let first = commands.submit(Target::Process(1), move |_| {
-            let _ = released.recv();
-            Ok(())
-        });
-
-        let again = commands.submit(Target::Process(1), |_| Ok(()));
-        assert_eq!(answer(again), Err(ERROR_BUSY));
-
-        let other = commands.submit(Target::Process(2), |_| Ok(()));
-        assert_eq!(answer(other), Ok(()), "another process is not held up");
-
-        release.send(()).unwrap();
-        assert_eq!(answer(first), Ok(()));
-        let after = commands.submit(Target::Process(1), |_| Ok(()));
-        assert_eq!(answer(after), Ok(()));
-    }
-
-    #[test]
-    fn a_long_command_does_not_hold_up_the_rest() {
-        let (commands, _watcher) = commands();
-        let (release, released) = crossbeam_channel::bounded::<()>(0);
-        let long = commands.submit(Target::Service("slow".into()), move |_| {
-            let _ = released.recv();
-            Ok(())
-        });
-        for pid in 0..(WORKERS as u32 * 2) {
-            let quick = commands.submit(Target::Process(pid), |_| Ok(()));
-            assert_eq!(answer(quick), Ok(()));
-        }
-        release.send(()).unwrap();
-        assert_eq!(answer(long), Ok(()));
-    }
-
-    #[test]
-    fn a_command_that_panics_frees_its_target_and_its_worker() {
-        let (commands, _watcher) = commands();
-        for _ in 0..(WORKERS * 2) {
-            let panicked = commands.submit(Target::Process(7), |_| panic!("boom"));
-            assert!(futures::executor::block_on(panicked).is_err());
-        }
-        let after = commands.submit(Target::Process(7), |_| Ok(()));
-        assert_eq!(answer(after), Ok(()));
     }
 
     #[test]

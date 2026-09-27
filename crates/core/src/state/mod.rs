@@ -3,7 +3,7 @@ pub mod process;
 
 use crate::state::events::{MachineSnapshot, StateChange};
 use crate::state::process::{ProcessEntry, ProcessTable};
-use crate::tag::Epoch;
+use uniproc_agent_kit::Epoch;
 
 /// Machine-wide cumulative counters. Monotonic by construction: they only
 /// accumulate ETW events and are not affected by process exits.

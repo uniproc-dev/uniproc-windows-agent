@@ -1,17 +1,12 @@
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::ffi::c_void;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender};
-use futures::Stream;
-use futures::channel::mpsc;
+use uniproc_agent_kit::{Board, Following, Hold, Watch};
 use windows::Win32::{
     CloseHandle, CreateEventW, ERROR_SERVICE_NOTIFY_CLIENT_LAGGING, ERROR_SUCCESS, HANDLE,
     INFINITE, NotifyServiceStatusChangeW, SERVICE_NOTIFY_2W, SERVICE_NOTIFY_CONTINUE_PENDING,
@@ -49,22 +44,11 @@ fn bit(state: ServiceState) -> i32 {
     }
 }
 
-enum Request {
-    Watch {
-        name: String,
-        id: u64,
-        tx: mpsc::UnboundedSender<ServiceStatus>,
-    },
-    Hold {
-        name: String,
-        id: u64,
-        until: Instant,
-    },
-    Release {
-        name: String,
-        id: u64,
-    },
-}
+/// A service's status: the current one first, then every change. Ends
+/// when the service is deleted, cannot be opened, or monitoring stops.
+pub type ServiceWatch = Watch<ServiceStatus>;
+
+type Services = Board<String, ServiceStatus>;
 
 struct Event(HANDLE);
 
@@ -92,22 +76,21 @@ impl Drop for Event {
 }
 
 struct Shared {
-    requests: Sender<Request>,
     wake: Event,
     stop: AtomicBool,
-    next_id: AtomicU64,
 }
 
 /// Follows the services someone asks about, as the SCM reports their
 /// changes, and hands every change to `publish`. Stops when dropped.
 pub struct Watcher {
     shared: Arc<Shared>,
+    following: Following<String, ServiceStatus>,
     thread: Option<JoinHandle<()>>,
 }
 
 /// Asks the watcher to follow a service; cheap to clone.
 #[derive(Clone)]
-pub struct Watching(Arc<Shared>);
+pub struct Watching(Following<String, ServiceStatus>);
 
 impl Watcher {
     /// `publish` gets each followed service's status as it changes, and None once it is no longer followed.
@@ -115,25 +98,27 @@ impl Watcher {
         scm: Scm,
         publish: impl FnMut(&str, Option<&ServiceStatus>) + Send + 'static,
     ) -> std::io::Result<Self> {
-        let (requests, queue) = crossbeam_channel::unbounded();
         let shared = Arc::new(Shared {
-            requests,
             wake: Event::new()?,
             stop: AtomicBool::new(false),
-            next_id: AtomicU64::new(0),
+        });
+        let (following, services) = uniproc_agent_kit::board({
+            let shared = shared.clone();
+            move || shared.wake.set()
         });
         let thread = std::thread::Builder::new().name("service-watch".into()).spawn({
             let shared = shared.clone();
-            move || run(scm, &shared, queue, publish)
+            move || run(scm, &shared, services, publish)
         })?;
         Ok(Self {
             shared,
+            following,
             thread: Some(thread),
         })
     }
 
     pub fn watching(&self) -> Watching {
-        Watching(self.shared.clone())
+        Watching(self.following.clone())
     }
 }
 
@@ -150,91 +135,12 @@ impl Drop for Watcher {
 impl Watching {
     /// The service's status now, then every change until the stream is dropped.
     pub fn watch(&self, name: &str) -> ServiceWatch {
-        let (tx, rx) = mpsc::unbounded();
-        let id = self.send(|id| Request::Watch {
-            name: name.to_string(),
-            id,
-            tx,
-        });
-        ServiceWatch {
-            rx,
-            _release: self.release(name, id),
-        }
+        self.0.watch(name.to_string())
     }
 
     /// Follows the service for at most `span`, or until the hold is dropped without [`Hold::keep`].
     pub fn hold(&self, name: &str, span: Duration) -> Hold {
-        let until = Instant::now() + span;
-        let id = self.send(|id| Request::Hold {
-            name: name.to_string(),
-            id,
-            until,
-        });
-        Hold(self.release(name, id))
-    }
-
-    fn send(&self, request: impl FnOnce(u64) -> Request) -> u64 {
-        let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
-        if self.0.requests.send(request(id)).is_ok() {
-            self.0.wake.set();
-        }
-        id
-    }
-
-    fn release(&self, name: &str, id: u64) -> Release {
-        Release {
-            shared: self.0.clone(),
-            name: name.to_string(),
-            id,
-            armed: true,
-        }
-    }
-}
-
-struct Release {
-    shared: Arc<Shared>,
-    name: String,
-    id: u64,
-    armed: bool,
-}
-
-impl Drop for Release {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let request = Request::Release {
-            name: std::mem::take(&mut self.name),
-            id: self.id,
-        };
-        if self.shared.requests.send(request).is_ok() {
-            self.shared.wake.set();
-        }
-    }
-}
-
-/// A service's status: the current one first, then every change. Ends
-/// when the service is deleted, cannot be opened, or monitoring stops.
-pub struct ServiceWatch {
-    rx: mpsc::UnboundedReceiver<ServiceStatus>,
-    _release: Release,
-}
-
-impl Stream for ServiceWatch {
-    type Item = ServiceStatus;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<ServiceStatus>> {
-        Pin::new(&mut self.rx).poll_next(cx)
-    }
-}
-
-/// Keeps a service followed while a command on it runs, and after it with [`keep`](Self::keep).
-pub struct Hold(Release);
-
-impl Hold {
-    /// Leaves the service followed until the hold's span ends.
-    pub fn keep(mut self) {
-        self.0.armed = false;
+        self.0.hold(name.to_string(), span)
     }
 }
 
@@ -242,9 +148,6 @@ struct Watched {
     service: Option<Service>,
     notify: Box<SERVICE_NOTIFY_2W>,
     fired: Box<Cell<bool>>,
-    last: Option<ServiceStatus>,
-    watchers: HashMap<u64, mpsc::UnboundedSender<ServiceStatus>>,
-    holds: HashMap<u64, Instant>,
 }
 
 unsafe extern "system" fn notified(parameter: *const c_void) {
@@ -259,28 +162,24 @@ impl Watched {
             service: None,
             notify: Box::default(),
             fired: Box::new(Cell::new(false)),
-            last: None,
-            watchers: HashMap::new(),
-            holds: HashMap::new(),
         };
-        watched.reopen(scm, name);
+        watched.connect(scm, name);
         watched.service.is_some().then_some(watched)
     }
 
-    fn reopen(&mut self, scm: &Scm, name: &str) {
+    fn connect(&mut self, scm: &Scm, name: &str) {
         self.service = scm
             .connection()
             .ok()
             .and_then(|c| Service::open(c.handle(), name, SERVICE_QUERY_STATUS).ok());
-        self.last = None;
-        self.arm();
+        self.arm(None);
     }
 
-    fn arm(&mut self) {
+    fn arm(&mut self, last: Option<&ServiceStatus>) {
         let Some(service) = &self.service else {
             return;
         };
-        let mask = (EVERY_STATE & !self.last.map_or(0, |s| bit(s.state))) | SERVICE_NOTIFY_DELETE_PENDING;
+        let mask = (EVERY_STATE & !last.map_or(0, |s| bit(s.state))) | SERVICE_NOTIFY_DELETE_PENDING;
         *self.notify = SERVICE_NOTIFY_2W {
             dwVersion: SERVICE_NOTIFY_STATUS_CHANGE as u32,
             pfnNotifyCallback: Some(notified),
@@ -293,10 +192,17 @@ impl Watched {
         }
     }
 
-    fn notified(&mut self, scm: &Scm, name: &str, publish: &mut impl FnMut(&str, Option<&ServiceStatus>)) {
+    fn notified(
+        &mut self,
+        scm: &Scm,
+        name: &String,
+        services: &mut Services,
+        publish: &mut impl FnMut(&str, Option<&ServiceStatus>),
+    ) {
         let code = self.notify.dwNotificationStatus;
         if code == ERROR_SERVICE_NOTIFY_CLIENT_LAGGING as u32 {
-            self.reopen(scm, name);
+            services.forget(name);
+            self.connect(scm, name);
             return;
         }
         if code != ERROR_SUCCESS as u32
@@ -305,38 +211,38 @@ impl Watched {
             self.service = None;
             return;
         }
-        self.dispatch(name, status(&self.notify.ServiceStatus), publish);
-        self.arm();
+        dispatch(name, status(&self.notify.ServiceStatus), services, publish);
+        self.arm(services.last(name));
     }
 
-    fn poll(&mut self, name: &str, publish: &mut impl FnMut(&str, Option<&ServiceStatus>)) {
+    fn poll(&mut self, name: &String, services: &mut Services, publish: &mut impl FnMut(&str, Option<&ServiceStatus>)) {
         if let Some(status) = self.service.as_ref().and_then(Service::status) {
-            self.dispatch(name, status, publish);
+            dispatch(name, status, services, publish);
         }
     }
+}
 
-    fn dispatch(&mut self, name: &str, status: ServiceStatus, publish: &mut impl FnMut(&str, Option<&ServiceStatus>)) {
-        if self.last == Some(status) {
-            return;
-        }
-        self.last = Some(status);
-        publish(name, Some(&status));
-        self.watchers.retain(|_, tx| tx.unbounded_send(status).is_ok());
+fn dispatch(
+    name: &String,
+    status: ServiceStatus,
+    services: &mut Services,
+    publish: &mut impl FnMut(&str, Option<&ServiceStatus>),
+) {
+    if services.last(name) == Some(&status) {
+        return;
     }
+    publish(name, Some(&status));
+    services.publish(name, status);
+}
 
-    fn is_pending(&self) -> bool {
-        self.last.is_some_and(|s| s.state.is_pending())
-    }
-
-    fn is_done(&self) -> bool {
-        self.service.is_none() || (self.watchers.is_empty() && self.holds.is_empty())
-    }
+fn is_pending(services: &Services, name: &String) -> bool {
+    services.last(name).is_some_and(|s| s.state.is_pending())
 }
 
 fn run(
     scm: Scm,
     shared: &Shared,
-    queue: Receiver<Request>,
+    mut services: Services,
     mut publish: impl FnMut(&str, Option<&ServiceStatus>),
 ) {
     let mut watched: HashMap<String, Watched> = HashMap::new();
@@ -344,41 +250,45 @@ fn run(
     let mut next_poll = Instant::now();
 
     loop {
-        let wait = timeout(&watched, next_poll);
+        let wait = timeout(&watched, &services, next_poll);
         unsafe { WaitForSingleObjectEx(shared.wake.0, wait, true) };
         if shared.stop.load(Ordering::SeqCst) {
             break;
         }
 
-        for request in queue.try_iter() {
-            apply(&scm, &mut watched, request);
-        }
+        services.take_requests(|name| match Watched::open(&scm, name) {
+            Some(w) => {
+                watched.insert(name.clone(), w);
+                true
+            }
+            None => false,
+        });
 
         for (name, w) in &mut watched {
             if w.fired.replace(false) {
-                w.notified(&scm, name, &mut publish);
+                w.notified(&scm, name, &mut services, &mut publish);
             }
         }
 
         let now = Instant::now();
-        if now >= next_poll && watched.values().any(Watched::is_pending) {
+        if now >= next_poll && watched.keys().any(|name| is_pending(&services, name)) {
             for (name, w) in &mut watched {
-                if w.is_pending() {
-                    w.poll(name, &mut publish);
+                if is_pending(&services, name) {
+                    w.poll(name, &mut services, &mut publish);
                 }
             }
             next_poll = now + POLL_WHILE_PENDING;
         }
 
-        for w in watched.values_mut() {
-            w.holds.retain(|_, until| *until > now);
-        }
-
-        let done: Vec<String> = watched
+        let gone: Vec<String> = watched
             .iter()
-            .filter(|(_, w)| w.is_done())
+            .filter(|(_, w)| w.service.is_none())
             .map(|(name, _)| name.clone())
             .collect();
+        for name in &gone {
+            services.end(name);
+        }
+        let done = gone.into_iter().chain(services.sweep(now));
         for name in done {
             if let Some(mut w) = watched.remove(&name) {
                 w.service.take();
@@ -398,47 +308,15 @@ fn run(
     unsafe { SleepEx(0, true) };
 }
 
-fn apply(scm: &Scm, watched: &mut HashMap<String, Watched>, request: Request) {
-    match request {
-        Request::Watch { name, id, tx } => {
-            if let Some(w) = follow(scm, watched, name) {
-                if let Some(status) = w.last {
-                    let _ = tx.unbounded_send(status);
-                }
-                w.watchers.insert(id, tx);
-            }
-        }
-        Request::Hold { name, id, until } => {
-            if let Some(w) = follow(scm, watched, name) {
-                w.holds.insert(id, until);
-            }
-        }
-        Request::Release { name, id } => {
-            if let Some(w) = watched.get_mut(&name) {
-                w.watchers.remove(&id);
-                w.holds.remove(&id);
-            }
-        }
-    }
-}
-
-fn follow<'a>(scm: &Scm, watched: &'a mut HashMap<String, Watched>, name: String) -> Option<&'a mut Watched> {
-    match watched.entry(name) {
-        Entry::Occupied(entry) => Some(entry.into_mut()),
-        Entry::Vacant(entry) => {
-            let w = Watched::open(scm, entry.key())?;
-            Some(entry.insert(w))
-        }
-    }
-}
-
-fn timeout(watched: &HashMap<String, Watched>, next_poll: Instant) -> u32 {
+fn timeout(watched: &HashMap<String, Watched>, services: &Services, next_poll: Instant) -> u32 {
     if watched.values().any(|w| w.fired.get()) {
         return 0;
     }
-    let polls = watched.values().any(Watched::is_pending).then_some(next_poll);
-    let holds = watched.values().flat_map(|w| w.holds.values().copied());
-    match polls.into_iter().chain(holds).min() {
+    let polls = watched
+        .keys()
+        .any(|name| is_pending(services, name))
+        .then_some(next_poll);
+    match polls.into_iter().chain(services.next_deadline()).min() {
         None => INFINITE,
         Some(at) => at.saturating_duration_since(Instant::now()).as_millis() as u32,
     }
@@ -447,6 +325,7 @@ fn timeout(watched: &HashMap<String, Watched>, next_poll: Instant) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossbeam_channel::Receiver;
     use futures::StreamExt;
 
     fn next(watch: &mut ServiceWatch) -> Option<ServiceStatus> {

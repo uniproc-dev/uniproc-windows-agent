@@ -10,7 +10,6 @@ mod settings;
 mod sink;
 mod state;
 mod supervisor;
-mod tag;
 mod win;
 
 pub use report::{
@@ -18,4 +17,4 @@ pub use report::{
 };
 pub use settings::CollectorSettings;
 pub use supervisor::{Supervisor, SupervisorConfig};
-pub use tag::{Epoch, Tagged};
+pub use uniproc_agent_kit::{Epoch, Tagged};

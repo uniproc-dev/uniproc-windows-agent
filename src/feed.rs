@@ -3,9 +3,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
-use uniproc_windows_core::{
-    Epoch, MachineStats, Process, Report, Samples, SessionHealth, Tagged,
-};
+use uniproc_agent_kit::Versioned;
+use uniproc_windows_core::{Epoch, MachineStats, Process, Report, Samples, SessionHealth};
 
 use crate::api::{ProcessInfo, ServiceState, ServiceStats, ServiceStatus, Snapshot};
 
@@ -30,13 +29,10 @@ pub struct Feed {
 }
 
 struct Join {
-    epoch: Epoch,
     report: Option<Arc<Report>>,
     service_pids: HashSet<u32>,
-    processes_generation: u32,
-    processes: Tagged<Arc<[ProcessInfo]>>,
-    services_generation: u32,
-    services: Tagged<Arc<[ServiceStats]>>,
+    processes: Versioned<Arc<[ProcessInfo]>>,
+    services: Versioned<Arc<[ServiceStats]>>,
     followed: HashMap<String, (ServiceState, u32)>,
 }
 
@@ -79,19 +75,10 @@ impl Join {
     fn new() -> Self {
         let epoch = Epoch::new();
         Self {
-            epoch,
             report: None,
             service_pids: HashSet::new(),
-            processes_generation: 0,
-            processes: Tagged {
-                etag: epoch.tag(0),
-                value: Arc::from([]),
-            },
-            services_generation: 0,
-            services: Tagged {
-                etag: epoch.tag(0),
-                value: Arc::from([]),
-            },
+            processes: Versioned::new(epoch, Arc::from([])),
+            services: Versioned::new(epoch, Arc::from([])),
             followed: HashMap::new(),
         }
     }
@@ -113,7 +100,7 @@ impl Join {
             return;
         };
         self.followed.insert(name.to_string(), (status.state, status.pid));
-        self.services(self.services.value.to_vec());
+        self.services(self.services.get().value.to_vec());
     }
 
     fn services(&mut self, mut services: Vec<ServiceStats>) {
@@ -123,15 +110,10 @@ impl Join {
                 service.pid = pid;
             }
         }
-        if *self.services.value != *services {
-            self.services_generation = self.services_generation.wrapping_add(1);
-            self.services = Tagged {
-                etag: self.epoch.tag(self.services_generation),
-                value: services.into(),
-            };
-        }
+        self.services.set(services.into());
         let pids: HashSet<u32> = self
             .services
+            .get()
             .value
             .iter()
             .map(|s| s.pid)
@@ -149,11 +131,7 @@ impl Join {
             .iter()
             .map(|p| info(p, self.service_pids.contains(&p.pid)))
             .collect();
-        self.processes_generation = self.processes_generation.wrapping_add(1);
-        self.processes = Tagged {
-            etag: self.epoch.tag(self.processes_generation),
-            value,
-        };
+        self.processes.replace(value);
     }
 
     fn publish(&self) -> Published {
@@ -161,8 +139,8 @@ impl Join {
         Published {
             snapshot: Snapshot {
                 machine: report.map_or_else(MachineStats::default, |r| r.machine.clone()),
-                services: self.services.clone(),
-                processes: self.processes.clone(),
+                services: self.services.get().clone(),
+                processes: self.processes.get().clone(),
                 metrics: report.map_or_else(Vec::new, |r| r.metrics.clone()),
             },
             samples: report.map_or_else(Samples::default, |r| r.samples),
@@ -195,7 +173,7 @@ fn info(p: &Process, is_service: bool) -> ProcessInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uniproc_windows_core::ProcessMetrics;
+    use uniproc_windows_core::{ProcessMetrics, Tagged};
 
     fn report(etag: u64, pids: &[u32]) -> Arc<Report> {
         Arc::new(Report {

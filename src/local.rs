@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use parking_lot::Mutex;
-use uniproc_windows_core::{CollectorSettings, SupervisorConfig};
+use uniproc_agent_kit::{Cadence, Monitor};
+use uniproc_windows_core::{CollectorSettings, Supervisor, SupervisorConfig};
 
 use crate::api::{
     Command, CommandResult, MachineStats, ProcessInfo, ProcessMetricsSnapshot, ServiceStats,
@@ -13,7 +14,6 @@ use crate::api::{
 };
 use crate::commands::Commands;
 use crate::feed::Feed;
-use crate::monitor::Monitor;
 use crate::profile;
 use crate::scm::{Inventory, Scm, Watcher, Watching};
 
@@ -87,10 +87,22 @@ impl Local {
     fn launch(config: SupervisorConfig) -> anyhow::Result<Self> {
         let feed = Arc::new(Feed::new());
         let settings = CollectorSettings::default();
-        let monitor = Monitor::start(config, settings.clone(), {
-            let feed = feed.clone();
-            move |report| feed.report(report)
-        })?;
+        let monitor = Monitor::start(
+            "core",
+            Cadence::default(),
+            {
+                let settings = settings.clone();
+                move || {
+                    let mut supervisor = Supervisor::new(config, settings);
+                    supervisor.start()?;
+                    Ok(move || supervisor.tick())
+                }
+            },
+            {
+                let feed = feed.clone();
+                move |report| feed.report(report)
+            },
+        )?;
         let scm = Scm::new();
         let inventory = Inventory::start(scm.clone(), {
             let feed = feed.clone();

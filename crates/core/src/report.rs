@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::state::SystemState;
 use crate::state::events::ProcessSignature;
-use crate::tag::Tagged;
+use uniproc_agent_kit::Tagged;
 
 /// What the state held at one tick. Never changes once built.
 #[derive(Clone, Debug)]

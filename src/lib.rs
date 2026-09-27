@@ -9,7 +9,6 @@ pub mod wire;
 
 mod commands;
 mod feed;
-mod monitor;
 mod privileges;
 mod profile;
 mod scm;

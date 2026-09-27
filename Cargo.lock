@@ -2246,6 +2246,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "uniproc-agent-kit"
+version = "0.1.0"
+source = "git+https://github.com/uniproc-dev/uniproc-agent-kit?tag=v0.1.0#1982d5dfaccb87a7bab803fa241c1769e8eb96ba"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "futures-channel",
+ "futures-core",
+ "getrandom 0.3.4",
+]
+
+[[package]]
 name = "uniproc-protocol"
 version = "0.10.0"
 source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.10.0#031769efeccbb25518f39f86ec8a7f8997eef51e"
@@ -2269,6 +2281,7 @@ dependencies = [
  "ogurpchik",
  "parking_lot",
  "tracing",
+ "uniproc-agent-kit",
  "uniproc-protocol",
  "uniproc-windows-core",
  "windows",
@@ -2284,13 +2297,13 @@ dependencies = [
  "crossbeam-channel",
  "dashmap",
  "fxhash",
- "getrandom 0.3.4",
  "ntapi",
  "parking_lot",
  "roxmltree",
  "serde",
  "tracing",
  "tracing-subscriber",
+ "uniproc-agent-kit",
  "windows",
 ]
 
