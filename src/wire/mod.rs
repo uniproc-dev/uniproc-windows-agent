@@ -3,6 +3,17 @@
 pub mod decode;
 pub mod encode;
 
+use ogurpchik::auth::handshake::Protocol;
+use uniproc_protocol::WINDOWS_PROTOCOL;
+
+/// What both ends of the service's pipe present in the handshake: the windows schema's id and version.
+pub const PROTOCOL: Protocol = Protocol::new(
+    WINDOWS_PROTOCOL.id,
+    WINDOWS_PROTOCOL.major,
+    WINDOWS_PROTOCOL.minor,
+    WINDOWS_PROTOCOL.patch,
+);
+
 #[cfg(test)]
 mod tests {
     use uniproc_protocol::windows_capnp::{machine_stats, service_status, windows_agent};

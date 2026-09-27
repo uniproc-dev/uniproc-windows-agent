@@ -9,17 +9,17 @@ use anyhow::{Result, anyhow, bail};
 use capnp::capability::Response;
 use futures::channel::{mpsc, oneshot};
 use futures::{Stream, StreamExt};
-use ogurpchik::auth::handshake::{HandshakeMode, SchemaId, authenticate_client};
+use ogurpchik::auth::handshake::{HandshakeMode, authenticate_client};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::{RpcSession, Side, spawn_session};
 use uniproc_protocol::meta_capnp::{ResponseStatus, response_meta};
 use uniproc_protocol::windows_capnp::{service_watcher, windows_agent};
-use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE, WINDOWS_SCHEMA_ID};
+use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
 
 use crate::api::{
     Command, CommandResult, ProcessInfo, ServiceStats, ServiceStatus, Snapshot, Tagged,
 };
-use crate::wire::{decode, encode};
+use crate::wire::{PROTOCOL, decode, encode};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
 const JOIN_ATTEMPTS: usize = 3;
@@ -286,7 +286,7 @@ impl Session {
             .connect_ready(give_up_after)
             .await
             .map_err(|e| anyhow!("{e:?}"))?;
-        authenticate_client(&mut conn, &HandshakeMode::version_only(), SchemaId(WINDOWS_SCHEMA_ID))
+        authenticate_client(&mut conn, &HandshakeMode::version_only(), PROTOCOL)
             .await
             .map_err(|e| anyhow!("{e:?}"))?;
         Ok(Self {

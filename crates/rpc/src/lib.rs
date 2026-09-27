@@ -5,12 +5,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
-use ogurpchik::auth::handshake::{HandshakeMode, SchemaId};
+use ogurpchik::auth::handshake::HandshakeMode;
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::accept_session;
 use uniproc_protocol::windows_capnp::windows_agent;
-use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE, WINDOWS_SCHEMA_ID};
+use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
 use uniproc_windows_agent::local::{ATTACHED_MEMORY_INTERVAL, IDLE_MEMORY_INTERVAL, Local};
+use uniproc_windows_agent::wire::PROTOCOL;
 
 use crate::handler::AgentImpl;
 
@@ -25,7 +26,7 @@ pub async fn run(agent: Arc<Local>) -> Result<()> {
         let session = match accept_session::<windows_agent::Client, _>(
             &listener,
             &HandshakeMode::version_only(),
-            SchemaId(WINDOWS_SCHEMA_ID),
+            PROTOCOL,
             AgentImpl::new(agent.clone()),
         )
         .await

@@ -4,11 +4,12 @@
 
 use std::time::Duration;
 
-use ogurpchik::auth::handshake::{HandshakeMode, SchemaId};
+use ogurpchik::auth::handshake::HandshakeMode;
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::{RpcSession, connect_session};
 use uniproc_protocol::windows_capnp::windows_agent;
-use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE, WINDOWS_SCHEMA_ID};
+use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
+use uniproc_windows_agent::wire::PROTOCOL;
 
 struct ClientStub;
 impl windows_agent::Server for ClientStub {}
@@ -27,7 +28,7 @@ async fn connect() -> Result<RpcSession<windows_agent::Client>, Box<dyn std::err
         connect_session::<windows_agent::Client, _>(
             &endpoint,
             &HandshakeMode::version_only(),
-            SchemaId(WINDOWS_SCHEMA_ID),
+            PROTOCOL,
             ClientStub,
         ),
     )

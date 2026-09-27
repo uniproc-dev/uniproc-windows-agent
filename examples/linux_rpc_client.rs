@@ -5,11 +5,11 @@
 //! getReport. The WSL guest can only *listen* on vsock, so the host is always
 //! the connecting side.
 
-use ogurpchik::auth::handshake::{HandshakeMode, SchemaId};
+use ogurpchik::auth::handshake::{HandshakeMode, Protocol};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::connect_session;
 use uniproc_protocol::linux_capnp::linux_agent;
-use uniproc_protocol::{LINUX_SCHEMA_ID, WSL_AGENT_VSOCK_PORT};
+use uniproc_protocol::{LINUX_PROTOCOL, WSL_AGENT_VSOCK_PORT};
 
 struct ClientStub;
 impl linux_agent::Server for ClientStub {}
@@ -24,7 +24,12 @@ async fn run() -> anyhow::Result<()> {
     let session = connect_session::<linux_agent::Client, _>(
         &endpoint,
         &HandshakeMode::version_only(),
-        SchemaId(LINUX_SCHEMA_ID),
+        Protocol::new(
+            LINUX_PROTOCOL.id,
+            LINUX_PROTOCOL.major,
+            LINUX_PROTOCOL.minor,
+            LINUX_PROTOCOL.patch,
+        ),
         ClientStub,
     )
     .await
