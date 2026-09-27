@@ -44,5 +44,18 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The restart test restarts UNIPROC_TEST_SERVICE, by default the
+      # agent's own service, which the runner does not have. The runner is
+      # thrown away afterwards, so the print spooler, a service in a process
+      # of its own, stands in for it.
+      - name: Start the service the restart test restarts
+        shell: pwsh
+        run: |
+          Set-Service -Name Spooler -StartupType Manual
+          Start-Service -Name Spooler
+          Get-Service -Name Spooler
+
       - name: Test against live ETW
+        env:
+          UNIPROC_TEST_SERVICE: Spooler
         run: cargo test --workspace -- --ignored --test-threads=1
