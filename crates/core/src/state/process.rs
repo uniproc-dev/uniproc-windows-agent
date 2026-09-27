@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use fxhash::FxHashMap;
 
 use crate::state::events::{MemorySnapshot, ProcessStarted, ProcessSignature, StateChange};
@@ -33,7 +35,7 @@ pub struct ProcessEntry {
     /// Resolved by the enrichment pass; empty until then, and empty for
     /// anything whose name could not be resolved at all.
     pub display_name: String,
-    pub command_line: Vec<String>,
+    pub command_line: Arc<[String]>,
     pub package_name: String,
     pub package_relative_app_id: String,
 
@@ -58,7 +60,7 @@ impl From<&ProcessStarted> for ProcessEntry {
             image_name: e.image_name.clone(),
             image_path: String::new(),
             display_name: String::new(),
-            command_line: e.command_line.clone(),
+            command_line: e.command_line.as_slice().into(),
             package_name: e.package_full_name.clone(),
             package_relative_app_id: e.package_relative_app_id.clone(),
             signature: ProcessSignature::Unknown,
@@ -83,7 +85,7 @@ impl From<ProcessStarted> for ProcessEntry {
             image_name: e.image_name,
             image_path: String::new(),
             display_name: String::new(),
-            command_line: e.command_line,
+            command_line: e.command_line.into(),
             package_name: e.package_full_name,
             package_relative_app_id: e.package_relative_app_id,
             signature: ProcessSignature::Unknown,
@@ -160,7 +162,7 @@ impl ProcessTable {
                     return;
                 };
                 let is_windows_process = entry.is_kernel_process || e.is_windows_process;
-                let changed = (!e.command_line.is_empty() && entry.command_line != e.command_line)
+                let changed = (!e.command_line.is_empty() && *entry.command_line != e.command_line)
                     || entry.image_path != e.image_path
                     || entry.display_name != e.display_name
                     || entry.signature != e.signature
@@ -170,7 +172,7 @@ impl ProcessTable {
                     return;
                 }
                 if !e.command_line.is_empty() {
-                    entry.command_line = e.command_line;
+                    entry.command_line = e.command_line.into();
                 }
                 entry.image_path = e.image_path;
                 entry.display_name = e.display_name;

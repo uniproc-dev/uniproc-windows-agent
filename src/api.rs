@@ -110,7 +110,8 @@ pub struct ProcessInfo {
     pub session_id: u32,
     /// Exactly what the OS reports; for matching and grouping.
     pub name: String,
-    pub cmdline: Vec<String>,
+    /// Shared with the core's report; cloning it copies no argument.
+    pub cmdline: Arc<[String]>,
     pub package_full_name: String,
     pub package_relative_app_id: String,
 

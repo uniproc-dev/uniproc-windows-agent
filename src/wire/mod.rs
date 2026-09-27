@@ -20,7 +20,7 @@ mod tests {
             parent_pid: 4,
             session_id: 1,
             name: "a.exe".into(),
-            cmdline: vec!["a.exe".into(), "--flag".into()],
+            cmdline: ["a.exe".into(), "--flag".into()].into(),
             package_full_name: "Pkg_1.0_x64__abc".into(),
             package_relative_app_id: "App".into(),
             is_service: true,

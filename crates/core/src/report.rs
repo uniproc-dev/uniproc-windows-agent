@@ -87,7 +87,8 @@ pub struct Process {
     pub session_id: u32,
     /// Exactly what the OS reports; for matching and grouping.
     pub name: String,
-    pub cmdline: Vec<String>,
+    /// Shared with the core's own entry; cloning it copies no argument.
+    pub cmdline: Arc<[String]>,
     pub package_full_name: String,
     pub package_relative_app_id: String,
 
@@ -266,7 +267,7 @@ mod tests {
         let p = &listed[0];
         assert_eq!((p.pid, p.parent_pid, p.session_id), (100, 4, 1));
         assert_eq!(p.name, "a.exe");
-        assert_eq!(p.cmdline, ["a.exe", "-x"]);
+        assert_eq!(*p.cmdline, ["a.exe", "-x"]);
     }
 
     #[test]
