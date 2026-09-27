@@ -45,7 +45,7 @@ pub const BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(1
 pub const SESSION_NAME_PREFIX: &str = "Uniproc-";
 
 // EVENT_TRACE_PROPERTIES tuning.
-pub const BUFFER_SIZE_KB: u32 = 64;
+pub const BUFFER_SIZE_KB: u32 = 16;
 pub const MINIMUM_BUFFERS: u32 = 1;
 pub const MAXIMUM_BUFFERS: u32 = 8;
 pub const FLUSH_TIMER_SEC: u32 = 1;
