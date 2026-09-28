@@ -124,24 +124,8 @@ pub fn run_direct() -> Result<()> {
             main_thread.unpark();
         })
         .ok();
-        let deadline = std::env::var("UNIPROC_STOP_AFTER_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(|secs| std::time::Instant::now() + Duration::from_secs(secs));
-        loop {
-            if stop.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            match deadline {
-                Some(d) => {
-                    let now = std::time::Instant::now();
-                    if now >= d {
-                        break;
-                    }
-                    std::thread::park_timeout(d - now);
-                }
-                None => std::thread::park(),
-            }
+        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::park();
         }
     })
 }
