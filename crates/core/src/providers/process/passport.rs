@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use smol_str::SmolStr;
+
 use windows::Win32::{
     AreDpiAwarenessContextsEqual, CloseHandle, DPI_AWARENESS_CONTEXT,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -39,7 +41,7 @@ const SHADOW_STACK_STRICT: u32 = 1 << 4;
 /// What [`probe`] could read; the rest stays unknown.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Passport {
-    pub user: String,
+    pub user: SmolStr,
     pub architecture: Architecture,
     pub elevated: Option<bool>,
     pub uac_virtualization: UacVirtualization,
@@ -58,14 +60,14 @@ impl Drop for Owned {
 
 /// `DOMAIN\name` per SID, looked up once.
 #[derive(Default)]
-pub struct SidNames(HashMap<Box<[u8]>, String>);
+pub struct SidNames(HashMap<Box<[u8]>, SmolStr>);
 
 impl SidNames {
-    fn name(&mut self, sid: &[u8]) -> String {
+    fn name(&mut self, sid: &[u8]) -> SmolStr {
         if let Some(name) = self.0.get(sid) {
             return name.clone();
         }
-        let name = lookup_account(sid).unwrap_or_default();
+        let name = SmolStr::from(lookup_account(sid).unwrap_or_default());
         self.0.insert(sid.into(), name.clone());
         name
     }

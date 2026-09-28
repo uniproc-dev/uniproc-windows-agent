@@ -1,5 +1,11 @@
-//! A read-only window into what the agent publishes, for people rather than clients.
-//! One thread with its own tokio runtime; it shares nothing with the capnp side but the feed.
+//! A window into what the agent publishes, for people rather than clients:
+//! it reads the feed and the agent's spans, and changes nothing but the log
+//! filter. One thread with its own tokio runtime; it shares nothing with the
+//! capnp side but the feed.
+
+mod telemetry;
+
+pub use telemetry::{Cost, Spans, Telemetry};
 
 use std::collections::HashMap;
 use std::io;
@@ -15,9 +21,10 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::EnvFilter;
 
 use uniproc_windows_agent::api::{
-    MachineMetrics, MachineSample, MetricSpec, ProcessMetric, ProcessState,
+    MachineMetrics, MachineSample, MetricSpec, ProcessMetric, ProcessState, SmolStr,
 };
 use uniproc_windows_agent::local::Local;
 
@@ -78,12 +85,12 @@ struct Row {
     pid: u32,
     parent_pid: u32,
     sequence_number: u64,
-    name: String,
-    display_name: String,
-    image_path: String,
+    name: SmolStr,
+    display_name: SmolStr,
+    image_path: SmolStr,
     cmdline_args: usize,
-    user: String,
-    publisher: String,
+    user: SmolStr,
+    publisher: SmolStr,
     architecture: String,
     elevated: Option<bool>,
     isolation: String,
@@ -129,7 +136,13 @@ const SHOWN: [ProcessMetric; 11] = [
 /// Nothing is sampled for nobody: a request subscribes for as long as it waits.
 const SAMPLE_WAIT: Duration = Duration::from_secs(3);
 
-async fn snapshot(State(agent): State<Arc<Local>>) -> Json<Snapshot> {
+struct App {
+    agent: Arc<Local>,
+    telemetry: Telemetry,
+}
+
+async fn snapshot(State(app): State<Arc<App>>) -> Json<Snapshot> {
+    let agent = &app.agent;
     let sampler = agent.subscribe(MetricSpec {
         interval: Duration::from_secs(1),
         processes: SHOWN.into_iter().collect(),
@@ -230,11 +243,13 @@ struct Health {
     report_age_ms: Option<u64>,
     dropped_by_sink: u64,
     sessions: Vec<Session>,
-    costs: Vec<Cost>,
+    snapshot_error: Option<String>,
+    costs: Vec<SpanCost>,
 }
 
+/// How long a span of the agent stays entered, over every time it ran.
 #[derive(Serialize)]
-struct Cost {
+struct SpanCost {
     name: &'static str,
     runs: u64,
     last_us: u64,
@@ -255,12 +270,13 @@ struct Session {
     free_buffers: u32,
 }
 
-async fn health(State(agent): State<Arc<Local>>) -> (StatusCode, Json<Health>) {
-    let latest = agent.latest();
+async fn health(State(app): State<Arc<App>>) -> (StatusCode, Json<Health>) {
+    let latest = app.agent.latest();
     let age = latest.reported_at.map(|at| at.elapsed());
     let ok = age.is_some_and(|age| age < STALE)
         && !latest.sessions.is_empty()
-        && latest.sessions.iter().all(|s| s.is_healthy());
+        && latest.sessions.iter().all(|s| s.is_healthy())
+        && latest.snapshot_error.is_none();
     let health = Health {
         ok,
         report_age_ms: age.map(|age| age.as_millis() as u64),
@@ -280,20 +296,46 @@ async fn health(State(agent): State<Arc<Local>>) -> (StatusCode, Json<Health>) {
                 free_buffers: s.free_buffers,
             })
             .collect(),
-        costs: latest
-            .costs
-            .iter()
-            .map(|c| Cost {
-                name: c.name,
-                runs: c.runs,
-                last_us: c.last.as_micros() as u64,
-                mean_us: c.mean.as_micros() as u64,
-                max_us: c.max.as_micros() as u64,
+        snapshot_error: latest.snapshot_error.clone(),
+        costs: app
+            .telemetry
+            .spans
+            .costs()
+            .into_iter()
+            .map(|(name, cost)| SpanCost {
+                name,
+                runs: cost.runs,
+                last_us: cost.last.as_micros() as u64,
+                mean_us: cost.mean.as_micros() as u64,
+                max_us: cost.max.as_micros() as u64,
             })
             .collect(),
     };
     let status = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (status, Json(health))
+}
+
+async fn log_filter(State(app): State<Arc<App>>) -> (StatusCode, String) {
+    match app.telemetry.filter.with_current(|filter| filter.to_string()) {
+        Ok(filter) => (StatusCode::OK, filter),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+/// Takes the body as `RUST_LOG` directives for the log from now on.
+async fn set_log_filter(State(app): State<Arc<App>>, directives: String) -> (StatusCode, String) {
+    let filter = match EnvFilter::try_new(directives.trim()) {
+        Ok(filter) => filter,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let shown = filter.to_string();
+    match app.telemetry.filter.reload(filter) {
+        Ok(()) => {
+            tracing::info!(filter = %shown, "the log filter changed");
+            (StatusCode::OK, shown)
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 fn token() -> io::Result<String> {
@@ -323,7 +365,7 @@ async fn authorized(expected: Arc<str>, request: Request, next: Next) -> Respons
     next.run(request).await
 }
 
-pub fn serve(agent: Arc<Local>) -> io::Result<Access> {
+pub fn serve(agent: Arc<Local>, telemetry: Telemetry) -> io::Result<Access> {
     let (listener, addr) = bind()?;
     listener.set_nonblocking(true)?;
 
@@ -337,10 +379,11 @@ pub fn serve(agent: Arc<Local>) -> io::Result<Access> {
     let app = axum::Router::new()
         .route("/state", get(snapshot))
         .route("/health", get(health))
+        .route("/log", get(log_filter).put(set_log_filter))
         .layer(axum::middleware::from_fn(move |request, next| {
             authorized(expected.clone(), request, next)
         }))
-        .with_state(agent);
+        .with_state(Arc::new(App { agent, telemetry }));
 
     std::thread::Builder::new()
         .name("agent-http".into())

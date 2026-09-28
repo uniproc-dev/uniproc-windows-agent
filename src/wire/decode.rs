@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,21 +8,22 @@ use uniproc_protocol::windows_capnp::{
     IoPriority as WireIoPriority, Isolation as WireIsolation, MachineMetric as WireMachineMetric,
     ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority, ServiceState as WireServiceState,
     SignatureStatus as WireSignature, StackProtection as WireStackProtection, Toggle,
-    UacVirtualization as WireUac, machine_sample, metric_spec, process_columns, process_info,
-    process_state, service_stats, service_status,
+    UacVirtualization as WireUac, lists_update, machine_sample, metric_spec, process_columns,
+    process_info, process_state, service_stats, service_status,
 };
 
 use crate::api::{
-    Architecture, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
+    Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
     MachineDisk, MachineMemory, MachineMetric, MachineNetwork, MachineSample, MetricSpec,
-    Mitigations, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState, Sample, ServiceState,
-    ServiceStats, ServiceStatus, SignatureStatus, StackProtection, UacVirtualization,
+    Mitigations, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState, ProcessStates, Sample,
+    ServiceState, ServiceStats, ServiceStatus, SignatureStatus, Snapshot, StackProtection, Tagged,
+    UacVirtualization,
 };
 
 type Wire<T> = Result<T, capnp::NotInSchema>;
 
-fn text(reader: capnp::Result<capnp::text::Reader<'_>>) -> capnp::Result<String> {
-    Ok(reader?.to_str()?.to_owned())
+fn text<T: for<'a> From<&'a str>>(reader: capnp::Result<capnp::text::Reader<'_>>) -> capnp::Result<T> {
+    Ok(reader?.to_str()?.into())
 }
 
 fn signature(s: Wire<WireSignature>) -> SignatureStatus {
@@ -267,6 +269,111 @@ pub fn process_states(list: struct_list::Reader<'_, process_state::Owned>) -> Ar
             io_priority: io_priority(s.get_io_priority()),
         })
         .collect()
+}
+
+/// The lists after one watch update, applied to `before`, which the previous
+/// updates built, and what moved in them. Fails on a delta that does not
+/// apply to what `before` holds.
+pub fn lists(before: Option<&Snapshot>, lists: lists_update::Reader<'_>) -> capnp::Result<(Snapshot, Changes)> {
+    let mut changes = Changes {
+        full: before.is_none(),
+        ..Changes::default()
+    };
+    let passport_etag = lists.get_passport_etag();
+
+    let processes = match lists.get_passports().which()? {
+        lists_update::passports::Unchanged(()) => held(before, |s| &s.processes)?.value.clone(),
+        lists_update::passports::Full(list) => {
+            let list = processes(list?)?;
+            changes.passports = list.iter().map(|p| (p.pid, p.sequence_number)).collect();
+            list
+        }
+        lists_update::passports::Delta(delta) => {
+            let delta = delta?;
+            let before = based(held(before, |s| &s.processes)?, delta.get_base_etag())?;
+            let left: HashSet<u64> = delta.get_left()?.iter().collect();
+            let upserted = processes(delta.get_upserted()?)?;
+            changes.left = keys(before.value.iter().filter(|p| left.contains(&p.sequence_number)), |p| (p.pid, p.sequence_number));
+            changes.passports = keys(upserted.iter(), |p| (p.pid, p.sequence_number));
+            merge(&before.value, &left, &upserted, |p| (p.pid, p.sequence_number))
+        }
+    };
+
+    let states = match lists.get_states().which()? {
+        lists_update::states::Unchanged(()) => held(before, |s| &s.states)?.value.states.clone(),
+        lists_update::states::Full(list) => {
+            let list = process_states(list?);
+            changes.states = keys(list.iter(), |s| (s.pid, s.sequence_number));
+            list
+        }
+        lists_update::states::Delta(delta) => {
+            let delta = delta?;
+            let before = based(held(before, |s| &s.states)?, delta.get_base_etag())?;
+            let left: HashSet<u64> = delta.get_left()?.iter().collect();
+            let upserted = process_states(delta.get_upserted()?);
+            changes.states = keys(upserted.iter(), |s| (s.pid, s.sequence_number));
+            merge(&before.value.states, &left, &upserted, |s| (s.pid, s.sequence_number))
+        }
+    };
+
+    let services = match lists.get_services().which()? {
+        lists_update::services::Unchanged(()) => held(before, |s| &s.services)?.value.clone(),
+        lists_update::services::Full(list) => {
+            changes.services = true;
+            services(list?)?
+        }
+    };
+
+    let snapshot = Snapshot {
+        services: Tagged {
+            etag: lists.get_services_etag(),
+            value: services,
+        },
+        processes: Tagged {
+            etag: passport_etag,
+            value: processes,
+        },
+        states: Tagged {
+            etag: lists.get_states_etag(),
+            value: ProcessStates { passport_etag, states },
+        },
+    };
+    Ok((snapshot, changes))
+}
+
+fn held<'a, T>(before: Option<&'a Snapshot>, list: impl Fn(&'a Snapshot) -> &'a Tagged<T>) -> capnp::Result<&'a Tagged<T>> {
+    before
+        .map(list)
+        .ok_or_else(|| capnp::Error::failed("an update refers to lists that never came".into()))
+}
+
+fn based<T>(held: &Tagged<T>, base: u64) -> capnp::Result<&Tagged<T>> {
+    if held.etag == base {
+        Ok(held)
+    } else {
+        Err(capnp::Error::failed(format!("a delta on {base:#x} to lists held under {:#x}", held.etag)))
+    }
+}
+
+fn keys<'a, T: 'a>(rows: impl Iterator<Item = &'a T>, key: impl Fn(&T) -> (u32, u64)) -> Vec<(u32, u64)> {
+    rows.map(key).collect()
+}
+
+/// `before` without the rows `left` names, with `upserted` in place of
+/// the rows under their pids; ordered by pid.
+fn merge<T: Clone>(before: &[T], left: &HashSet<u64>, upserted: &[T], key: impl Fn(&T) -> (u32, u64)) -> Arc<[T]> {
+    let replaced: HashSet<u32> = upserted.iter().map(|row| key(row).0).collect();
+    let mut rows: Vec<T> = before
+        .iter()
+        .filter(|row| {
+            let (pid, sequence_number) = key(row);
+            !left.contains(&sequence_number) && !replaced.contains(&pid)
+        })
+        .chain(upserted)
+        .cloned()
+        .collect();
+    rows.sort_by_key(|row| key(row).0);
+    rows.into()
 }
 
 /// Metrics this build does not know are left out.

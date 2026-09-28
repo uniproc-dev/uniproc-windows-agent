@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use uniproc_windows_agent::agent::Agent;
+use uniproc_windows_agent::agent::{Agent, Watch};
 use uniproc_windows_agent::api::{
     Command, MachineMetrics, MetricSpec, NO_DATA_U32, ProcessMetric, ProcessPriority, ServiceState,
-    Snapshot,
+    Snapshot, Update,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -27,6 +27,15 @@ async fn snapshot(agent: &Agent) -> anyhow::Result<Snapshot> {
         std::thread::sleep(Duration::from_millis(250));
     }
     anyhow::bail!("no usable snapshot")
+}
+
+/// The next watch update, checked against the lists it comes with.
+async fn next(watch: &mut Watch) -> anyhow::Result<Update> {
+    let update = watch.next().await?;
+    assert_eq!(update.sample.passport_etag, update.snapshot.processes.etag, "the sample is taken against its lists");
+    assert_eq!(update.sample.pids.len(), update.snapshot.processes.value.len(), "a row per listed process");
+    assert_eq!(update.snapshot.states.value.passport_etag, update.snapshot.processes.etag);
+    Ok(update)
 }
 
 async fn run(mode: &str) -> anyhow::Result<()> {
@@ -48,12 +57,10 @@ async fn run(mode: &str) -> anyhow::Result<()> {
             .zip(first.processes.value.iter())
             .all(|(s, p)| (s.pid, s.sequence_number) == (p.pid, p.sequence_number))
     );
-    let enriched = |p: &&uniproc_windows_agent::api::ProcessInfo| !p.user.is_empty();
     if let Some(p) = first
         .processes
         .value
         .iter()
-        .filter(enriched)
         .find(|p| !p.package_full_name.is_empty())
     {
         println!(
@@ -142,6 +149,44 @@ async fn run(mode: &str) -> anyhow::Result<()> {
     if second.services.etag == first.services.etag {
         assert!(Arc::ptr_eq(&first.services.value, &second.services.value));
     }
+
+    let mut watch = agent
+        .watch(MetricSpec {
+            interval: Duration::from_millis(500),
+            processes: [ProcessMetric::WorkingSet].into_iter().collect(),
+            machine: MachineMetrics::empty(),
+        })
+        .await?;
+    let update = next(&mut watch).await?;
+    assert!(update.changes.full, "the first update carries everything");
+    let mut child = std::process::Command::new("ping")
+        .args(["-n", "30", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()?;
+    let pid = child.id();
+    let mut updates = 1;
+    loop {
+        let update = next(&mut watch).await?;
+        updates += 1;
+        if update.changes.passports.iter().any(|&(p, _)| p == pid) {
+            assert!(update.snapshot.processes.value.iter().any(|p| p.pid == pid));
+            break;
+        }
+        assert!(updates < 40, "the child never showed up in a watch update");
+    }
+    child.kill()?;
+    child.wait()?;
+    loop {
+        let update = next(&mut watch).await?;
+        updates += 1;
+        if update.changes.left.iter().any(|&(p, _)| p == pid) {
+            assert!(!update.snapshot.processes.value.iter().any(|p| p.pid == pid));
+            break;
+        }
+        assert!(updates < 80, "the child never left in a watch update");
+    }
+    drop(watch);
+    println!("{mode}: watch saw a child join and leave in {updates} updates");
 
     let mut child = std::process::Command::new("ping")
         .args(["-n", "30", "127.0.0.1"])

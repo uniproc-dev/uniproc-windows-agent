@@ -3,14 +3,15 @@ use uniproc_protocol::windows_capnp::{
     IoPriority as WireIoPriority, Isolation as WireIsolation, MachineMetric as WireMachineMetric,
     ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority, ServiceState as WireServiceState,
     SignatureStatus as WireSignature, StackProtection as WireStackProtection, Toggle,
-    UacVirtualization as WireUac, machine_sample, metric_spec, process_columns, sampler,
-    service_status, windows_agent,
+    UacVirtualization as WireUac, agent_listener, machine_sample, metric_spec, process_columns,
+    process_info, process_state, sampler, service_stats, service_status, windows_agent,
 };
 
 use crate::api::{
     Architecture, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineMetric, MachineSample,
-    MetricSpec, ProcessInfo, ProcessMetric, ProcessPriority, ProcessStates, Sample, ServiceState,
-    ServiceStats, ServiceStatus, SignatureStatus, StackProtection, UacVirtualization,
+    MetricSpec, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState, ProcessStates, Sample,
+    ServiceState, ServiceStats, ServiceStatus, SignatureStatus, Snapshot, StackProtection,
+    UacVirtualization, Update,
 };
 
 fn signature(s: SignatureStatus) -> WireSignature {
@@ -168,77 +169,166 @@ fn machine_metric(m: MachineMetric) -> WireMachineMetric {
     }
 }
 
+#[tracing::instrument(name = "encode processes", level = "debug", skip_all)]
 pub fn processes(processes: &[ProcessInfo], mut out: windows_agent::get_processes_results::Builder) {
     let mut list = out.reborrow().init_processes(processes.len() as u32);
     for (i, e) in processes.iter().enumerate() {
-        let mut p = list.reborrow().get(i as u32);
-        p.set_pid(e.pid);
-        p.set_parent_pid(e.parent_pid);
-        p.set_session_id(e.session_id);
-        p.set_name(&e.name);
-        p.set_package_full_name(&e.package_full_name);
-        p.set_package_relative_app_id(&e.package_relative_app_id);
-
-        {
-            let mut cmdline = p.reborrow().init_cmdline(e.cmdline.len() as u32);
-            for (j, arg) in e.cmdline.iter().enumerate() {
-                cmdline.reborrow().set(j as u32, arg);
-            }
-        }
-
-        p.set_is_service(e.is_service);
-        p.set_is_kernel_process(e.is_kernel_process);
-        p.set_is_windows_process(e.is_windows_process);
-        p.set_signature(signature(e.signature));
-        p.set_image_path(&e.image_path);
-        p.set_display_name(&e.display_name);
-        p.set_console_host_pid(e.console_host_pid);
-        p.set_start_time(e.start_time);
-        p.set_sequence_number(e.sequence_number);
-        p.set_user(&e.user);
-        p.set_architecture(architecture(e.architecture));
-        p.set_elevated(toggle(e.elevated));
-        p.set_uac_virtualization(uac_virtualization(e.uac_virtualization));
-        p.set_isolation(isolation(e.isolation));
-        p.set_dpi_awareness(dpi_awareness(e.dpi_awareness));
-        if let Some(m) = &e.mitigations {
-            let mut out = p.reborrow().init_mitigations();
-            out.set_dep(toggle(m.dep));
-            out.set_stack_protection(stack_protection(m.stack_protection));
-            out.set_extended_cfg(extended_cfg(m.extended_cfg));
-        }
-        p.set_publisher(&e.publisher);
+        process_info(e, list.reborrow().get(i as u32));
     }
+}
+
+fn process_info(e: &ProcessInfo, mut p: process_info::Builder) {
+    p.set_pid(e.pid);
+    p.set_parent_pid(e.parent_pid);
+    p.set_session_id(e.session_id);
+    p.set_name(&e.name);
+    p.set_package_full_name(&e.package_full_name);
+    p.set_package_relative_app_id(&e.package_relative_app_id);
+
+    {
+        let mut cmdline = p.reborrow().init_cmdline(e.cmdline.len() as u32);
+        for (j, arg) in e.cmdline.iter().enumerate() {
+            cmdline.reborrow().set(j as u32, arg);
+        }
+    }
+
+    p.set_is_service(e.is_service);
+    p.set_is_kernel_process(e.is_kernel_process);
+    p.set_is_windows_process(e.is_windows_process);
+    p.set_signature(signature(e.signature));
+    p.set_image_path(&e.image_path);
+    p.set_display_name(&e.display_name);
+    p.set_console_host_pid(e.console_host_pid);
+    p.set_start_time(e.start_time);
+    p.set_sequence_number(e.sequence_number);
+    p.set_user(&e.user);
+    p.set_architecture(architecture(e.architecture));
+    p.set_elevated(toggle(e.elevated));
+    p.set_uac_virtualization(uac_virtualization(e.uac_virtualization));
+    p.set_isolation(isolation(e.isolation));
+    p.set_dpi_awareness(dpi_awareness(e.dpi_awareness));
+    if let Some(m) = &e.mitigations {
+        let mut out = p.reborrow().init_mitigations();
+        out.set_dep(toggle(m.dep));
+        out.set_stack_protection(stack_protection(m.stack_protection));
+        out.set_extended_cfg(extended_cfg(m.extended_cfg));
+    }
+    p.set_publisher(&e.publisher);
 }
 
 pub fn process_states(states: &ProcessStates, mut out: windows_agent::get_process_states_results::Builder) {
     out.set_passport_etag(states.passport_etag);
     let mut list = out.reborrow().init_states(states.states.len() as u32);
     for (i, e) in states.states.iter().enumerate() {
-        let mut s = list.reborrow().get(i as u32);
-        s.set_pid(e.pid);
-        s.set_sequence_number(e.sequence_number);
-        s.set_suspended(toggle(e.suspended));
-        s.set_efficiency_mode(toggle(e.efficiency_mode));
-        s.set_base_priority(e.base_priority.map_or(WirePriority::Unknown, priority));
-        s.set_power_throttling(toggle(e.power_throttling));
-        s.set_job_object_id(e.job_object_id);
-        s.set_io_priority(io_priority(e.io_priority));
+        process_state(e, list.reborrow().get(i as u32));
     }
+}
+
+fn process_state(e: &ProcessState, mut s: process_state::Builder) {
+    s.set_pid(e.pid);
+    s.set_sequence_number(e.sequence_number);
+    s.set_suspended(toggle(e.suspended));
+    s.set_efficiency_mode(toggle(e.efficiency_mode));
+    s.set_base_priority(e.base_priority.map_or(WirePriority::Unknown, priority));
+    s.set_power_throttling(toggle(e.power_throttling));
+    s.set_job_object_id(e.job_object_id);
+    s.set_io_priority(io_priority(e.io_priority));
 }
 
 pub fn services(services: &[ServiceStats], mut out: windows_agent::get_services_results::Builder) {
     let mut list = out.reborrow().init_services(services.len() as u32);
     for (i, svc) in services.iter().enumerate() {
-        let mut s = list.reborrow().get(i as u32);
-        s.set_name(&svc.name);
-        s.set_display_name(&svc.display_name);
-        s.set_pid(svc.pid);
-        s.set_state(service_state(svc.state));
-        s.set_load_group(&svc.load_group);
-        s.set_description(&svc.description);
-        s.set_image_path(&svc.image_path);
+        service_stats(svc, list.reborrow().get(i as u32));
     }
+}
+
+fn service_stats(svc: &ServiceStats, mut s: service_stats::Builder) {
+    s.set_name(&svc.name);
+    s.set_display_name(&svc.display_name);
+    s.set_pid(svc.pid);
+    s.set_state(service_state(svc.state));
+    s.set_load_group(&svc.load_group);
+    s.set_description(&svc.description);
+    s.set_image_path(&svc.image_path);
+}
+
+/// One watch update: the lists as they moved since `before`, which the
+/// listener holds, and the sample taken against them.
+pub fn update(update: &Update, before: Option<&Snapshot>, mut out: agent_listener::update_params::Builder) -> capnp::Result<()> {
+    let after = &update.snapshot;
+    let changes = &update.changes;
+    let mut lists = out.reborrow().init_lists();
+
+    lists.set_passport_etag(after.processes.etag);
+    match before {
+        None => {
+            let mut list = lists.reborrow().init_passports().init_full(after.processes.value.len() as u32);
+            for (i, e) in after.processes.value.iter().enumerate() {
+                process_info(e, list.reborrow().get(i as u32));
+            }
+        }
+        Some(before) if before.processes.etag == after.processes.etag => lists.reborrow().init_passports().set_unchanged(()),
+        Some(before) => {
+            let mut delta = lists.reborrow().init_passports().init_delta();
+            delta.set_base_etag(before.processes.etag);
+            sequence_numbers(&changes.left, delta.reborrow().init_left(changes.left.len() as u32));
+            let mut list = delta.init_upserted(changes.passports.len() as u32);
+            for (i, key) in changes.passports.iter().enumerate() {
+                if let Some(e) = find(&after.processes.value, *key, |p| (p.pid, p.sequence_number)) {
+                    process_info(e, list.reborrow().get(i as u32));
+                }
+            }
+        }
+    }
+
+    lists.set_states_etag(after.states.etag);
+    let states = &after.states.value.states;
+    match before {
+        None => {
+            let mut list = lists.reborrow().init_states().init_full(states.len() as u32);
+            for (i, e) in states.iter().enumerate() {
+                process_state(e, list.reborrow().get(i as u32));
+            }
+        }
+        Some(before) if before.states.etag == after.states.etag => lists.reborrow().init_states().set_unchanged(()),
+        Some(before) => {
+            let mut delta = lists.reborrow().init_states().init_delta();
+            delta.set_base_etag(before.states.etag);
+            sequence_numbers(&changes.left, delta.reborrow().init_left(changes.left.len() as u32));
+            let mut list = delta.init_upserted(changes.states.len() as u32);
+            for (i, key) in changes.states.iter().enumerate() {
+                if let Some(e) = find(states, *key, |s| (s.pid, s.sequence_number)) {
+                    process_state(e, list.reborrow().get(i as u32));
+                }
+            }
+        }
+    }
+
+    lists.set_services_etag(after.services.etag);
+    if before.is_some_and(|before| before.services.etag == after.services.etag) {
+        lists.init_services().set_unchanged(());
+    } else {
+        let mut list = lists.init_services().init_full(after.services.value.len() as u32);
+        for (i, svc) in after.services.value.iter().enumerate() {
+            service_stats(svc, list.reborrow().get(i as u32));
+        }
+    }
+
+    process_columns(&update.sample, out.reborrow().init_processes())?;
+    machine_sample(&update.sample, out.init_machine());
+    Ok(())
+}
+
+fn sequence_numbers(keys: &[(u32, u64)], mut out: capnp::primitive_list::Builder<u64>) {
+    for (i, &(_, sequence_number)) in keys.iter().enumerate() {
+        out.set(i as u32, sequence_number);
+    }
+}
+
+/// The row under `key` in a list ordered by pid.
+fn find<T>(rows: &[T], key: (u32, u64), of: impl Fn(&T) -> (u32, u64)) -> Option<&T> {
+    let at = rows.binary_search_by_key(&key.0, |row| of(row).0).ok()?;
+    rows.get(at).filter(|row| of(row) == key)
 }
 
 pub fn service_status(s: &ServiceStatus, mut out: service_status::Builder) {

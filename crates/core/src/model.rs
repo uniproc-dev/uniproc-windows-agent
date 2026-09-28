@@ -124,7 +124,8 @@ pub struct ProcessState {
     /// EcoQoS throttling together with the Idle priority class, as Task Manager sets it.
     pub efficiency_mode: Option<bool>,
     pub base_priority: Option<ProcessPriority>,
-    /// EcoQoS throttling on its own.
+    /// EcoQoS throttling on its own. Read as the process shows up, then
+    /// again within every 10 s, as is `io_priority`.
     pub power_throttling: Option<bool>,
     /// Kernel id of the process's job, 0 when it is in none.
     pub job_object_id: u32,

@@ -1,4 +1,4 @@
-use crate::providers::process::passport::Passport;
+use smol_str::SmolStr;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProcessSignature {
@@ -10,38 +10,23 @@ pub enum ProcessSignature {
     ThirdParty,
 }
 
-/// A process the tick saw for the first time, for the enricher to read.
-#[derive(Clone, Debug, Default)]
-pub struct EnrichRequest {
-    pub pid: u32,
-    pub sequence_number: u64,
-    /// The token user as the snapshot recorded it.
-    pub user_sid: Option<Box<[u8]>>,
-    pub package_full_name: String,
-    pub package_relative_app_id: String,
-}
-
-/// Follow-up enrichment for an already reported process: everything that
-/// requires opening the process / inspecting its image file.
-#[derive(Clone, Debug, Default)]
-pub struct ProcessEnriched {
-    pub pid: u32,
-    /// Which start of `pid` this is about; a reused pid ignores it.
-    pub sequence_number: u64,
-    pub command_line: Vec<String>,
-    pub image_path: String,
-    pub package_full_name: String,
-    pub package_relative_app_id: String,
-    /// Human-facing name (FileDescription / manifest / shell). Empty when
-    /// none of the sources answered - `image_name` stays the fallback.
-    pub display_name: String,
+/// What an executable is, whoever runs it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImageVerdict {
     pub signature: ProcessSignature,
     pub is_windows_process: bool,
-    /// Pid of the conhost serving the console at enrichment, 0 for none.
-    pub console_host_pid: u32,
+    /// Human-facing name (FileDescription / manifest / shell). Empty when
+    /// none of the sources answered - the image name stays the fallback.
+    pub display_name: SmolStr,
     /// A package's PublisherDisplayName, otherwise the signer's subject name.
-    pub publisher: String,
-    pub passport: Passport,
+    pub publisher: SmolStr,
+}
+
+/// A verdict on one image, judged off the tick's thread.
+#[derive(Clone, Debug, Default)]
+pub struct Image {
+    pub path: SmolStr,
+    pub verdict: ImageVerdict,
 }
 
 #[derive(Clone, Debug)]
@@ -128,9 +113,6 @@ pub enum NetworkEventType {
 
 #[derive(Debug, Clone)]
 pub enum StateChange {
-    /// Enrichment resolved off the tick's thread, for a process a snapshot
-    /// already listed.
-    ProcessEnriched(Box<ProcessEnriched>),
     Disk(DiskDeltas),
     Network(NetDeltas),
 }

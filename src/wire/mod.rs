@@ -26,17 +26,18 @@ mod tests {
     use std::time::Duration;
 
     use uniproc_protocol::windows_capnp::{
-        ProcessPriority as WirePriority, metric_spec, sampler, service_status, windows_agent,
+        ProcessPriority as WirePriority, agent_listener, metric_spec, sampler, service_status,
+        windows_agent,
     };
     use windows_agent::{get_process_states_results, get_processes_results, get_services_results};
 
     use super::{decode, encode};
     use crate::api::{
-        Architecture, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
+        Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
         MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineSample,
         MetricSpec, Mitigations, ProcessInfo, ProcessMetric, ProcessMetrics, ProcessPriority,
         ProcessState, ProcessStates, Sample, ServiceState, ServiceStats, ServiceStatus,
-        SignatureStatus, StackProtection, UacVirtualization,
+        SignatureStatus, Snapshot, StackProtection, Tagged, UacVirtualization, Update,
     };
 
     fn process(pid: u32) -> ProcessInfo {
@@ -87,6 +88,107 @@ mod tests {
         assert_eq!(&*decode::processes(reader.get_processes().unwrap()).unwrap(), &sent);
     }
 
+    fn lists(etags: (u64, u64, u64), processes: Vec<ProcessInfo>, states: Vec<ProcessState>, services: &[&str]) -> Snapshot {
+        Snapshot {
+            services: Tagged {
+                etag: etags.2,
+                value: services
+                    .iter()
+                    .map(|&name| ServiceStats {
+                        name: name.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            },
+            processes: Tagged {
+                etag: etags.0,
+                value: processes.into(),
+            },
+            states: Tagged {
+                etag: etags.1,
+                value: ProcessStates {
+                    passport_etag: etags.0,
+                    states: states.into(),
+                },
+            },
+        }
+    }
+
+    fn state(pid: u32) -> ProcessState {
+        ProcessState {
+            pid,
+            sequence_number: pid as u64 * 3,
+            ..Default::default()
+        }
+    }
+
+    fn pushed(before: Option<&Snapshot>, after: &Snapshot) -> (Update, (Snapshot, Changes)) {
+        let update = Update {
+            snapshot: after.clone(),
+            sample: full_sample(),
+            changes: crate::watch::changes(before, after),
+        };
+        let mut message = capnp::message::Builder::new_default();
+        encode::update(&update, before, message.init_root::<agent_listener::update_params::Builder>()).unwrap();
+        let reader = message.get_root_as_reader::<agent_listener::update_params::Reader>().unwrap();
+        let applied = decode::lists(before, reader.get_lists().unwrap()).unwrap();
+        (update, applied)
+    }
+
+    #[test]
+    fn a_watch_builds_the_same_lists_and_changes_on_the_other_end() {
+        let first = lists(
+            (1, 1, 1),
+            vec![process(100), process(200), process(300)],
+            vec![state(100), state(200), state(300)],
+            &["a"],
+        );
+        let (update, (snapshot, changes)) = pushed(None, &first);
+        assert_eq!(snapshot, first);
+        assert_eq!(changes, update.changes);
+        assert!(changes.full);
+
+        let renamed = ProcessInfo {
+            display_name: "Two hundred".into(),
+            ..process(200)
+        };
+        let second = lists(
+            (2, 2, 1),
+            vec![process(100), renamed, process(400)],
+            vec![ProcessState { suspended: Some(true), ..state(100) }, state(200), state(400)],
+            &["a"],
+        );
+        let (update, (snapshot, changes)) = pushed(Some(&first), &second);
+        assert_eq!(snapshot, second);
+        assert_eq!(changes, update.changes);
+        assert_eq!(changes.passports, [(200, 600), (400, 1200)]);
+        assert_eq!(changes.left, [(300, 900)]);
+        assert_eq!(changes.states, [(100, 300), (400, 1200)]);
+        assert!(!changes.full && !changes.services);
+
+        let third = lists((2, 2, 7), second.processes.value.to_vec(), second.states.value.states.to_vec(), &["a", "b"]);
+        let (_, (snapshot, changes)) = pushed(Some(&second), &third);
+        assert_eq!(snapshot, third);
+        assert!(changes.services && changes.passports.is_empty() && changes.states.is_empty());
+    }
+
+    #[test]
+    fn a_delta_on_lists_the_client_does_not_hold_is_refused() {
+        let first = lists((1, 1, 1), vec![process(100)], vec![state(100)], &[]);
+        let second = lists((2, 2, 1), vec![process(100), process(200)], vec![state(100), state(200)], &[]);
+        let update = Update {
+            snapshot: second.clone(),
+            sample: full_sample(),
+            changes: crate::watch::changes(Some(&first), &second),
+        };
+        let mut message = capnp::message::Builder::new_default();
+        encode::update(&update, Some(&first), message.init_root::<agent_listener::update_params::Builder>()).unwrap();
+        let reader = message.get_root_as_reader::<agent_listener::update_params::Reader>().unwrap();
+        let elsewhere = lists((9, 9, 1), vec![process(100)], vec![state(100)], &[]);
+        assert!(decode::lists(Some(&elsewhere), reader.get_lists().unwrap()).is_err());
+        assert!(decode::lists(None, reader.get_lists().unwrap()).is_err());
+    }
+
     #[test]
     fn a_service_list_survives_the_wire() {
         let sent = [ServiceStats {
@@ -132,20 +234,20 @@ mod tests {
         assert_eq!(decode::process_states(reader.get_states().unwrap()), sent.states);
     }
 
-    fn spec(processes: &[ProcessMetric], machine: &[MachineMetric]) -> MetricSpec {
+    fn spec(processes: impl Into<ProcessMetrics>, machine: impl Into<MachineMetrics>) -> MetricSpec {
         MetricSpec {
             interval: Duration::from_millis(1500),
-            processes: processes.iter().copied().collect(),
-            machine: machine.iter().copied().collect(),
+            processes: processes.into(),
+            machine: machine.into(),
         }
     }
 
     #[test]
     fn a_metric_spec_survives_the_wire() {
         for sent in [
-            spec(&ProcessMetric::ALL, &MachineMetric::ALL),
-            spec(&[ProcessMetric::PageFaults], &[MachineMetric::Disk]),
-            spec(&[], &[]),
+            spec(ProcessMetrics::all(), MachineMetrics::all()),
+            spec(ProcessMetric::PageFaults, MachineMetric::Disk),
+            spec(ProcessMetrics::empty(), MachineMetrics::empty()),
         ] {
             let mut message = capnp::message::Builder::new_default();
             encode::metric_spec(&sent, message.init_root::<metric_spec::Builder>());
@@ -161,7 +263,7 @@ mod tests {
             snapshot: 9,
             sampled_at: 123_456,
             period: Duration::from_millis(1500),
-            wanted: spec(&ProcessMetric::ALL, &MachineMetric::ALL),
+            wanted: spec(ProcessMetrics::all(), MachineMetrics::all()),
             passport_etag: 5,
             pids: Arc::from([4, 100]),
             sequence_numbers: Arc::from([1, 300]),
@@ -239,10 +341,10 @@ mod tests {
     fn a_projected_sample_carries_only_its_own_metrics() {
         let full = full_sample();
         for wanted in [
-            spec(&[ProcessMetric::PageFaults, ProcessMetric::NetTxBytes], &[MachineMetric::Memory]),
-            spec(&[], &[MachineMetric::Cpu, MachineMetric::Network]),
-            spec(&[ProcessMetric::Handles], &[]),
-            spec(&[], &[]),
+            spec(ProcessMetric::PageFaults | ProcessMetric::NetTxBytes, MachineMetric::Memory),
+            spec(ProcessMetrics::empty(), MachineMetric::Cpu | MachineMetric::Network),
+            spec(ProcessMetric::Handles, MachineMetrics::empty()),
+            spec(ProcessMetrics::empty(), MachineMetrics::empty()),
         ] {
             let sent = full.project(&wanted);
             assert_eq!(round_trip(&sent), sent);
@@ -251,13 +353,13 @@ mod tests {
 
     #[test]
     fn a_projection_without_process_metrics_has_no_rows() {
-        let sent = full_sample().project(&spec(&[], &[MachineMetric::Cpu]));
+        let sent = full_sample().project(&spec(ProcessMetrics::empty(), MachineMetric::Cpu));
         assert!(sent.pids.is_empty() && sent.sequence_numbers.is_empty());
         assert_eq!(sent.columns, Columns::default());
         assert_eq!(sent.machine.cpu, full_sample().machine.cpu);
         assert_eq!(sent.machine.memory, None);
-        assert_eq!(ProcessMetrics::NONE, sent.wanted.processes);
-        assert_eq!([MachineMetric::Cpu].into_iter().collect::<MachineMetrics>(), sent.wanted.machine);
+        assert_eq!(ProcessMetrics::empty(), sent.wanted.processes);
+        assert_eq!(MachineMetrics::only(MachineMetric::Cpu), sent.wanted.machine);
     }
 
     #[test]

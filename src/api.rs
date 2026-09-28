@@ -4,7 +4,7 @@ pub use uniproc_windows_core::{
     Architecture, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
     MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineSample,
     MetricSpec, Mitigations, NO_DATA_U32, NO_DATA_U64, ProcessMetric, ProcessMetrics, ProcessPriority, ProcessState,
-    Sample, SignatureStatus, StackProtection, Tagged, UacVirtualization,
+    Sample, SignatureStatus, SmolStr, StackProtection, Tagged, UacVirtualization,
 };
 
 /// Name the agent's Windows service is registered under.
@@ -29,6 +29,31 @@ pub struct Snapshot {
     pub services: Tagged<Arc<[ServiceStats]>>,
     pub processes: Tagged<Arc<[ProcessInfo]>>,
     pub states: Tagged<ProcessStates>,
+}
+
+/// One push of a watch: the lists as they stand, the sample taken against
+/// them, and what moved in the lists since the update before.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Update {
+    pub snapshot: Snapshot,
+    /// Its rows are the processes `snapshot.processes` lists.
+    pub sample: Sample,
+    pub changes: Changes,
+}
+
+/// What moved in the lists since the update before, keyed by pid and
+/// sequence number, the join key of the sample.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    /// No update came before, or the lists were fetched again: everything is new.
+    pub full: bool,
+    /// Processes that started, or whose passport changed.
+    pub passports: Vec<(u32, u64)>,
+    /// Processes that exited; their states went with them.
+    pub left: Vec<(u32, u64)>,
+    /// Processes whose state changed, including every one that started.
+    pub states: Vec<(u32, u64)>,
+    pub services: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,20 +128,20 @@ pub struct ProcessInfo {
     pub parent_pid: u32,
     pub session_id: u32,
     /// Exactly what the OS reports; for matching and grouping.
-    pub name: String,
-    /// Shared with the core's report; cloning it copies no argument.
+    pub name: SmolStr,
+    /// Shared with the core's passport; cloning it copies no argument.
     pub cmdline: Arc<[String]>,
-    pub package_full_name: String,
-    pub package_relative_app_id: String,
+    pub package_full_name: SmolStr,
+    pub package_relative_app_id: SmolStr,
 
     pub is_service: bool,
     pub is_kernel_process: bool,
     pub is_windows_process: bool,
     pub signature: SignatureStatus,
-    pub image_path: String,
+    pub image_path: SmolStr,
 
     /// For display only; empty when nothing resolved, then show `name`.
-    pub display_name: String,
+    pub display_name: SmolStr,
 
     /// Pid of the conhost serving the process's console, or 0.
     pub console_host_pid: u32,
@@ -127,7 +152,7 @@ pub struct ProcessInfo {
     /// only for the Idle process.
     pub sequence_number: u64,
     /// `DOMAIN\name` of the token's user.
-    pub user: String,
+    pub user: SmolStr,
     pub architecture: Architecture,
     pub elevated: Option<bool>,
     pub uac_virtualization: UacVirtualization,
@@ -136,5 +161,5 @@ pub struct ProcessInfo {
     /// `None` when the process could not be queried.
     pub mitigations: Option<Mitigations>,
     /// A package's PublisherDisplayName, otherwise the signer's subject name.
-    pub publisher: String,
+    pub publisher: SmolStr,
 }

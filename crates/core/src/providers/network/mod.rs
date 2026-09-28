@@ -173,7 +173,7 @@ mod tests {
         let _guard = crate::etw::router::tests::ETW_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (sink, rx) = crate::sink::Sink::bounded(1024);
+        let (sink, rx) = crate::sink::Sink::bounded(1024, || {});
         let mut builder = crate::etw::router::KernelRouter::builder();
         KernelNetworkProvider::new()
             .register(&mut builder)

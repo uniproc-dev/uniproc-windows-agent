@@ -10,15 +10,16 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
 use uniproc_windows_agent::local::Local;
+use uniproc_windows_http::Telemetry;
 
 use crate::logger;
 
 define_windows_service!(ffi_service_main, service_main);
 
-fn run(stop: impl FnOnce()) -> Result<()> {
+fn run(telemetry: Telemetry, stop: impl FnOnce()) -> Result<()> {
     let agent = std::sync::Arc::new(Local::start_as_service()?);
 
-    match uniproc_windows_http::serve(agent.clone()) {
+    match uniproc_windows_http::serve(agent.clone(), telemetry) {
         Ok(access) => info!(
             url = access.url,
             access = %uniproc_windows_http::access_path().display(),
@@ -58,14 +59,14 @@ pub fn run_as_service(service_name: &str) -> Result<()> {
 }
 
 fn service_main(_arguments: Vec<OsString>) {
-    logger::init_console();
+    let telemetry = logger::init();
     let service_name = SERVICE_NAME_TL.with(|s| s.borrow().clone());
-    if let Err(e) = run_service(&service_name) {
+    if let Err(e) = run_service(&service_name, telemetry) {
         error!("Service exited with error: {e:#}");
     }
 }
 
-fn run_service(service_name: &str) -> Result<()> {
+fn run_service(service_name: &str, telemetry: Telemetry) -> Result<()> {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
     let status_handle =
@@ -80,7 +81,7 @@ fn run_service(service_name: &str) -> Result<()> {
 
     set_status(&status_handle, ServiceState::StartPending)?;
 
-    run(|| {
+    run(telemetry, || {
         set_status(&status_handle, ServiceState::Running).ok();
         stop_rx.recv().ok();
     })?;
@@ -97,7 +98,7 @@ fn set_status(
             ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
             Duration::ZERO,
         ),
-        ServiceState::StartPending => (ServiceControlAccept::empty(), Duration::from_secs(5)),
+        ServiceState::StartPending => (ServiceControlAccept::empty(), Duration::from_secs(90)),
         _ => (ServiceControlAccept::empty(), Duration::ZERO),
     };
     handle.set_service_status(ServiceStatus {
@@ -112,9 +113,9 @@ fn set_status(
     Ok(())
 }
 
-pub fn run_direct() -> Result<()> {
+pub fn run_direct(telemetry: Telemetry) -> Result<()> {
     info!("Starting monitoring (press Ctrl+C to stop).");
-    run(|| {
+    run(telemetry, || {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_handler = stop.clone();
         let main_thread = std::thread::current();

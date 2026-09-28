@@ -3,12 +3,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use enumset::{EnumSet, EnumSetType};
 use parking_lot::Mutex;
 
 use crate::snapshot::Row;
 
+/// A row with no data in a `u32` column that has data.
+pub const NO_DATA_U32: u32 = u32::MAX;
+/// A row with no data in a `u64` column that has data.
+pub const NO_DATA_U64: u64 = u64::MAX;
+
+/// The shortest interval the agent samples at.
+pub const MIN_INTERVAL: Duration = Duration::from_millis(100);
+/// The longest; a subscriber asking for more is answered this often.
+pub const MAX_INTERVAL: Duration = Duration::from_secs(60);
+
 /// One process counter. Everything cumulative is raw, as the OS keeps it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(EnumSetType, Debug, Hash, PartialOrd, Ord)]
 pub enum ProcessMetric {
     CpuUserTime,
     CpuKernelTime,
@@ -39,102 +50,8 @@ pub enum ProcessMetric {
     NetTxBytes,
 }
 
-impl ProcessMetric {
-    pub const ALL: [Self; 27] = [
-        Self::CpuUserTime,
-        Self::CpuKernelTime,
-        Self::CpuCycles,
-        Self::WorkingSet,
-        Self::PeakWorkingSet,
-        Self::PrivateWorkingSet,
-        Self::Commit,
-        Self::PagedPool,
-        Self::NonPagedPool,
-        Self::PageFaults,
-        Self::Handles,
-        Self::Threads,
-        Self::UserObjects,
-        Self::GdiObjects,
-        Self::IoReadOps,
-        Self::IoWriteOps,
-        Self::IoOtherOps,
-        Self::IoReadBytes,
-        Self::IoWriteBytes,
-        Self::IoOtherBytes,
-        Self::DiskReadOps,
-        Self::DiskWriteOps,
-        Self::DiskFlushOps,
-        Self::DiskReadBytes,
-        Self::DiskWriteBytes,
-        Self::NetRxBytes,
-        Self::NetTxBytes,
-    ];
-
-    /// Whether a row of this column can hold [`NO_DATA_U32`] or
-    /// [`NO_DATA_U64`]; page faults wrap, so their maximum is a value.
-    pub fn has_gaps(self) -> bool {
-        self != Self::PageFaults
-    }
-
-    fn bit(self) -> u32 {
-        1 << self as u32
-    }
-}
-
-/// A row with no data in a `u32` column that has data.
-pub const NO_DATA_U32: u32 = u32::MAX;
-/// A row with no data in a `u64` column that has data.
-pub const NO_DATA_U64: u64 = u64::MAX;
-
-/// A set of process counters.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct ProcessMetrics(u32);
-
-impl ProcessMetrics {
-    pub const NONE: Self = Self(0);
-
-    pub fn all() -> Self {
-        ProcessMetric::ALL.into_iter().collect()
-    }
-
-    pub fn contains(self, metric: ProcessMetric) -> bool {
-        self.0 & metric.bit() != 0
-    }
-
-    pub fn insert(&mut self, metric: ProcessMetric) {
-        self.0 |= metric.bit();
-    }
-
-    pub fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
-    /// Every metric of `other` is in this set.
-    pub fn covers(self, other: Self) -> bool {
-        other.0 & !self.0 == 0
-    }
-
-    pub fn iter(self) -> impl Iterator<Item = ProcessMetric> {
-        ProcessMetric::ALL.into_iter().filter(move |&m| self.contains(m))
-    }
-}
-
-impl FromIterator<ProcessMetric> for ProcessMetrics {
-    fn from_iter<I: IntoIterator<Item = ProcessMetric>>(iter: I) -> Self {
-        let mut set = Self::NONE;
-        for metric in iter {
-            set.insert(metric);
-        }
-        set
-    }
-}
-
 /// A group of machine counters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(EnumSetType, Debug, Hash, PartialOrd, Ord)]
 pub enum MachineMetric {
     Cpu,
     Memory,
@@ -142,54 +59,17 @@ pub enum MachineMetric {
     Network,
 }
 
-impl MachineMetric {
-    pub const ALL: [Self; 4] = [Self::Cpu, Self::Memory, Self::Disk, Self::Network];
-}
+/// A set of process counters, iterated in declaration order.
+pub type ProcessMetrics = EnumSet<ProcessMetric>;
 
-/// A set of machine groups.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct MachineMetrics(u8);
+/// A set of machine groups, iterated in declaration order.
+pub type MachineMetrics = EnumSet<MachineMetric>;
 
-impl MachineMetrics {
-    pub const NONE: Self = Self(0);
-
-    pub fn all() -> Self {
-        MachineMetric::ALL.into_iter().collect()
-    }
-
-    pub fn contains(self, metric: MachineMetric) -> bool {
-        self.0 & (1 << metric as u8) != 0
-    }
-
-    pub fn insert(&mut self, metric: MachineMetric) {
-        self.0 |= 1 << metric as u8;
-    }
-
-    pub fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
-    /// Every group of `other` is in this set.
-    pub fn covers(self, other: Self) -> bool {
-        other.0 & !self.0 == 0
-    }
-
-    pub fn iter(self) -> impl Iterator<Item = MachineMetric> {
-        MachineMetric::ALL.into_iter().filter(move |&m| self.contains(m))
-    }
-}
-
-impl FromIterator<MachineMetric> for MachineMetrics {
-    fn from_iter<I: IntoIterator<Item = MachineMetric>>(iter: I) -> Self {
-        let mut set = Self::NONE;
-        for metric in iter {
-            set.insert(metric);
-        }
-        set
+impl ProcessMetric {
+    /// Whether a row of this column can hold [`NO_DATA_U32`] or
+    /// [`NO_DATA_U64`]; page faults wrap, so their maximum is a value.
+    pub fn has_gaps(self) -> bool {
+        self != Self::PageFaults
     }
 }
 
@@ -201,13 +81,16 @@ pub struct MetricSpec {
     pub machine: MachineMetrics,
 }
 
-/// The shortest interval the agent samples at.
-pub const MIN_INTERVAL: Duration = Duration::from_millis(100);
-
-/// The longest; a subscriber asking for more is answered this often.
-pub const MAX_INTERVAL: Duration = Duration::from_secs(60);
-
 impl MetricSpec {
+    /// No counters: only the processes' passports and states, this often.
+    pub fn idle(interval: Duration) -> Self {
+        Self {
+            interval,
+            processes: ProcessMetrics::empty(),
+            machine: MachineMetrics::empty(),
+        }
+    }
+
     /// The interval clamped to what the agent samples at.
     pub fn period(&self) -> Duration {
         self.interval.clamp(MIN_INTERVAL, MAX_INTERVAL)
@@ -224,88 +107,46 @@ impl MetricSpec {
 
     /// Everything `other` wants is in here.
     pub fn covers(&self, other: &Self) -> bool {
-        self.processes.covers(other.processes) && self.machine.covers(other.machine)
+        self.processes.is_superset(other.processes) && self.machine.is_superset(other.machine)
     }
 }
 
-/// What the live subscribers want together, and how often the core samples
-/// while none does. Shared between whoever keeps the subscribers and the core.
-#[derive(Clone)]
-pub struct Demand {
-    state: Arc<Mutex<DemandState>>,
+impl Default for MetricSpec {
+    fn default() -> Self {
+        Self::idle(MAX_INTERVAL)
+    }
 }
 
-#[derive(Clone, Copy)]
-struct DemandState {
-    wanted: Option<MetricSpec>,
-    idle: Duration,
-    grown: bool,
-}
+/// What the core samples now. Whoever keeps the subscribers sets it; the
+/// core reads it at every tick.
+#[derive(Clone)]
+pub struct Demand(Arc<Mutex<MetricSpec>>);
 
 impl Demand {
-    pub fn new(idle: Duration) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(DemandState {
-                wanted: None,
-                idle,
-                grown: false,
-            })),
-        }
+    pub fn new(spec: MetricSpec) -> Self {
+        Self(Arc::new(Mutex::new(spec)))
     }
 
-    /// The union of the live subscriptions; `None` when there are none.
-    pub fn set_wanted(&self, wanted: Option<MetricSpec>) {
-        let mut state = self.state.lock();
-        let held = state.wanted.unwrap_or(MetricSpec {
-            interval: state.idle,
-            processes: ProcessMetrics::NONE,
-            machine: MachineMetrics::NONE,
-        });
-        if wanted.is_some_and(|w| !held.covers(&w) || w.period() < held.period()) {
-            state.grown = true;
-        }
-        state.wanted = wanted;
+    pub fn set(&self, spec: MetricSpec) {
+        *self.0.lock() = spec;
     }
 
-    /// Whether someone started wanting more since the last call: the next
-    /// sample is due at once instead of at the end of the period.
-    pub fn take_grown(&self) -> bool {
-        std::mem::take(&mut self.state.lock().grown)
-    }
-
-    pub fn set_idle(&self, idle: Duration) {
-        self.state.lock().idle = idle;
-    }
-
-    /// What to sample now: the subscriptions' union, or nothing but the
-    /// processes' passports and states at the idle period.
-    pub fn now(&self) -> MetricSpec {
-        let state = *self.state.lock();
-        state.wanted.unwrap_or(MetricSpec {
-            interval: state.idle,
-            processes: ProcessMetrics::NONE,
-            machine: MachineMetrics::NONE,
-        })
-    }
-
-    /// How often the core should sample.
-    pub fn period(&self) -> Duration {
-        self.now().period()
+    pub fn get(&self) -> MetricSpec {
+        *self.0.lock()
     }
 }
 
-/// What one process's row is built from.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Source {
-    pub row: Row,
-    pub user_objects: u32,
-    pub gdi_objects: u32,
-    pub net_rx_bytes: u64,
-    pub net_tx_bytes: u64,
+/// What the core knows of a listed process beside its snapshot row; asked
+/// only for the columns that are wanted.
+pub trait Extras {
+    fn user_objects(&self, row: &Row) -> u32;
+    fn gdi_objects(&self, row: &Row) -> u32;
+    fn net_rx_bytes(&self, row: &Row) -> u64;
+    fn net_tx_bytes(&self, row: &Row) -> u64;
 }
 
 macro_rules! columns {
-    ($($field:ident: $ty:ty = $metric:ident, |$s:ident| $value:expr;)*) => {
+    (|$r:ident, $x:ident| $($field:ident: $ty:ty = $metric:ident, $value:expr;)*) => {
         /// Process counters as columns, row i of each for the same process. A
         /// column is `None` when nobody asked for it or there is no data; a
         /// row with no data holds the type's maximum, see
@@ -316,12 +157,13 @@ macro_rules! columns {
         }
 
         impl Columns {
-            /// The wanted columns out of `sources`, in their order.
-            pub fn build(wanted: ProcessMetrics, sources: &[Source]) -> Self {
+            /// The wanted columns out of `rows`, in their order.
+            pub fn build(wanted: ProcessMetrics, rows: &[Row], extras: &impl Extras) -> Self {
+                let $x = extras;
                 Self {
                     $($field: wanted
                         .contains(ProcessMetric::$metric)
-                        .then(|| sources.iter().map(|$s| $value as $ty).collect()),)*
+                        .then(|| rows.iter().map(|$r| $value as $ty).collect()),)*
                 }
             }
 
@@ -350,33 +192,34 @@ macro_rules! columns {
 }
 
 columns! {
-    cpu_user_time: u64 = CpuUserTime, |s| s.row.user_time;
-    cpu_kernel_time: u64 = CpuKernelTime, |s| s.row.kernel_time;
-    cpu_cycles: u64 = CpuCycles, |s| s.row.cycles;
-    working_set: u64 = WorkingSet, |s| s.row.working_set;
-    peak_working_set: u64 = PeakWorkingSet, |s| s.row.peak_working_set;
-    private_working_set: u64 = PrivateWorkingSet, |s| s.row.private_working_set;
-    commit: u64 = Commit, |s| s.row.commit;
-    paged_pool: u64 = PagedPool, |s| s.row.paged_pool;
-    non_paged_pool: u64 = NonPagedPool, |s| s.row.nonpaged_pool;
-    page_faults: u32 = PageFaults, |s| s.row.page_faults;
-    handles: u32 = Handles, |s| s.row.handles;
-    threads: u32 = Threads, |s| s.row.threads;
-    user_objects: u32 = UserObjects, |s| s.user_objects;
-    gdi_objects: u32 = GdiObjects, |s| s.gdi_objects;
-    io_read_ops: u64 = IoReadOps, |s| s.row.io_read_ops;
-    io_write_ops: u64 = IoWriteOps, |s| s.row.io_write_ops;
-    io_other_ops: u64 = IoOtherOps, |s| s.row.io_other_ops;
-    io_read_bytes: u64 = IoReadBytes, |s| s.row.io_read_bytes;
-    io_write_bytes: u64 = IoWriteBytes, |s| s.row.io_write_bytes;
-    io_other_bytes: u64 = IoOtherBytes, |s| s.row.io_other_bytes;
-    disk_read_ops: u64 = DiskReadOps, |s| s.row.disk_read_ops;
-    disk_write_ops: u64 = DiskWriteOps, |s| s.row.disk_write_ops;
-    disk_flush_ops: u64 = DiskFlushOps, |s| s.row.disk_flush_ops;
-    disk_read_bytes: u64 = DiskReadBytes, |s| s.row.disk_read_bytes;
-    disk_write_bytes: u64 = DiskWriteBytes, |s| s.row.disk_write_bytes;
-    net_rx_bytes: u64 = NetRxBytes, |s| s.net_rx_bytes;
-    net_tx_bytes: u64 = NetTxBytes, |s| s.net_tx_bytes;
+    |r, x|
+    cpu_user_time: u64 = CpuUserTime, r.user_time;
+    cpu_kernel_time: u64 = CpuKernelTime, r.kernel_time;
+    cpu_cycles: u64 = CpuCycles, r.cycles;
+    working_set: u64 = WorkingSet, r.working_set;
+    peak_working_set: u64 = PeakWorkingSet, r.peak_working_set;
+    private_working_set: u64 = PrivateWorkingSet, r.private_working_set;
+    commit: u64 = Commit, r.commit;
+    paged_pool: u64 = PagedPool, r.paged_pool;
+    non_paged_pool: u64 = NonPagedPool, r.nonpaged_pool;
+    page_faults: u32 = PageFaults, r.page_faults;
+    handles: u32 = Handles, r.handles;
+    threads: u32 = Threads, r.threads;
+    user_objects: u32 = UserObjects, x.user_objects(r);
+    gdi_objects: u32 = GdiObjects, x.gdi_objects(r);
+    io_read_ops: u64 = IoReadOps, r.io_read_ops;
+    io_write_ops: u64 = IoWriteOps, r.io_write_ops;
+    io_other_ops: u64 = IoOtherOps, r.io_other_ops;
+    io_read_bytes: u64 = IoReadBytes, r.io_read_bytes;
+    io_write_bytes: u64 = IoWriteBytes, r.io_write_bytes;
+    io_other_bytes: u64 = IoOtherBytes, r.io_other_bytes;
+    disk_read_ops: u64 = DiskReadOps, r.disk_read_ops;
+    disk_write_ops: u64 = DiskWriteOps, r.disk_write_ops;
+    disk_flush_ops: u64 = DiskFlushOps, r.disk_flush_ops;
+    disk_read_bytes: u64 = DiskReadBytes, r.disk_read_bytes;
+    disk_write_bytes: u64 = DiskWriteBytes, r.disk_write_bytes;
+    net_rx_bytes: u64 = NetRxBytes, x.net_rx_bytes(r);
+    net_tx_bytes: u64 = NetTxBytes, x.net_tx_bytes(r);
 }
 
 /// Sums over every logical processor in every group, cumulative, 100 ns.
@@ -431,16 +274,6 @@ impl MachineSample {
             memory: self.memory.filter(|_| wanted.contains(MachineMetric::Memory)),
             disk: self.disk.filter(|_| wanted.contains(MachineMetric::Disk)),
             network: self.network.filter(|_| wanted.contains(MachineMetric::Network)),
-        }
-    }
-}
-
-impl Default for MetricSpec {
-    fn default() -> Self {
-        Self {
-            interval: MAX_INTERVAL,
-            processes: ProcessMetrics::NONE,
-            machine: MachineMetrics::NONE,
         }
     }
 }
@@ -519,31 +352,51 @@ mod tests {
         assert_eq!(plain.page_faults, columns.page_faults, "a wrapped count is a value");
     }
 
-    fn source(pid: u32, working_set: u64) -> Source {
-        Source {
-            row: Row {
-                pid,
-                working_set,
-                user_time: pid as u64 * 10,
-                ..Default::default()
-            },
-            net_rx_bytes: 7,
+    fn row(pid: u32, working_set: u64) -> Row {
+        Row {
+            pid,
+            working_set,
+            user_time: pid as u64 * 10,
             ..Default::default()
         }
     }
 
+    #[derive(Default)]
+    struct Asked(std::cell::Cell<u32>);
+
+    impl Extras for Asked {
+        fn user_objects(&self, _: &Row) -> u32 {
+            self.0.set(self.0.get() + 1);
+            3
+        }
+        fn gdi_objects(&self, _: &Row) -> u32 {
+            self.0.set(self.0.get() + 1);
+            4
+        }
+        fn net_rx_bytes(&self, row: &Row) -> u64 {
+            self.0.set(self.0.get() + 1);
+            row.pid as u64 * 7
+        }
+        fn net_tx_bytes(&self, _: &Row) -> u64 {
+            self.0.set(self.0.get() + 1);
+            0
+        }
+    }
+
     #[test]
-    fn only_wanted_columns_are_built() {
+    fn only_wanted_columns_are_built_and_only_their_extras_asked() {
         let wanted: ProcessMetrics = [ProcessMetric::WorkingSet, ProcessMetric::NetRxBytes].into_iter().collect();
-        let columns = Columns::build(wanted, &[source(1, 100), source(2, 200)]);
+        let asked = Asked::default();
+        let columns = Columns::build(wanted, &[row(1, 100), row(2, 200)], &asked);
         assert_eq!(columns.working_set.as_deref(), Some(&[100, 200][..]));
-        assert_eq!(columns.net_rx_bytes.as_deref(), Some(&[7, 7][..]));
+        assert_eq!(columns.net_rx_bytes.as_deref(), Some(&[7, 14][..]));
         assert_eq!(columns.cpu_user_time, None);
+        assert_eq!(asked.0.get(), 2, "one question per row of the one wanted extra");
     }
 
     #[test]
     fn a_projection_shares_the_columns_it_keeps() {
-        let columns = Columns::build(ProcessMetrics::all(), &[source(1, 100)]);
+        let columns = Columns::build(ProcessMetrics::all(), &[row(1, 100)], &Asked::default());
         let only: ProcessMetrics = [ProcessMetric::CpuUserTime].into_iter().collect();
         let projected = columns.project(only);
         assert!(Arc::ptr_eq(
@@ -554,25 +407,15 @@ mod tests {
     }
 
     #[test]
-    fn every_metric_has_its_own_bit() {
-        let all = ProcessMetrics::all();
-        assert_eq!(all.iter().count(), ProcessMetric::ALL.len());
-        for metric in ProcessMetric::ALL {
-            let one: ProcessMetrics = [metric].into_iter().collect();
-            assert_eq!(one.iter().collect::<Vec<_>>(), [metric]);
-        }
-    }
-
-    #[test]
     fn a_union_samples_at_the_shorter_interval() {
         let a = MetricSpec {
             interval: Duration::from_secs(2),
             processes: [ProcessMetric::Handles].into_iter().collect(),
-            machine: MachineMetrics::NONE,
+            machine: MachineMetrics::empty(),
         };
         let b = MetricSpec {
             interval: Duration::from_millis(500),
-            processes: ProcessMetrics::NONE,
+            processes: ProcessMetrics::empty(),
             machine: [MachineMetric::Cpu].into_iter().collect(),
         };
         let both = a.union(b);
@@ -583,55 +426,26 @@ mod tests {
 
     #[test]
     fn an_interval_out_of_range_is_clamped() {
-        let spec = |ms| MetricSpec {
-            interval: Duration::from_millis(ms),
-            processes: ProcessMetrics::NONE,
-            machine: MachineMetrics::NONE,
-        };
+        let spec = |ms| MetricSpec::idle(Duration::from_millis(ms));
         assert_eq!(spec(0).period(), MIN_INTERVAL);
         assert_eq!(spec(3_600_000).period(), MAX_INTERVAL);
     }
 
     #[test]
-    fn wanting_more_makes_the_next_sample_due_and_wanting_less_does_not() {
-        let demand = Demand::new(Duration::from_secs(2));
+    fn a_spec_covers_the_metrics_it_has_whatever_the_interval() {
         let wide = MetricSpec {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_secs(2),
             processes: ProcessMetrics::all(),
-            machine: MachineMetrics::NONE,
+            machine: MachineMetric::Cpu.into(),
         };
-        demand.set_wanted(Some(wide));
-        assert!(demand.take_grown());
-        assert!(!demand.take_grown(), "taken once");
-
-        demand.set_wanted(Some(MetricSpec {
-            processes: [ProcessMetric::Handles].into_iter().collect(),
-            ..wide
-        }));
-        assert!(!demand.take_grown());
-        demand.set_wanted(None);
-        assert!(!demand.take_grown());
-    }
-
-    #[test]
-    fn a_set_covers_its_subsets_only() {
-        let both: ProcessMetrics = [ProcessMetric::Handles, ProcessMetric::Threads].into_iter().collect();
-        let one: ProcessMetrics = [ProcessMetric::Handles].into_iter().collect();
-        assert!(both.covers(one) && both.covers(ProcessMetrics::NONE));
-        assert!(!one.covers(both));
-    }
-
-    #[test]
-    fn with_nobody_subscribed_the_core_samples_at_the_idle_period() {
-        let demand = Demand::new(Duration::from_secs(2));
-        assert_eq!(demand.period(), Duration::from_secs(2));
-        assert!(demand.now().processes.is_empty());
-        demand.set_wanted(Some(MetricSpec {
+        let narrow = MetricSpec {
             interval: Duration::from_millis(250),
-            processes: ProcessMetrics::all(),
-            machine: MachineMetrics::all(),
-        }));
-        assert_eq!(demand.period(), Duration::from_millis(250));
+            processes: ProcessMetric::Handles.into(),
+            machine: MachineMetrics::empty(),
+        };
+        assert!(wide.covers(&narrow));
+        assert!(!narrow.covers(&wide));
+        assert!(narrow.covers(&MetricSpec::idle(Duration::from_secs(1))));
     }
 
     #[test]

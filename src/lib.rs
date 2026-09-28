@@ -13,4 +13,6 @@ mod privileges;
 mod profile;
 mod sampler;
 mod scm;
+mod sources;
+mod watch;
 mod win;

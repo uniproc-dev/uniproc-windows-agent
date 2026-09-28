@@ -13,12 +13,12 @@ use ogurpchik::auth::handshake::{HandshakeMode, authenticate_client};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::{RpcSession, Side, spawn_session};
 use uniproc_protocol::meta_capnp::{ResponseStatus, response_meta};
-use uniproc_protocol::windows_capnp::{sampler, service_watcher, windows_agent};
+use uniproc_protocol::windows_capnp::{agent_listener, sampler, service_watcher, windows_agent};
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
 
 use crate::api::{
     Command, CommandResult, MetricSpec, ProcessInfo, ProcessStates, Sample, ServiceStats,
-    ServiceStatus, Snapshot, Tagged,
+    ServiceStatus, Snapshot, Tagged, Update,
 };
 use crate::wire::{PROTOCOL, decode, encode};
 
@@ -38,6 +38,17 @@ enum Request {
         statuses: mpsc::UnboundedSender<ServiceStatus>,
         released: oneshot::Receiver<()>,
     },
+    WatchAgent {
+        spec: MetricSpec,
+        updates: mpsc::UnboundedSender<Delivery>,
+        released: oneshot::Receiver<()>,
+    },
+}
+
+/// One update for the watch's reader; the agent hears back once it is taken.
+struct Delivery {
+    update: Result<Update>,
+    taken: oneshot::Sender<()>,
 }
 
 enum Reply {
@@ -146,6 +157,42 @@ impl Remote {
             Reply::Watching => Ok(Watch { rx, _release: release }),
             _ => bail!("a watch answered with something else"),
         }
+    }
+
+    /// The agent pushes every sample `spec` is due, with the lists it was
+    /// taken against, until the watch is dropped.
+    pub async fn watch(&self, spec: MetricSpec) -> Result<RemoteWatch> {
+        let (updates, rx) = mpsc::unbounded();
+        let (release, released) = oneshot::channel();
+        let request = Request::WatchAgent {
+            spec,
+            updates,
+            released,
+        };
+        match self.call(request).await? {
+            Reply::Watching => Ok(RemoteWatch { rx, _release: release }),
+            _ => bail!("a watch answered with something else"),
+        }
+    }
+}
+
+/// A watch over the pipe; the agent stops pushing when this is dropped.
+pub struct RemoteWatch {
+    rx: mpsc::UnboundedReceiver<Delivery>,
+    _release: oneshot::Sender<()>,
+}
+
+impl RemoteWatch {
+    /// The next update the agent pushed; the first carries everything. An
+    /// error means the watch is over: the agent stopped or the session ended.
+    pub async fn next(&mut self) -> Result<Update> {
+        let delivery = self
+            .rx
+            .next()
+            .await
+            .ok_or_else(|| anyhow!("the agent watch ended"))?;
+        let _ = delivery.taken.send(());
+        delivery.update
     }
 }
 
@@ -304,6 +351,58 @@ impl service_watcher::Server for WatcherImpl {
     }
 }
 
+struct ListenerImpl {
+    spec: MetricSpec,
+    snapshot: RefCell<Option<Snapshot>>,
+    updates: mpsc::UnboundedSender<Delivery>,
+}
+
+impl ListenerImpl {
+    fn decode(&self, params: &agent_listener::UpdateParams) -> Result<Update> {
+        let params = params.get()?;
+        let (snapshot, changes) = decode::lists(self.snapshot.borrow().as_ref(), params.get_lists()?)?;
+        let sample = decode::sample(params.get_processes()?, params.get_machine()?, self.spec)?;
+        *self.snapshot.borrow_mut() = Some(snapshot.clone());
+        Ok(Update {
+            snapshot,
+            sample,
+            changes,
+        })
+    }
+
+    async fn deliver(&self, update: Result<Update>) -> Result<(), capnp::Error> {
+        let (taken, answer) = oneshot::channel();
+        self.updates
+            .unbounded_send(Delivery { update, taken })
+            .map_err(|_| capnp::Error::failed("nobody watches the agent any more".into()))?;
+        answer
+            .await
+            .map_err(|_| capnp::Error::failed("nobody watches the agent any more".into()))
+    }
+}
+
+impl agent_listener::Server for ListenerImpl {
+    async fn update(
+        self: Rc<Self>,
+        params: agent_listener::UpdateParams,
+        _: agent_listener::UpdateResults,
+    ) -> Result<(), capnp::Error> {
+        let update = self.decode(&params);
+        let failed = update.as_ref().err().map(|e| capnp::Error::failed(format!("{e:#}")));
+        self.deliver(update).await?;
+        failed.map_or(Ok(()), Err)
+    }
+
+    async fn ended(
+        self: Rc<Self>,
+        _: agent_listener::EndedParams,
+        _: agent_listener::EndedResults,
+    ) -> Result<(), capnp::Error> {
+        let _ = self.deliver(Err(anyhow!("the agent stopped"))).await;
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct Cache {
     services: Option<Tagged<Arc<[ServiceStats]>>>,
@@ -369,6 +468,23 @@ impl Session {
                 let mut request = self.client().watch_service_request();
                 request.get().set_name(&name);
                 request.get().set_watcher(capnp_rpc::new_client(watcher));
+                let handle = request.send().promise.await?.get()?.get_handle()?;
+                compio::runtime::spawn(async move {
+                    let _handle = handle;
+                    let _ = released.await;
+                })
+                .detach();
+                Ok(Reply::Watching)
+            }
+            Request::WatchAgent { spec, updates, released } => {
+                let listener = ListenerImpl {
+                    spec,
+                    snapshot: RefCell::new(None),
+                    updates,
+                };
+                let mut request = self.client().watch_request();
+                encode::metric_spec(&spec, request.get().init_spec());
+                request.get().set_listener(capnp_rpc::new_client(listener));
                 let handle = request.send().promise.await?.get()?.get_handle()?;
                 compio::runtime::spawn(async move {
                     let _handle = handle;

@@ -102,6 +102,7 @@ impl Processes {
     }
 
     /// Reads the list again. Needs an elevated caller.
+    #[tracing::instrument(name = "snapshot", level = "debug", skip_all)]
     pub fn read(&mut self) -> Result<()> {
         self.rows.clear();
         self.filled = 0;
@@ -133,6 +134,7 @@ impl Processes {
         Ok(())
     }
 
+    /// Ordered by pid.
     pub fn rows(&self) -> &[Row] {
         &self.rows
     }
@@ -217,6 +219,7 @@ impl Processes {
             }
             offset += next;
         }
+        self.rows.sort_unstable_by_key(|row| row.pid);
     }
 
     fn extension_at(row: &Row) -> usize {

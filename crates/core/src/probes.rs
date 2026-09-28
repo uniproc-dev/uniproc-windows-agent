@@ -1,5 +1,7 @@
 //! What a tick asks each process through a handle kept open for its lifetime.
 
+use std::time::{Duration, Instant};
+
 use fxhash::FxHashMap;
 use windows::Win32::{
     CloseHandle, GetCurrentProcessId, GetGuiResources, HANDLE, NtQueryInformationProcess,
@@ -25,52 +27,111 @@ impl Drop for Owned {
 
 unsafe impl Send for Owned {}
 
+/// How long a probed value may be old: every listed process is probed again
+/// within it.
+pub const PROBE_ROUND: Duration = Duration::from_secs(10);
+
+/// What a handle tells that the snapshot does not, as last probed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Probed {
+    pub power_throttling: Option<bool>,
+    pub io_priority: IoPriority,
+}
+
 struct Opened {
     sequence_number: u64,
     handle: Option<Owned>,
+    listed: u64,
+    probed: Probed,
+}
+
+impl Opened {
+    fn probe(&mut self) {
+        if let Some(Owned(handle)) = self.handle {
+            self.probed = Probed {
+                power_throttling: power_throttling(handle),
+                io_priority: io_priority(handle),
+            };
+        }
+    }
 }
 
 /// One limited-query handle per process, opened when it first shows up and
 /// closed when it is gone. A process that could not be opened is not retried.
+/// A process is probed as it shows up, then in turn by pid, so that each is
+/// probed again within [`PROBE_ROUND`].
 #[derive(Default)]
 pub struct Handles {
     open: FxHashMap<u32, Opened>,
+    synced: u64,
+    last: Option<Instant>,
+    cursor: u32,
 }
 
 impl Handles {
-    /// Opens the processes new to `rows`, reopens a reused pid, closes the gone.
+    /// Opens and probes the processes new to `rows`, reopens a reused pid,
+    /// closes the gone, and probes the next turn of the rest. `rows` are
+    /// ordered by pid.
+    #[tracing::instrument(name = "handles", level = "debug", skip_all)]
     pub fn sync(&mut self, rows: &[Row]) {
-        let mut seen = FxHashMap::default();
+        self.synced += 1;
+        let now = self.synced;
         for row in rows {
-            seen.insert(row.pid, row.sequence_number);
-            let fresh = self
-                .open
-                .get(&row.pid)
-                .is_none_or(|opened| opened.sequence_number != row.sequence_number);
-            if fresh {
-                let handle = crate::win::open_process(PROCESS_QUERY_LIMITED_INFORMATION, row.pid)
-                    .ok()
-                    .map(Owned);
-                self.open.insert(
-                    row.pid,
-                    Opened {
+            match self.open.get_mut(&row.pid) {
+                Some(opened) if opened.sequence_number == row.sequence_number => opened.listed = now,
+                _ => {
+                    let mut opened = Opened {
                         sequence_number: row.sequence_number,
-                        handle,
-                    },
-                );
+                        handle: crate::win::open_process(PROCESS_QUERY_LIMITED_INFORMATION, row.pid)
+                            .ok()
+                            .map(Owned),
+                        listed: now,
+                        probed: Probed::default(),
+                    };
+                    opened.probe();
+                    self.open.insert(row.pid, opened);
+                }
             }
         }
-        self.open.retain(|pid, opened| seen.get(pid) == Some(&opened.sequence_number));
+        self.open.retain(|_, opened| opened.listed == now);
+
+        let at = Instant::now();
+        let since = self.last.map_or(Duration::ZERO, |last| at - last);
+        self.last = Some(at);
+        let (start, share, next) = turn(rows, self.cursor, since);
+        for row in rows.iter().cycle().skip(start).take(share) {
+            if let Some(opened) = self.open.get_mut(&row.pid) {
+                opened.probe();
+            }
+        }
+        self.cursor = next;
     }
 
     pub fn get(&self, pid: u32) -> Option<HANDLE> {
         self.open.get(&pid)?.handle.as_ref().map(|owned| owned.0)
     }
 
+    /// The process's probed values; the default when it could not be read.
+    pub fn probed(&self, pid: u32) -> Probed {
+        self.open.get(&pid).map(|opened| opened.probed).unwrap_or_default()
+    }
+
     #[cfg(test)]
     fn unopened(&self) -> usize {
         self.open.values().filter(|o| o.handle.is_none()).count()
     }
+}
+
+/// The rows to probe now, as the index of the first and how many from it
+/// with wraparound: the share of the list that `since` is of
+/// [`PROBE_ROUND`], from the first pid at or past `cursor`. Also where the
+/// next turn starts.
+fn turn(rows: &[Row], cursor: u32, since: Duration) -> (usize, usize, u32) {
+    let share = (rows.len() as u128 * since.as_nanos()).div_ceil(PROBE_ROUND.as_nanos()) as usize;
+    let share = share.min(rows.len());
+    let start = rows.partition_point(|row| row.pid < cursor) % rows.len().max(1);
+    let next = rows.get((start + share) % rows.len().max(1)).map_or(0, |row| row.pid);
+    (start, share, next)
 }
 
 #[repr(C)]
@@ -125,7 +186,7 @@ pub fn io_priority(handle: HANDLE) -> IoPriority {
     }
 }
 
-/// The session this process runs in; [`gui_objects`] answers only for it.
+/// The session this process runs in; [`user_objects`] and [`gdi_objects`] answer only for it.
 pub fn own_session() -> Option<u32> {
     let mut session = 0u32;
     unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) }
@@ -133,15 +194,16 @@ pub fn own_session() -> Option<u32> {
         .then_some(session)
 }
 
-/// User objects and GDI objects the process holds. win32k answers only
-/// within the caller's session: for a process of another one this is 0.
-pub fn gui_objects(handle: HANDLE) -> (u32, u32) {
-    unsafe {
-        (
-            GetGuiResources(handle, GR_USEROBJECTS),
-            GetGuiResources(handle, GR_GDIOBJECTS),
-        )
-    }
+/// User objects the process holds. win32k answers only within the
+/// caller's session: for a process of another one this is 0.
+pub fn user_objects(handle: HANDLE) -> u32 {
+    unsafe { GetGuiResources(handle, GR_USEROBJECTS) }
+}
+
+/// GDI objects the process holds; like [`user_objects`], only within the
+/// caller's session.
+pub fn gdi_objects(handle: HANDLE) -> u32 {
+    unsafe { GetGuiResources(handle, GR_GDIOBJECTS) }
 }
 
 #[cfg(test)]
@@ -163,7 +225,39 @@ mod tests {
         let handle = handles.get(std::process::id()).expect("opened");
         assert!(power_throttling(handle).is_some());
         assert_ne!(io_priority(handle), IoPriority::Unknown);
-        let _ = gui_objects(handle);
+        let _ = (user_objects(handle), gdi_objects(handle));
+    }
+
+    #[test]
+    fn a_process_is_probed_as_it_shows_up() {
+        let mut handles = Handles::default();
+        handles.sync(&[me(1)]);
+        let probed = handles.probed(std::process::id());
+        assert!(probed.power_throttling.is_some());
+        assert_ne!(probed.io_priority, IoPriority::Unknown);
+        assert_eq!(handles.probed(0), Probed::default(), "nothing listed, nothing probed");
+    }
+
+    fn pids(pids: &[u32]) -> Vec<Row> {
+        pids.iter().map(|&pid| Row { pid, ..Default::default() }).collect()
+    }
+
+    #[test]
+    fn a_turn_is_the_share_of_the_list_its_time_is_of_the_round() {
+        let rows = pids(&[4, 8, 12, 16, 20, 24, 28, 32, 36, 40]);
+        assert_eq!(turn(&rows, 0, Duration::ZERO), (0, 0, 4));
+        assert_eq!(turn(&rows, 0, PROBE_ROUND / 5), (0, 2, 12));
+        assert_eq!(turn(&rows, 12, PROBE_ROUND / 5), (2, 2, 20));
+        assert_eq!(turn(&rows, 0, PROBE_ROUND * 3), (0, 10, 4), "never more than the whole list");
+    }
+
+    #[test]
+    fn turns_wrap_around_and_skip_a_pid_that_left() {
+        let rows = pids(&[4, 8, 12, 16]);
+        assert_eq!(turn(&rows, 12, PROBE_ROUND / 2), (2, 2, 4), "12 and 16, then back to 4");
+        assert_eq!(turn(&rows, 10, PROBE_ROUND / 4), (2, 1, 16), "10 left: its turn goes to 12");
+        assert_eq!(turn(&rows, 99, PROBE_ROUND / 4), (0, 1, 8), "past the last pid starts over");
+        assert_eq!(turn(&[], 12, PROBE_ROUND), (0, 0, 0));
     }
 
     #[test]

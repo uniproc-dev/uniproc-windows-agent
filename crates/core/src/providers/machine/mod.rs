@@ -29,6 +29,7 @@ impl MachineProbe {
     }
 
     /// The wanted groups; disk and network come from the ETW totals.
+    #[tracing::instrument(name = "machine", level = "debug", skip_all)]
     pub fn sample(&mut self, wanted: MachineMetrics, totals: &MachineTotals) -> MachineSample {
         let mut sample = MachineSample::default();
         if wanted.contains(MachineMetric::Cpu) {

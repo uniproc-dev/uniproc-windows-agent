@@ -7,10 +7,10 @@ use futures::channel::oneshot;
 use futures::future::{Either, select};
 use ogurpchik::auth::handshake::Version;
 use uniproc_protocol::meta_capnp::{self, ResponseStatus};
-use uniproc_protocol::windows_capnp::{sampler, service_watcher, watch_handle, windows_agent};
+use uniproc_protocol::windows_capnp::{agent_listener, sampler, service_watcher, watch_handle, windows_agent};
 
-use uniproc_windows_agent::api::{Command, CommandResult};
-use uniproc_windows_agent::local::{Local, LocalSampler, ServiceWatch};
+use uniproc_windows_agent::api::{Command, CommandResult, Snapshot};
+use uniproc_windows_agent::local::{Local, LocalSampler, LocalWatch, ServiceWatch};
 use uniproc_windows_agent::wire::{self, decode, encode};
 
 #[derive(Clone)]
@@ -86,6 +86,25 @@ async fn forward(
     let mut request = watcher.ended_request();
     request.get().init_meta();
     let _ = request.send().promise.await;
+}
+
+async fn push(mut watch: LocalWatch, listener: agent_listener::Client, mut released: oneshot::Receiver<()>) {
+    let mut before: Option<Snapshot> = None;
+    loop {
+        let update = match select(&mut released, std::pin::pin!(watch.next())).await {
+            Either::Left(_) => return,
+            Either::Right((update, _)) => update,
+        };
+        let mut request = listener.update_request();
+        request.get().init_meta();
+        if encode::update(&update, before.as_ref(), request.get()).is_err() {
+            return;
+        }
+        if request.send().promise.await.is_err() {
+            return;
+        }
+        before = Some(update.snapshot);
+    }
 }
 
 fn code(outcome: CommandResult) -> u32 {
@@ -270,6 +289,23 @@ impl windows_agent::Server for AgentImpl {
         let watcher = params.get_watcher()?;
         let (release, released) = oneshot::channel();
         compio::runtime::spawn(forward(self.agent.watch_service(&name), watcher, released)).detach();
+        unconditional(results.get().init_meta());
+        results
+            .get()
+            .set_handle(capnp_rpc::new_client(WatchHandleImpl { _release: release }));
+        Ok(())
+    }
+
+    async fn watch(
+        self: Rc<Self>,
+        params: windows_agent::WatchParams,
+        mut results: windows_agent::WatchResults,
+    ) -> Result<(), capnp::Error> {
+        let params = params.get()?;
+        let spec = decode::metric_spec(params.get_spec()?)?;
+        let listener = params.get_listener()?;
+        let (release, released) = oneshot::channel();
+        compio::runtime::spawn(push(self.agent.watch(spec), listener, released)).detach();
         unconditional(results.get().init_meta());
         results
             .get()

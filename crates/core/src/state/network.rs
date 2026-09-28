@@ -75,7 +75,7 @@ mod tests {
 
     fn table(rows: &[Row]) -> ProcessTable {
         let mut t = ProcessTable::new();
-        t.reconcile(rows, |_| Sighted::default());
+        t.reconcile(rows, |_| Sighted::default(), |_| {});
         t
     }
 
@@ -106,7 +106,7 @@ mod tests {
         n.charge(&deltas(100, 10, 0), &t);
 
         let next = [row(100, 9)];
-        t.reconcile(&next, |_| Sighted::default());
+        t.reconcile(&next, |_| Sighted::default(), |_| {});
         n.retain_listed(&t);
         assert_eq!(n.get(100, 9), NetworkStats::default());
         assert_eq!(n.get(100, 1), NetworkStats::default(), "the old process is forgotten");

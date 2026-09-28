@@ -52,8 +52,7 @@ fn main() -> Result<()> {
             info!("[+] Service uninstalled successfully.");
         }
         Some(Command::Run) => {
-            logger::init_console();
-            service::run_direct()?;
+            service::run_direct(logger::init())?;
         }
         None => {
             service::run_as_service(SERVICE_NAME)?;

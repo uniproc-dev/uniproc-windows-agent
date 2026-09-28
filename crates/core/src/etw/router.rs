@@ -407,7 +407,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_quiet_batch_is_handed_over_on_anyone_elses_event_once_due() {
-        let (sink, rx) = Sink::bounded(16);
+        let (sink, rx) = Sink::bounded(16, || {});
         let mut core = RouterCore {
             routes: vec![(QUIET.to_u128(), vec![Target::Batch(0)])],
             handlers: Vec::new(),
@@ -436,7 +436,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "requires admin and a real ETW session"]
     fn a_session_stopped_from_outside_shows_in_the_health() {
-        let (sink, _rx) = Sink::bounded(1024);
+        let (sink, _rx) = Sink::bounded(1024, || {});
         let mut builder = KernelRouter::builder();
         builder
             .session_namespace("Uniproc-HealthTest-")
@@ -472,7 +472,7 @@ pub(crate) mod tests {
         let _guard = ETW_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let manifest_name = manifest_session_name(&KERNEL_PROCESS_PROVIDER);
 
-        let (sink, _rx) = Sink::bounded(16);
+        let (sink, _rx) = Sink::bounded(16, || {});
         let mut builder = KernelRouter::builder();
         builder
             .kernel_flags(EVENT_TRACE_FLAG_NETWORK_TCPIP)
@@ -509,7 +509,7 @@ pub(crate) mod tests {
                 .expect("leftover session"),
         );
 
-        let (sink, rx) = Sink::bounded(1 << 16);
+        let (sink, rx) = Sink::bounded(1 << 16, || {});
         let mut builder = KernelRouter::builder();
         crate::providers::disk::KernelDiskProvider::new()
             .register(&mut builder)
@@ -536,7 +536,6 @@ pub(crate) mod tests {
                 match change {
                     StateChange::Disk(_) => disk = true,
                     StateChange::Network(_) => network = true,
-                    _ => {}
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -556,7 +555,7 @@ pub(crate) mod tests {
             .with_writer(std::io::stderr)
             .try_init();
 
-        let (sink, rx) = Sink::bounded(4096);
+        let (sink, rx) = Sink::bounded(4096, || {});
         let started = Arc::new(AtomicBool::new(false));
         let mut builder = KernelRouter::builder();
         crate::providers::network::KernelNetworkProvider::new()

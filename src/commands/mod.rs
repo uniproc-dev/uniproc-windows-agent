@@ -7,7 +7,7 @@ use futures::channel::oneshot;
 use uniproc_agent_kit::{Busy, Runner};
 
 use crate::api::{Command, CommandResult};
-use crate::scm::{self, ScHandle, Scm, ServiceAction, Watching};
+use crate::scm::{ServiceAction, ServiceControl};
 
 /// Win32 ERROR_BUSY: an operation on this target is already in flight.
 const ERROR_BUSY: u32 = 170;
@@ -45,27 +45,22 @@ fn target(command: &Command) -> Target {
 #[derive(Clone)]
 pub struct Commands {
     runner: Runner<Target>,
-    shared: Arc<Shared>,
-}
-
-struct Shared {
-    scm: Scm,
-    watching: Watching,
+    services: Arc<ServiceControl>,
 }
 
 impl Commands {
-    pub fn start(scm: Scm, watching: Watching) -> std::io::Result<Self> {
+    pub fn start(services: ServiceControl) -> std::io::Result<Self> {
         Ok(Self {
             runner: Runner::start("command", WORKERS)?,
-            shared: Arc::new(Shared { scm, watching }),
+            services: Arc::new(services),
         })
     }
 
     /// Answers `ERROR_BUSY` at once while another command runs for the same
     /// process or service. The answer fails only if the command panicked.
     pub fn run(&self, command: Command) -> oneshot::Receiver<CommandResult> {
-        let shared = self.shared.clone();
-        match self.runner.run(target(&command), move || shared.execute(command)) {
+        let services = self.services.clone();
+        match self.runner.run(target(&command), move || execute(&services, command)) {
             Ok(answer) => answer,
             Err(Busy) => {
                 let (tx, rx) = oneshot::channel();
@@ -76,44 +71,30 @@ impl Commands {
     }
 }
 
-impl Shared {
-    fn execute(&self, command: Command) -> CommandResult {
-        match command {
-            Command::Kill { pid } => process::kill(pid),
-            Command::Suspend { pid } => process::suspend(pid),
-            Command::Resume { pid } => process::resume(pid),
-            Command::SetPriority { pid, priority } => process::set_priority(pid, priority),
-            Command::SetAffinity { pid, mask } => process::set_affinity(pid, mask),
-            Command::ServiceStart { name } => self.control(&name, ServiceAction::Start),
-            Command::ServiceStop { name } => self.control(&name, ServiceAction::Stop),
-            Command::ServicePause { name } => self.control(&name, ServiceAction::Pause),
-            Command::ServiceResume { name } => self.control(&name, ServiceAction::Resume),
-            Command::ServiceRestart { name } => self.on_service(&name, |scm| scm::restart(scm, &name)),
-        }
-    }
-
-    fn control(&self, name: &str, action: ServiceAction) -> CommandResult {
-        self.on_service(name, |scm| scm::control(scm, name, action))
-    }
-
-    fn on_service(&self, name: &str, act: impl FnOnce(ScHandle) -> CommandResult) -> CommandResult {
-        let hold = self.watching.hold(name, FOLLOW_FOR);
-        let result = act(self.scm.connection()?.handle());
-        if result.is_ok() {
-            hold.keep();
-        }
-        result
+fn execute(services: &ServiceControl, command: Command) -> CommandResult {
+    let service = |name: &str, action| services.act(name, FOLLOW_FOR, action);
+    match command {
+        Command::Kill { pid } => process::kill(pid),
+        Command::Suspend { pid } => process::suspend(pid),
+        Command::Resume { pid } => process::resume(pid),
+        Command::SetPriority { pid, priority } => process::set_priority(pid, priority),
+        Command::SetAffinity { pid, mask } => process::set_affinity(pid, mask),
+        Command::ServiceStart { name } => service(&name, ServiceAction::Start),
+        Command::ServiceStop { name } => service(&name, ServiceAction::Stop),
+        Command::ServicePause { name } => service(&name, ServiceAction::Pause),
+        Command::ServiceResume { name } => service(&name, ServiceAction::Resume),
+        Command::ServiceRestart { name } => service(&name, ServiceAction::Restart),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scm::Watcher;
+    use crate::scm::{ServiceEvent, Services};
 
-    fn commands() -> (Commands, Watcher) {
-        let watcher = Watcher::start(Scm::new(), |_, _| {}).unwrap();
-        (Commands::start(Scm::new(), watcher.watching()).unwrap(), watcher)
+    fn commands() -> (Commands, Services) {
+        let services = Services::start(|_| {}).unwrap();
+        (Commands::start(services.control()).unwrap(), services)
     }
 
     fn answer(rx: oneshot::Receiver<CommandResult>) -> CommandResult {
@@ -129,15 +110,15 @@ mod tests {
         let name = std::env::var("UNIPROC_TEST_SERVICE")
             .unwrap_or_else(|_| crate::api::SERVICE_NAME.to_string());
         let (published, heard) = crossbeam_channel::unbounded();
-        let watcher = Watcher::start(Scm::new(), move |_, status| {
-            if let Some(status) = status {
+        let services = Services::start(move |event| {
+            if let ServiceEvent::Status(_, Some(status)) = event {
                 let _ = published.send(status.state);
             }
         })
         .unwrap();
-        let commands = Commands::start(Scm::new(), watcher.watching()).unwrap();
+        let commands = Commands::start(services.control()).unwrap();
 
-        let mut watch = watcher.watching().watch(&name);
+        let mut watch = services.control().watch(&name);
         let first = futures::executor::block_on(watch.next()).expect("the service exists");
         assert_eq!(first.state, ServiceState::Running, "{name} must be running to begin with");
 

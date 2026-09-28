@@ -1,34 +1,34 @@
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::anyhow;
 use parking_lot::Mutex;
-use uniproc_agent_kit::{Collector, Monitor, Waker, Why};
-use uniproc_windows_core::{Demand, Supervisor, SupervisorConfig};
+use uniproc_agent_kit::monitor;
+use uniproc_windows_core::SupervisorConfig;
 
 use crate::api::{
     Command, CommandResult, MetricSpec, ProcessInfo, ProcessStates, ServiceStats, Snapshot, Tagged,
 };
 use crate::commands::Commands;
-use crate::feed::Feed;
+use crate::feed::{Feed, Painter};
 use crate::profile;
 use crate::sampler::Subscriptions;
-use crate::scm::{Inventory, Scm, Watcher, Watching};
+use crate::scm::ServiceControl;
+use crate::sources::Sources;
 
 pub use crate::feed::Published;
 pub use crate::sampler::LocalSampler;
 pub use crate::scm::ServiceWatch;
-pub use uniproc_windows_core::{ProbeCost, SessionHealth};
+pub use crate::watch::LocalWatch;
+pub use uniproc_windows_core::SessionHealth;
 
 /// Passports and states are read this often while a client is attached and nobody subscribes.
 pub const ATTACHED_PERIOD: Duration = Duration::from_millis(1000);
 
 /// And this often while nobody is attached.
 pub const IDLE_PERIOD: Duration = Duration::from_millis(2000);
-
-const SPACING: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 pub enum StartError {
@@ -54,33 +54,15 @@ impl std::error::Error for StartError {}
 /// app - reads the same published snapshots. Monitoring stops when the
 /// last holder drops it, or at [`stop`](Self::stop).
 pub struct Local {
-    feed: Arc<Feed>,
-    subscriptions: Arc<Subscriptions>,
+    feed: Feed,
     commands: Commands,
-    watching: Watching,
+    services: ServiceControl,
     running: Mutex<Option<Running>>,
 }
 
 struct Running {
-    _monitor: Monitor,
-    _inventory: Inventory,
-    _watcher: Watcher,
-}
-
-struct Core {
-    supervisor: Supervisor,
-    feed: Arc<Feed>,
-}
-
-impl Collector for Core {
-    fn start(&mut self, waker: Waker) -> anyhow::Result<()> {
-        self.supervisor.start(move || waker.wake())
-    }
-
-    fn tick(&mut self, _: Why) -> Instant {
-        self.feed.report(self.supervisor.tick());
-        self.supervisor.due()
-    }
+    _sources: Sources,
+    _painter: Painter,
 }
 
 impl Local {
@@ -100,39 +82,23 @@ impl Local {
     }
 
     fn launch(config: SupervisorConfig, idle: Duration) -> anyhow::Result<Self> {
-        let feed = Arc::new(Feed::new());
-        let demand = Demand::new(idle);
-        let monitor = Monitor::start(
-            "core",
-            SPACING,
-            Core {
-                supervisor: Supervisor::new(config, demand.clone()),
-                feed: feed.clone(),
-            },
-        )?;
-        let subscriptions = Subscriptions::new(demand, {
-            let waker = monitor.waker();
+        let (waker, wakes) = monitor::channel();
+        let subscriptions = Subscriptions::new(idle, {
+            let waker = waker.clone();
             move || waker.wake()
         });
-        let scm = Scm::new();
-        let inventory = Inventory::start(scm.clone(), {
-            let feed = feed.clone();
-            move |services| feed.services(services)
-        })?;
-        let watcher = Watcher::start(scm.clone(), {
-            let feed = feed.clone();
-            move |name, status| feed.service_status(name, status)
-        })?;
-        let watching = watcher.watching();
+        let demand = subscriptions.demand();
+        let (spare, spares) = crossbeam_channel::unbounded();
+        let (painter, changes, feed) = Painter::start(subscriptions, spare)?;
+        let sources = Sources::start(config, demand, (waker, wakes), changes, spares)?;
+        let services = sources.control();
         Ok(Self {
             feed,
-            subscriptions,
-            commands: Commands::start(scm, watching.clone())?,
-            watching,
+            commands: Commands::start(services.clone())?,
+            services,
             running: Mutex::new(Some(Running {
-                _monitor: monitor,
-                _inventory: inventory,
-                _watcher: watcher,
+                _sources: sources,
+                _painter: painter,
             })),
         })
     }
@@ -168,15 +134,22 @@ impl Local {
     }
 
     /// Samples what `spec` asks for until the sampler is dropped. The core
-    /// samples the union of every live sampler at the shortest interval.
+    /// samples the union of every live sampler at the shortest interval, and
+    /// the agent delivers each one the samples it is due at its own.
     pub fn subscribe(&self, spec: MetricSpec) -> LocalSampler {
-        LocalSampler::new(self.feed.clone(), &self.subscriptions, spec)
+        self.feed.subscribe(spec)
+    }
+
+    /// Pushes every sample `spec` is due with the lists it was taken against
+    /// and what moved in them, until the watch is dropped.
+    pub fn watch(&self, spec: MetricSpec) -> LocalWatch {
+        LocalWatch::new(self.feed.subscribe(spec))
     }
 
     /// Whether a client is attached: passports and states then refresh at
     /// [`ATTACHED_PERIOD`] even while nobody subscribes.
     pub fn set_attached(&self, attached: bool) {
-        self.subscriptions
+        self.feed
             .set_idle(if attached { ATTACHED_PERIOD } else { IDLE_PERIOD });
     }
 
@@ -193,7 +166,7 @@ impl Local {
     /// it starts, stops, pauses or resumes one. Ends when the service is
     /// deleted, cannot be opened, or monitoring stops.
     pub fn watch_service(&self, name: &str) -> ServiceWatch {
-        self.watching.watch(name)
+        self.services.watch(name)
     }
 }
 

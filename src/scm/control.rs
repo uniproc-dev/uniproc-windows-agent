@@ -16,39 +16,39 @@ pub enum ServiceAction {
     Stop,
     Pause,
     Resume,
+    Restart,
 }
 
-pub fn control(scm: ScHandle, name: &str, action: ServiceAction) -> CommandResult {
-    let access = match action {
-        ServiceAction::Start => SERVICE_START,
-        ServiceAction::Stop => SERVICE_STOP | SERVICE_QUERY_STATUS,
-        ServiceAction::Pause | ServiceAction::Resume => SERVICE_PAUSE_CONTINUE,
-    };
+pub fn act(scm: ScHandle, name: &str, action: ServiceAction) -> CommandResult {
+    match action {
+        ServiceAction::Start => start(scm, name),
+        ServiceAction::Stop => send(scm, name, SERVICE_CONTROL_STOP, SERVICE_STOP | SERVICE_QUERY_STATUS),
+        ServiceAction::Pause => send(scm, name, SERVICE_CONTROL_PAUSE, SERVICE_PAUSE_CONTINUE),
+        ServiceAction::Resume => send(scm, name, SERVICE_CONTROL_CONTINUE, SERVICE_PAUSE_CONTINUE),
+        ServiceAction::Restart => restart(scm, name),
+    }
+}
+
+fn start(scm: ScHandle, name: &str) -> CommandResult {
+    let service = Service::open(scm, name, SERVICE_START).map_err(|e| win32_code(&e))?;
+    unsafe { StartServiceW(service.0, None) }.ok().map_err(|e| win32_code(&e))
+}
+
+fn send(scm: ScHandle, name: &str, control: i32, access: i32) -> CommandResult {
     let service = Service::open(scm, name, access).map_err(|e| win32_code(&e))?;
-
     let mut status = SERVICE_STATUS_PROCESS::default();
-    let status_ptr = &mut status as *mut _ as *mut _;
-    let result = unsafe {
-        match action {
-            ServiceAction::Start => StartServiceW(service.0, None),
-            ServiceAction::Stop => ControlService(service.0, SERVICE_CONTROL_STOP as u32, status_ptr),
-            ServiceAction::Pause => ControlService(service.0, SERVICE_CONTROL_PAUSE as u32, status_ptr),
-            ServiceAction::Resume => {
-                ControlService(service.0, SERVICE_CONTROL_CONTINUE as u32, status_ptr)
-            }
-        }
-    };
-
-    result.ok().map_err(|e| win32_code(&e))
+    unsafe { ControlService(service.0, control as u32, &mut status as *mut _ as *mut _) }
+        .ok()
+        .map_err(|e| win32_code(&e))
 }
 
-pub fn restart(scm: ScHandle, name: &str) -> CommandResult {
-    match control(scm, name, ServiceAction::Stop) {
+fn restart(scm: ScHandle, name: &str) -> CommandResult {
+    match act(scm, name, ServiceAction::Stop) {
         Err(code) if code != ERROR_SERVICE_NOT_ACTIVE => return Err(code),
         _ => {}
     }
     wait_for_status(scm, name, SERVICE_STOPPED as u32)?;
-    control(scm, name, ServiceAction::Start)
+    start(scm, name)
 }
 
 fn wait_for_status(scm: ScHandle, name: &str, desired: u32) -> CommandResult {

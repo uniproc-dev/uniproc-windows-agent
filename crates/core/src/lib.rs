@@ -19,11 +19,12 @@ pub use model::{
     Architecture, DpiAwareness, ExtendedCfg, IoPriority, Isolation, Mitigations, ProcessPriority,
     ProcessState, StackProtection, UacVirtualization,
 };
-pub use report::{Process, ProbeCost, Report, SessionHealth, SignatureStatus};
+pub use report::{Diff, Health, Process, SessionHealth, SignatureStatus};
 pub use sample::{
     Columns, Demand, MAX_INTERVAL, MIN_INTERVAL, MachineCpu, MachineDisk, MachineMemory,
     MachineMetric, MachineMetrics, MachineNetwork, MachineSample, MetricSpec, NO_DATA_U32,
     NO_DATA_U64, ProcessMetric, ProcessMetrics, Sample,
 };
+pub use smol_str::SmolStr;
 pub use supervisor::{Supervisor, SupervisorConfig};
 pub use uniproc_agent_kit::{Epoch, Tagged};

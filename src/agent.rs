@@ -5,9 +5,9 @@ use anyhow::Result;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use crate::api::{Command, CommandResult, MetricSpec, Sample, ServiceStatus, Snapshot};
-use crate::local::{Local, LocalSampler, StartError};
-use crate::remote::{Remote, RemoteSampler};
+use crate::api::{Command, CommandResult, MetricSpec, Sample, ServiceStatus, Snapshot, Update};
+use crate::local::{Local, LocalSampler, LocalWatch, StartError};
+use crate::remote::{Remote, RemoteSampler, RemoteWatch};
 
 /// The agent either way: running in this process or behind the service's pipe.
 /// Both answer the same calls with the same `api` structs.
@@ -54,6 +54,15 @@ impl Agent {
         Ok(Sampler { inner, last: 0 })
     }
 
+    /// Pushes every sample `spec` is due, with the lists it was taken against
+    /// and what moved in them, until the watch is dropped.
+    pub async fn watch(&self, spec: MetricSpec) -> Result<Watch> {
+        Ok(match self {
+            Self::Local(agent) => Watch::Local(agent.watch(spec)),
+            Self::Remote(remote) => Watch::Remote(remote.watch(spec).await?),
+        })
+    }
+
     /// Awaiting it never blocks an executor: in process the command runs on the agent's own threads.
     pub async fn run(&self, command: Command) -> Result<CommandResult> {
         match self {
@@ -97,6 +106,24 @@ impl Sampler {
     }
 }
 
+/// One watch; the agent stops pushing to it when it is dropped.
+pub enum Watch {
+    Local(LocalWatch),
+    Remote(RemoteWatch),
+}
+
+impl Watch {
+    /// The next update; the first carries everything. Paced at the spec's
+    /// interval. Over the pipe an error means the watch is over: the agent
+    /// stopped or the session ended; watch again.
+    pub async fn next(&mut self) -> Result<Update> {
+        match self {
+            Self::Local(watch) => Ok(watch.next().await),
+            Self::Remote(watch) => watch.next().await,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,10 +132,12 @@ mod tests {
 
     #[test]
     fn every_call_can_be_awaited_on_any_executor() {
-        fn calls(agent: &Agent, sampler: &mut Sampler) {
+        fn calls(agent: &Agent, sampler: &mut Sampler, watch: &mut Watch) {
             send(agent.ping());
             send(agent.snapshot());
             send(agent.subscribe(MetricSpec::default()));
+            send(agent.watch(MetricSpec::default()));
+            send(watch.next());
             send(agent.run(Command::Kill { pid: 0 }));
             send(agent.watch_service("svc"));
             send(sampler.next());
@@ -121,5 +150,6 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Agent>();
         assert_send_sync::<Sampler>();
+        assert_send_sync::<Watch>();
     }
 }

@@ -7,6 +7,9 @@ edition = "2024"
 name = "uniproc-windows-agent"
 path = "src/main.rs"
 
+[features]
+tracy = ["dep:tracing-tracy"]
+
 [dependencies]
 uniproc-windows-agent = { path = "../.." }
 uniproc-windows-http = { path = "../http" }
@@ -18,5 +21,6 @@ dhat = "0.3.3"
 ctrlc = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-tracy = { version = "0.12", default-features = false, features = ["enable", "only-localhost", "ondemand"], optional = true }
 compio = { version = "0.18.0", features = ["time"] }
 anyhow = "1"
