@@ -20,7 +20,7 @@ anyhow = "1"
 tracing = "0.1"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
-uniproc-agent-kit = { git = "https://github.com/uniproc-dev/uniproc-agent-kit", tag = "v0.1.2" }
+uniproc-agent-kit = { git = "https://github.com/uniproc-dev/uniproc-agent-kit", tag = "v0.2.0" }
 roxmltree = "0.20"
 
 [dev-dependencies]

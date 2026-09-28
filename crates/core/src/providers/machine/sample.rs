@@ -22,6 +22,8 @@ pub struct PdhProcessorPerformance {
     last: Option<f64>,
 }
 
+unsafe impl Send for PdhProcessorPerformance {}
+
 impl PdhProcessorPerformance {
     pub fn open() -> Option<Self> {
         unsafe {

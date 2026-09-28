@@ -1,11 +1,11 @@
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use parking_lot::Mutex;
-use uniproc_agent_kit::{Cadence, Monitor};
+use uniproc_agent_kit::{Collector, Monitor, Waker, Why};
 use uniproc_windows_core::{Demand, Supervisor, SupervisorConfig};
 
 use crate::api::{
@@ -27,6 +27,8 @@ pub const ATTACHED_PERIOD: Duration = Duration::from_millis(1000);
 
 /// And this often while nobody is attached.
 pub const IDLE_PERIOD: Duration = Duration::from_millis(2000);
+
+const SPACING: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 pub enum StartError {
@@ -60,9 +62,25 @@ pub struct Local {
 }
 
 struct Running {
-    _monitor: Arc<Monitor>,
+    _monitor: Monitor,
     _inventory: Inventory,
     _watcher: Watcher,
+}
+
+struct Core {
+    supervisor: Supervisor,
+    feed: Arc<Feed>,
+}
+
+impl Collector for Core {
+    fn start(&mut self, waker: Waker) -> anyhow::Result<()> {
+        self.supervisor.start(move || waker.wake())
+    }
+
+    fn tick(&mut self, _: Why) -> Instant {
+        self.feed.report(self.supervisor.tick());
+        self.supervisor.due()
+    }
 }
 
 impl Local {
@@ -84,24 +102,18 @@ impl Local {
     fn launch(config: SupervisorConfig, idle: Duration) -> anyhow::Result<Self> {
         let feed = Arc::new(Feed::new());
         let demand = Demand::new(idle);
-        let subscriptions = Subscriptions::new(demand.clone());
-        let monitor = Arc::new(Monitor::start(
+        let monitor = Monitor::start(
             "core",
-            Cadence {
-                period: demand.period(),
-                ..Cadence::default()
+            SPACING,
+            Core {
+                supervisor: Supervisor::new(config, demand.clone()),
+                feed: feed.clone(),
             },
-            move || {
-                let mut supervisor = Supervisor::new(config, demand);
-                supervisor.start()?;
-                Ok(move || supervisor.tick())
-            },
-            {
-                let feed = feed.clone();
-                move |report| feed.report(report)
-            },
-        )?);
-        subscriptions.drive(&monitor);
+        )?;
+        let subscriptions = Subscriptions::new(demand, {
+            let waker = monitor.waker();
+            move || waker.wake()
+        });
         let scm = Scm::new();
         let inventory = Inventory::start(scm.clone(), {
             let feed = feed.clone();

@@ -1,10 +1,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::thread::Thread;
 
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::state::events::StateChange;
+
+type Wake = Box<dyn Fn() + Send + Sync>;
 
 /// Channel capacity. What passes through is an enrichment per new process
 /// and a disk and a network batch per window; the process list itself is read
@@ -16,7 +17,7 @@ pub const DEFAULT_CAPACITY: usize = 4096;
 pub struct Sink {
     tx: Sender<StateChange>,
     dropped: Arc<AtomicU64>,
-    drainer: Arc<OnceLock<Thread>>,
+    drainer: Arc<OnceLock<Wake>>,
     high_water: usize,
 }
 
@@ -34,11 +35,10 @@ impl Sink {
         )
     }
 
-    /// The thread that drains the channel; it is woken by every change a
-    /// report shows at once, and when the channel is half full, instead of
-    /// waiting for its period.
-    pub fn set_drainer(&self, thread: Thread) {
-        let _ = self.drainer.set(thread);
+    /// Wakes whoever drains the channel: on every change a report shows at
+    /// once, and when the channel is half full, instead of waiting for its period.
+    pub fn set_drainer(&self, wake: impl Fn() + Send + Sync + 'static) {
+        let _ = self.drainer.set(Box::new(wake));
     }
 
     pub fn emit(&self, change: StateChange) {
@@ -47,9 +47,9 @@ impl Sink {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
         if (reported || self.tx.len() >= self.high_water)
-            && let Some(drainer) = self.drainer.get()
+            && let Some(wake) = self.drainer.get()
         {
-            drainer.unpark();
+            wake();
         }
     }
 
@@ -81,7 +81,8 @@ mod tests {
             std::thread::park_timeout(Duration::from_secs(30));
             started.elapsed()
         });
-        sink.set_drainer(drainer.thread().clone());
+        let thread = drainer.thread().clone();
+        sink.set_drainer(move || thread.unpark());
 
         sink.emit(traffic());
         sink.emit(traffic());
@@ -98,7 +99,8 @@ mod tests {
             std::thread::park_timeout(Duration::from_secs(30));
             started.elapsed()
         });
-        sink.set_drainer(drainer.thread().clone());
+        let thread = drainer.thread().clone();
+        sink.set_drainer(move || thread.unpark());
 
         sink.emit(StateChange::ProcessEnriched(Box::default()));
 

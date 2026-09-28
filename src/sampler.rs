@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use uniproc_agent_kit::Monitor;
 use uniproc_windows_core::Demand;
 
 use crate::api::{MetricSpec, Sample};
@@ -14,7 +13,7 @@ use crate::feed::Feed;
 pub(crate) struct Subscriptions {
     demand: Demand,
     live: Mutex<Live>,
-    monitor: Mutex<Weak<Monitor>>,
+    wake: Box<dyn Fn() + Send + Sync>,
 }
 
 #[derive(Default)]
@@ -24,24 +23,19 @@ struct Live {
 }
 
 impl Subscriptions {
-    pub fn new(demand: Demand) -> Arc<Self> {
+    /// `wake` makes the core look at the demand again at once.
+    pub fn new(demand: Demand, wake: impl Fn() + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
             demand,
             live: Mutex::new(Live::default()),
-            monitor: Mutex::new(Weak::new()),
+            wake: Box::new(wake),
         })
-    }
-
-    /// The monitor whose period follows the union.
-    pub fn drive(&self, monitor: &Arc<Monitor>) {
-        *self.monitor.lock() = Arc::downgrade(monitor);
-        self.retune();
     }
 
     /// How often the core samples while nobody subscribes.
     pub fn set_idle(&self, idle: Duration) {
         self.demand.set_idle(idle);
-        self.retune();
+        (self.wake)();
     }
 
     fn add(self: &Arc<Self>, spec: MetricSpec) -> Subscription {
@@ -65,11 +59,11 @@ impl Subscriptions {
     }
 
     fn retune(&self) {
-        let union = self.live.lock().specs.values().copied().reduce(MetricSpec::union);
-        self.demand.set_wanted(union);
-        if let Some(monitor) = self.monitor.lock().upgrade() {
-            monitor.set_period(self.demand.period());
+        {
+            let live = self.live.lock();
+            self.demand.set_wanted(live.specs.values().copied().reduce(MetricSpec::union));
         }
+        (self.wake)();
     }
 
     #[cfg(test)]
@@ -195,7 +189,7 @@ mod tests {
 
     fn setup() -> (Arc<Feed>, Arc<Subscriptions>, Demand) {
         let demand = Demand::new(Duration::from_secs(2));
-        (Arc::new(Feed::new()), Subscriptions::new(demand.clone()), demand)
+        (Arc::new(Feed::new()), Subscriptions::new(demand.clone(), || {}), demand)
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
@@ -23,9 +23,6 @@ use crate::state::SystemState;
 use crate::state::events::{EnrichRequest, StateChange};
 use crate::state::process::Sighted;
 use uniproc_agent_kit::Tagged;
-
-/// A sample this close to due is taken now rather than a period late.
-const DUE_TOLERANCE: Duration = Duration::from_millis(5);
 
 struct Sampled {
     processes: Tagged<Arc<[Process]>>,
@@ -97,15 +94,15 @@ impl Supervisor {
         }
     }
 
-    /// Starts the sessions and providers. The calling thread is the one woken
-    /// to tick when events pile up, so it should be the one that ticks.
-    pub fn start(&mut self) -> Result<()> {
+    /// Starts the sessions and providers. `wake` asks whoever ticks for a
+    /// tick now: an enrichment came in, or events pile up.
+    pub fn start(&mut self, wake: impl Fn() + Send + Sync + 'static) -> Result<()> {
         if let Err(error) = crate::privileges::enable(windows::core::w!("SeDebugPrivilege")) {
             tracing::warn!(%error, "running without SeDebugPrivilege: other accounts' processes stay opaque");
         }
 
         let (sink, rx) = Sink::bounded(crate::sink::DEFAULT_CAPACITY);
-        sink.set_drainer(std::thread::current());
+        sink.set_drainer(wake);
 
         let mut builder = KernelRouter::builder();
         if let Some(prefix) = &self.config.session_namespace {
@@ -134,7 +131,7 @@ impl Supervisor {
     }
 
     /// Applies what the providers sent since the last tick, samples when a
-    /// sample is due, and reports the result.
+    /// sample is [`due`](Self::due) or the demand grew, and reports the result.
     pub fn tick(&mut self) -> Arc<Report> {
         if let Some(rx) = self.rx.take() {
             for change in rx.try_iter() {
@@ -145,9 +142,7 @@ impl Supervisor {
 
         let spec = self.demand.now();
         let grown = self.demand.take_grown();
-        let on_time = self
-            .sampled
-            .is_none_or(|at| at.elapsed() + DUE_TOLERANCE >= spec.period());
+        let on_time = self.sampled.is_none_or(|at| at.elapsed() >= spec.period());
         if on_time {
             self.sampled = Some(Instant::now());
         }
@@ -174,6 +169,13 @@ impl Supervisor {
         });
         self.last = Some(report.clone());
         report
+    }
+
+    /// When the next sample is due: a period of the demand as it is now
+    /// after the last one taken on time. A sample taken because the demand
+    /// grew does not move it.
+    pub fn due(&self) -> Instant {
+        self.sampled.map_or_else(Instant::now, |at| at + self.demand.period())
     }
 
     fn time<T>(&mut self, name: &'static str, probe: impl FnOnce(&mut Self) -> T) -> T {
@@ -345,6 +347,7 @@ impl Drop for Supervisor {
 mod tests {
     use super::*;
     use crate::sample::{MachineMetric, MachineMetrics, ProcessMetrics};
+    use std::time::Duration;
 
     fn config() -> SupervisorConfig {
         SupervisorConfig {
@@ -366,10 +369,10 @@ mod tests {
             machine: MachineMetrics::all(),
         }));
         let mut supervisor = Supervisor::new(config(), demand);
-        supervisor.start().expect("elevated");
+        supervisor.start(|| {}).expect("elevated");
 
         let first = supervisor.tick();
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(supervisor.due().saturating_duration_since(Instant::now()));
         let second = supervisor.tick();
 
         for report in [&first, &second] {
@@ -404,10 +407,12 @@ mod tests {
             machine: [MachineMetric::Cpu].into_iter().collect(),
         }));
         let mut supervisor = Supervisor::new(config(), demand);
-        supervisor.start().expect("elevated");
+        supervisor.start(|| {}).expect("elevated");
+        let before = Instant::now();
         let first = supervisor.tick();
         let again = supervisor.tick();
         assert!(Arc::ptr_eq(&first.sample, &again.sample));
+        assert!(supervisor.due() >= before + Duration::from_secs(60));
         assert_eq!(first.sample.columns.working_set, None, "not asked for");
     }
 }

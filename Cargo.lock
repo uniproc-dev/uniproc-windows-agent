@@ -2247,8 +2247,8 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "uniproc-agent-kit"
-version = "0.1.2"
-source = "git+https://github.com/uniproc-dev/uniproc-agent-kit?tag=v0.1.2#61c754bb2d4c8175d85b4cc895b61ad3008984e0"
+version = "0.2.0"
+source = "git+https://github.com/uniproc-dev/uniproc-agent-kit?tag=v0.2.0#b8138fd8329c16f946b78e1ef9cb1983c24f5001"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
