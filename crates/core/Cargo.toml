@@ -15,7 +15,7 @@ ntapi = "0.4.3"
 fxhash = "0.2.1"
 binrw = "0.15.0"
 amethystate = { version = "0.22", default-features = false, features = ["redb"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 anyhow = "1"
 tracing = "0.1"
 parking_lot = "0.12"

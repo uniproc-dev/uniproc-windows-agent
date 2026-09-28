@@ -220,7 +220,10 @@ mod tests {
             .collect();
         judged.sort();
         assert_eq!(judged, [r"C:\no\such\a.exe", r"C:\no\such\b.exe"]);
-        assert_eq!(wakes.try_iter().count(), 2);
+        for _ in 0..2 {
+            wakes.recv_timeout(Duration::from_secs(5)).expect("a wake per verdict");
+        }
+        assert!(wakes.try_recv().is_err(), "no more wakes than verdicts");
     }
 
     #[test]

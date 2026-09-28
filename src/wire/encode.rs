@@ -157,6 +157,14 @@ fn process_metric(m: ProcessMetric) -> WireProcessMetric {
         ProcessMetric::DiskWriteBytes => WireProcessMetric::DiskWriteBytes,
         ProcessMetric::NetRxBytes => WireProcessMetric::NetRxBytes,
         ProcessMetric::NetTxBytes => WireProcessMetric::NetTxBytes,
+        ProcessMetric::VirtualSize => WireProcessMetric::VirtualSize,
+        ProcessMetric::PeakVirtualSize => WireProcessMetric::PeakVirtualSize,
+        ProcessMetric::PeakCommit => WireProcessMetric::PeakCommit,
+        ProcessMetric::PeakPagedPool => WireProcessMetric::PeakPagedPool,
+        ProcessMetric::PeakNonPagedPool => WireProcessMetric::PeakNonPagedPool,
+        ProcessMetric::HardFaults => WireProcessMetric::HardFaults,
+        ProcessMetric::PeakThreads => WireProcessMetric::PeakThreads,
+        ProcessMetric::ContextSwitches => WireProcessMetric::ContextSwitches,
     }
 }
 
@@ -166,6 +174,7 @@ fn machine_metric(m: MachineMetric) -> WireMachineMetric {
         MachineMetric::Memory => WireMachineMetric::Memory,
         MachineMetric::Disk => WireMachineMetric::Disk,
         MachineMetric::Network => WireMachineMetric::Network,
+        MachineMetric::Processors => WireMachineMetric::Processors,
     }
 }
 
@@ -406,6 +415,14 @@ fn process_columns(sample: &Sample, mut out: process_columns::Builder) -> capnp:
         disk_write_bytes => set_disk_write_bytes,
         net_rx_bytes => set_net_rx_bytes,
         net_tx_bytes => set_net_tx_bytes,
+        virtual_size => set_virtual_size,
+        peak_virtual_size => set_peak_virtual_size,
+        peak_commit => set_peak_commit,
+        peak_paged_pool => set_peak_paged_pool,
+        peak_non_paged_pool => set_peak_non_paged_pool,
+        hard_faults => set_hard_faults,
+        peak_threads => set_peak_threads,
+        context_switches => set_context_switches,
     );
     Ok(())
 }
@@ -418,6 +435,7 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         memory,
         disk,
         network,
+        processors,
     } = &sample.machine;
     if let Some(cpu) = cpu {
         let mut c = out.reborrow().init_cpu();
@@ -433,6 +451,8 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         let mut m = out.reborrow().init_memory();
         m.set_total_physical(memory.total_physical);
         m.set_available_physical(memory.available_physical);
+        m.set_commit_limit(memory.commit_limit);
+        m.set_committed(memory.committed);
     }
     if let Some(disk) = disk {
         let mut d = out.reborrow().init_disk();
@@ -445,5 +465,16 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         let mut n = out.reborrow().init_network();
         n.set_rx_bytes(network.rx_bytes);
         n.set_tx_bytes(network.tx_bytes);
+    }
+    if let Some(processors) = processors {
+        let mut list = out.reborrow().init_processors(processors.len() as u32);
+        for (i, p) in processors.iter().enumerate() {
+            let mut w = list.reborrow().get(i as u32);
+            w.set_idle_time(p.idle_time);
+            w.set_kernel_time(p.kernel_time);
+            w.set_user_time(p.user_time);
+            w.set_interrupt_time(p.interrupt_time);
+            w.set_dpc_time(p.dpc_time);
+        }
     }
 }

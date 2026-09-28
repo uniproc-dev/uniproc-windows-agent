@@ -123,6 +123,8 @@ pub fn physical_memory() -> Option<MachineMemory> {
     read.then_some(MachineMemory {
         total_physical: mem.ullTotalPhys.0,
         available_physical: mem.ullAvailPhys.0,
+        commit_limit: mem.ullTotalPageFile.0,
+        committed: mem.ullTotalPageFile.0.saturating_sub(mem.ullAvailPageFile.0),
     })
 }
 

@@ -34,7 +34,7 @@ mod tests {
     use super::{decode, encode};
     use crate::api::{
         Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
-        MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineSample,
+        MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample,
         MetricSpec, Mitigations, ProcessInfo, ProcessMetric, ProcessMetrics, ProcessPriority,
         ProcessState, ProcessStates, Sample, ServiceState, ServiceStats, ServiceStatus,
         SignatureStatus, Snapshot, StackProtection, Tagged, UacVirtualization, Update,
@@ -295,6 +295,14 @@ mod tests {
                 disk_write_bytes: rows(250),
                 net_rx_bytes: rows(260),
                 net_tx_bytes: rows(270),
+                virtual_size: rows(280),
+                peak_virtual_size: rows(290),
+                peak_commit: rows(300),
+                peak_paged_pool: rows(310),
+                peak_non_paged_pool: rows(320),
+                hard_faults: rows32(330),
+                peak_threads: rows32(340),
+                context_switches: rows(350),
             },
             machine: MachineSample {
                 cpu: Some(MachineCpu {
@@ -309,6 +317,8 @@ mod tests {
                 memory: Some(MachineMemory {
                     total_physical: 8,
                     available_physical: 9,
+                    commit_limit: 16,
+                    committed: 17,
                 }),
                 disk: Some(MachineDisk {
                     read_ops: 10,
@@ -320,6 +330,22 @@ mod tests {
                     rx_bytes: 14,
                     tx_bytes: 15,
                 }),
+                processors: Some(Arc::from([
+                    MachineProcessor {
+                        idle_time: 18,
+                        kernel_time: 19,
+                        user_time: 20,
+                        interrupt_time: 21,
+                        dpc_time: 22,
+                    },
+                    MachineProcessor {
+                        idle_time: 23,
+                        kernel_time: 24,
+                        user_time: 25,
+                        interrupt_time: 26,
+                        dpc_time: 27,
+                    },
+                ])),
             },
         }
     }
@@ -344,6 +370,7 @@ mod tests {
             spec(ProcessMetric::PageFaults | ProcessMetric::NetTxBytes, MachineMetric::Memory),
             spec(ProcessMetrics::empty(), MachineMetric::Cpu | MachineMetric::Network),
             spec(ProcessMetric::Handles, MachineMetrics::empty()),
+            spec(ProcessMetric::HardFaults | ProcessMetric::ContextSwitches, MachineMetric::Processors),
             spec(ProcessMetrics::empty(), MachineMetrics::empty()),
         ] {
             let sent = full.project(&wanted);

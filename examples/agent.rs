@@ -85,6 +85,9 @@ async fn run(mode: &str) -> anyhow::Result<()> {
             ProcessMetric::Handles,
             ProcessMetric::GdiObjects,
             ProcessMetric::UserObjects,
+            ProcessMetric::ContextSwitches,
+            ProcessMetric::PeakThreads,
+            ProcessMetric::PeakCommit,
         ]
         .into_iter()
         .collect(),
@@ -98,14 +101,23 @@ async fn run(mode: &str) -> anyhow::Result<()> {
     assert!(b.columns.threads.is_none(), "only the asked columns come");
     let memory = b.machine.memory.expect("the machine's memory was asked for");
     assert!(memory.total_physical > memory.available_physical);
+    assert!(memory.committed > 0 && memory.committed <= memory.commit_limit);
+    let cpu = b.machine.cpu.expect("the machine's cpu was asked for");
+    let processors = b.machine.processors.clone().expect("the processors were asked for");
+    assert_eq!(processors.iter().map(|p| p.user_time).sum::<u64>(), cpu.user_time, "one read for both");
+    let switches = b.columns.context_switches.as_ref().expect("context switches were asked for");
+    assert!(switches.iter().filter(|&&s| s > 0).count() > b.pids.len() / 2);
     println!(
-        "{mode}: samples {} and {} {:.0} ms apart, {} rows, {} MB of {} MB available",
+        "{mode}: samples {} and {} {:.0} ms apart, {} rows, {} MB of {} MB available, {} of {} MB committed, {} processors",
         a.snapshot,
         b.snapshot,
         (b.sampled_at - a.sampled_at) as f64 / 10_000.0,
         b.pids.len(),
         memory.available_physical >> 20,
         memory.total_physical >> 20,
+        memory.committed >> 20,
+        memory.commit_limit >> 20,
+        processors.len(),
     );
     let explorer = first
         .processes

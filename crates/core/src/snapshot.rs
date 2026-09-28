@@ -48,20 +48,28 @@ pub struct Row {
     pub base_priority: i32,
     pub handles: u32,
     pub threads: u32,
+    pub peak_threads: u32,
     /// Every thread waits with reason Suspended.
     pub suspended: bool,
 
     pub user_time: u64,
     pub kernel_time: u64,
     pub cycles: u64,
+    pub context_switches: u64,
 
     pub working_set: u64,
     pub peak_working_set: u64,
     pub private_working_set: u64,
+    pub virtual_size: u64,
+    pub peak_virtual_size: u64,
     pub commit: u64,
+    pub peak_commit: u64,
     pub paged_pool: u64,
+    pub peak_paged_pool: u64,
     pub nonpaged_pool: u64,
+    pub peak_nonpaged_pool: u64,
     pub page_faults: u32,
+    pub hard_faults: u32,
 
     pub io_read_ops: u64,
     pub io_write_ops: u64,
@@ -189,17 +197,25 @@ impl Processes {
                 base_priority: entry.BasePriority,
                 handles: entry.HandleCount,
                 threads: entry.NumberOfThreads,
+                peak_threads: entry.NumberOfThreadsHighWatermark,
                 suspended,
                 user_time: quad(entry.UserTime),
                 kernel_time: quad(entry.KernelTime),
                 cycles: entry.CycleTime,
+                context_switches: extension.ContextSwitches,
                 working_set: entry.WorkingSetSize as u64,
                 peak_working_set: entry.PeakWorkingSetSize as u64,
                 private_working_set: quad(entry.WorkingSetPrivateSize),
+                virtual_size: entry.VirtualSize as u64,
+                peak_virtual_size: entry.PeakVirtualSize as u64,
                 commit: entry.PagefileUsage as u64,
+                peak_commit: entry.PeakPagefileUsage as u64,
                 paged_pool: entry.QuotaPagedPoolUsage as u64,
+                peak_paged_pool: entry.QuotaPeakPagedPoolUsage as u64,
                 nonpaged_pool: entry.QuotaNonPagedPoolUsage as u64,
+                peak_nonpaged_pool: entry.QuotaPeakNonPagedPoolUsage as u64,
                 page_faults: entry.PageFaultCount,
+                hard_faults: entry.HardFaultCount,
                 io_read_ops: quad(entry.ReadOperationCount),
                 io_write_ops: quad(entry.WriteOperationCount),
                 io_other_ops: quad(entry.OtherOperationCount),
@@ -353,6 +369,10 @@ mod tests {
         assert_ne!(me.sequence_number, 0);
         assert!(me.create_time > 0 && me.threads > 0 && me.working_set > 0);
         assert!(me.private_working_set <= me.working_set);
+        assert!(me.peak_threads >= me.threads && me.context_switches > 0);
+        assert!(me.virtual_size >= me.working_set && me.peak_virtual_size >= me.virtual_size);
+        assert!(me.peak_commit >= me.commit && me.commit > 0);
+        assert!(me.peak_paged_pool >= me.paged_pool && me.peak_nonpaged_pool >= me.nonpaged_pool);
         assert!(!me.suspended);
         assert!(processes.image_name(me).ends_with(".exe"));
         let sid = processes.user_sid(me).expect("a user");

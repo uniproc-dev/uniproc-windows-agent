@@ -48,6 +48,14 @@ pub enum ProcessMetric {
     DiskWriteBytes,
     NetRxBytes,
     NetTxBytes,
+    VirtualSize,
+    PeakVirtualSize,
+    PeakCommit,
+    PeakPagedPool,
+    PeakNonPagedPool,
+    HardFaults,
+    PeakThreads,
+    ContextSwitches,
 }
 
 /// A group of machine counters.
@@ -57,6 +65,7 @@ pub enum MachineMetric {
     Memory,
     Disk,
     Network,
+    Processors,
 }
 
 /// A set of process counters, iterated in declaration order.
@@ -67,9 +76,9 @@ pub type MachineMetrics = EnumSet<MachineMetric>;
 
 impl ProcessMetric {
     /// Whether a row of this column can hold [`NO_DATA_U32`] or
-    /// [`NO_DATA_U64`]; page faults wrap, so their maximum is a value.
+    /// [`NO_DATA_U64`]; page and hard faults wrap, so their maximum is a value.
     pub fn has_gaps(self) -> bool {
-        self != Self::PageFaults
+        !matches!(self, Self::PageFaults | Self::HardFaults)
     }
 }
 
@@ -220,6 +229,14 @@ columns! {
     disk_write_bytes: u64 = DiskWriteBytes, r.disk_write_bytes;
     net_rx_bytes: u64 = NetRxBytes, x.net_rx_bytes(r);
     net_tx_bytes: u64 = NetTxBytes, x.net_tx_bytes(r);
+    virtual_size: u64 = VirtualSize, r.virtual_size;
+    peak_virtual_size: u64 = PeakVirtualSize, r.peak_virtual_size;
+    peak_commit: u64 = PeakCommit, r.peak_commit;
+    peak_paged_pool: u64 = PeakPagedPool, r.peak_paged_pool;
+    peak_non_paged_pool: u64 = PeakNonPagedPool, r.peak_nonpaged_pool;
+    hard_faults: u32 = HardFaults, r.hard_faults;
+    peak_threads: u32 = PeakThreads, r.peak_threads;
+    context_switches: u64 = ContextSwitches, r.context_switches;
 }
 
 /// Sums over every logical processor in every group, cumulative, 100 ns.
@@ -235,11 +252,24 @@ pub struct MachineCpu {
     pub current_mhz: u32,
 }
 
-/// Bytes, current.
+/// One logical processor's times, cumulative, 100 ns. Kernel time includes
+/// idle time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MachineProcessor {
+    pub idle_time: u64,
+    pub kernel_time: u64,
+    pub user_time: u64,
+    pub interrupt_time: u64,
+    pub dpc_time: u64,
+}
+
+/// Bytes, current. The commit limit is RAM plus the page files.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MachineMemory {
     pub total_physical: u64,
     pub available_physical: u64,
+    pub commit_limit: u64,
+    pub committed: u64,
 }
 
 /// All physical disks together, cumulative since the agent started.
@@ -259,12 +289,15 @@ pub struct MachineNetwork {
 }
 
 /// A group is `None` when nobody asked for it or it could not be read.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MachineSample {
     pub cpu: Option<MachineCpu>,
     pub memory: Option<MachineMemory>,
     pub disk: Option<MachineDisk>,
     pub network: Option<MachineNetwork>,
+    /// Group 0 first, in processor order within a group; they sum to the
+    /// times in `cpu`.
+    pub processors: Option<Arc<[MachineProcessor]>>,
 }
 
 impl MachineSample {
@@ -274,6 +307,7 @@ impl MachineSample {
             memory: self.memory.filter(|_| wanted.contains(MachineMetric::Memory)),
             disk: self.disk.filter(|_| wanted.contains(MachineMetric::Disk)),
             network: self.network.filter(|_| wanted.contains(MachineMetric::Network)),
+            processors: self.processors.clone().filter(|_| wanted.contains(MachineMetric::Processors)),
         }
     }
 }

@@ -6,64 +6,83 @@ use ntapi::ntexapi::{
 use windows::Win32::GetActiveProcessorGroupCount;
 
 use crate::aligned::AlignedBuf;
+use crate::sample::MachineProcessor;
 
 const PROCESSORS_PER_GROUP: usize = 64;
+const ENTRY_SIZE: usize = size_of::<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>();
 
-/// Sums over every logical processor in every group, 100 ns.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Every logical processor's times, read into buffers kept across reads.
 pub struct ProcessorTimes {
-    pub idle: u64,
-    pub kernel: u64,
-    pub user: u64,
-    pub dpc: u64,
-    pub interrupt: u64,
+    buf: AlignedBuf,
+    processors: Vec<MachineProcessor>,
+}
+
+impl Default for ProcessorTimes {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProcessorTimes {
-    fn add(&mut self, entry: &SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION) {
-        let quad = |v: &ntapi::winapi::shared::ntdef::LARGE_INTEGER| unsafe { *v.QuadPart() } as u64;
-        self.idle = self.idle.wrapping_add(quad(&entry.IdleTime));
-        self.kernel = self.kernel.wrapping_add(quad(&entry.KernelTime));
-        self.user = self.user.wrapping_add(quad(&entry.UserTime));
-        self.dpc = self.dpc.wrapping_add(quad(&entry.DpcTime));
-        self.interrupt = self.interrupt.wrapping_add(quad(&entry.InterruptTime));
+    pub fn new() -> Self {
+        Self {
+            buf: AlignedBuf::zeroed(ENTRY_SIZE * PROCESSORS_PER_GROUP),
+            processors: Vec::new(),
+        }
+    }
+
+    /// Group 0 first, in processor order within a group; one group answers
+    /// per call.
+    pub fn read(&mut self) -> Result<&[MachineProcessor]> {
+        self.processors.clear();
+        let groups = unsafe { GetActiveProcessorGroupCount() }.max(1);
+        for group in 0..groups {
+            let mut group = group;
+            let mut returned = 0u32;
+            let status = unsafe {
+                NtQuerySystemInformationEx(
+                    SystemProcessorPerformanceInformation,
+                    (&mut group as *mut u16).cast(),
+                    size_of::<u16>() as u32,
+                    self.buf.as_mut_ptr().cast(),
+                    self.buf.len() as u32,
+                    &mut returned,
+                )
+            };
+            if status < 0 {
+                bail!("NtQuerySystemInformationEx(processor performance, group {group}) failed: {status:#x}");
+            }
+            let quad = |v: &ntapi::winapi::shared::ntdef::LARGE_INTEGER| unsafe { *v.QuadPart() } as u64;
+            for i in 0..returned as usize / ENTRY_SIZE {
+                let entry = unsafe {
+                    self.buf
+                        .as_ptr()
+                        .add(i * ENTRY_SIZE)
+                        .cast::<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>()
+                        .read_unaligned()
+                };
+                self.processors.push(MachineProcessor {
+                    idle_time: quad(&entry.IdleTime),
+                    kernel_time: quad(&entry.KernelTime),
+                    user_time: quad(&entry.UserTime),
+                    interrupt_time: quad(&entry.InterruptTime),
+                    dpc_time: quad(&entry.DpcTime),
+                });
+            }
+        }
+        Ok(&self.processors)
     }
 }
 
-/// The processor times of every group; one group answers per call.
-pub fn read_totals() -> Result<ProcessorTimes> {
-    let entry_size = size_of::<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>();
-    let mut buf = AlignedBuf::zeroed(entry_size * PROCESSORS_PER_GROUP);
-    let mut totals = ProcessorTimes::default();
-    let groups = unsafe { GetActiveProcessorGroupCount() }.max(1);
-
-    for group in 0..groups {
-        let mut group = group;
-        let mut returned = 0u32;
-        let status = unsafe {
-            NtQuerySystemInformationEx(
-                SystemProcessorPerformanceInformation,
-                (&mut group as *mut u16).cast(),
-                size_of::<u16>() as u32,
-                buf.as_mut_ptr().cast(),
-                buf.len() as u32,
-                &mut returned,
-            )
-        };
-        if status < 0 {
-            bail!("NtQuerySystemInformationEx(processor performance, group {group}) failed: {status:#x}");
-        }
-        for i in 0..returned as usize / entry_size {
-            let entry = unsafe {
-                buf.as_ptr()
-                    .add(i * entry_size)
-                    .cast::<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>()
-                    .read_unaligned()
-            };
-            totals.add(&entry);
-        }
-    }
-    Ok(totals)
+/// The processors' times summed.
+pub fn total(processors: &[MachineProcessor]) -> MachineProcessor {
+    processors.iter().fold(MachineProcessor::default(), |sum, p| MachineProcessor {
+        idle_time: sum.idle_time.wrapping_add(p.idle_time),
+        kernel_time: sum.kernel_time.wrapping_add(p.kernel_time),
+        user_time: sum.user_time.wrapping_add(p.user_time),
+        interrupt_time: sum.interrupt_time.wrapping_add(p.interrupt_time),
+        dpc_time: sum.dpc_time.wrapping_add(p.dpc_time),
+    })
 }
 
 #[cfg(test)]
@@ -72,17 +91,20 @@ mod tests {
 
     #[test]
     fn every_processor_is_counted_and_idle_is_part_of_kernel() {
-        let first = read_totals().unwrap();
+        let mut times = ProcessorTimes::new();
+        let first = total(times.read().unwrap());
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let second = read_totals().unwrap();
-        assert!(second.kernel >= first.kernel && second.user >= first.user);
-        assert!(second.idle <= second.kernel, "kernel time includes idle time");
+        let processors = times.read().unwrap();
+        assert_eq!(processors.len(), std::thread::available_parallelism().unwrap().get());
+        assert!(processors.iter().all(|p| p.idle_time <= p.kernel_time));
+        let second = total(processors);
+        assert!(second.kernel_time >= first.kernel_time && second.user_time >= first.user_time);
 
-        let processors = std::thread::available_parallelism().unwrap().get() as u64;
-        let elapsed = (second.kernel + second.user) - (first.kernel + first.user);
+        let count = processors.len() as u64;
+        let elapsed = (second.kernel_time + second.user_time) - (first.kernel_time + first.user_time);
         assert!(
-            elapsed >= processors * 50 * 10_000 / 2,
-            "{elapsed} over 50 ms for {processors} processors"
+            elapsed >= count * 50 * 10_000 / 2,
+            "{elapsed} over 50 ms for {count} processors"
         );
     }
 }

@@ -14,7 +14,7 @@ use uniproc_protocol::windows_capnp::{
 
 use crate::api::{
     Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
-    MachineDisk, MachineMemory, MachineMetric, MachineNetwork, MachineSample, MetricSpec,
+    MachineDisk, MachineMemory, MachineMetric, MachineNetwork, MachineProcessor, MachineSample, MetricSpec,
     Mitigations, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState, ProcessStates, Sample,
     ServiceState, ServiceStats, ServiceStatus, SignatureStatus, Snapshot, StackProtection, Tagged,
     UacVirtualization,
@@ -171,6 +171,14 @@ fn process_metric(m: WireProcessMetric) -> ProcessMetric {
         WireProcessMetric::DiskWriteBytes => ProcessMetric::DiskWriteBytes,
         WireProcessMetric::NetRxBytes => ProcessMetric::NetRxBytes,
         WireProcessMetric::NetTxBytes => ProcessMetric::NetTxBytes,
+        WireProcessMetric::VirtualSize => ProcessMetric::VirtualSize,
+        WireProcessMetric::PeakVirtualSize => ProcessMetric::PeakVirtualSize,
+        WireProcessMetric::PeakCommit => ProcessMetric::PeakCommit,
+        WireProcessMetric::PeakPagedPool => ProcessMetric::PeakPagedPool,
+        WireProcessMetric::PeakNonPagedPool => ProcessMetric::PeakNonPagedPool,
+        WireProcessMetric::HardFaults => ProcessMetric::HardFaults,
+        WireProcessMetric::PeakThreads => ProcessMetric::PeakThreads,
+        WireProcessMetric::ContextSwitches => ProcessMetric::ContextSwitches,
     }
 }
 
@@ -180,6 +188,7 @@ fn machine_metric(m: WireMachineMetric) -> MachineMetric {
         WireMachineMetric::Memory => MachineMetric::Memory,
         WireMachineMetric::Disk => MachineMetric::Disk,
         WireMachineMetric::Network => MachineMetric::Network,
+        WireMachineMetric::Processors => MachineMetric::Processors,
     }
 }
 
@@ -450,6 +459,14 @@ pub fn sample(
             disk_write_bytes => (has_disk_write_bytes, get_disk_write_bytes),
             net_rx_bytes => (has_net_rx_bytes, get_net_rx_bytes),
             net_tx_bytes => (has_net_tx_bytes, get_net_tx_bytes),
+            virtual_size => (has_virtual_size, get_virtual_size),
+            peak_virtual_size => (has_peak_virtual_size, get_peak_virtual_size),
+            peak_commit => (has_peak_commit, get_peak_commit),
+            peak_paged_pool => (has_peak_paged_pool, get_peak_paged_pool),
+            peak_non_paged_pool => (has_peak_non_paged_pool, get_peak_non_paged_pool),
+            hard_faults => (has_hard_faults, get_hard_faults),
+            peak_threads => (has_peak_threads, get_peak_threads),
+            context_switches => (has_context_switches, get_context_switches),
         ),
         machine: machine_groups(machine)?,
     })
@@ -476,6 +493,8 @@ fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample>
             Some(MachineMemory {
                 total_physical: mem.get_total_physical(),
                 available_physical: mem.get_available_physical(),
+                commit_limit: mem.get_commit_limit(),
+                committed: mem.get_committed(),
             })
         } else {
             None
@@ -497,6 +516,22 @@ fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample>
                 rx_bytes: n.get_rx_bytes(),
                 tx_bytes: n.get_tx_bytes(),
             })
+        } else {
+            None
+        },
+        processors: if m.has_processors() {
+            Some(
+                m.get_processors()?
+                    .iter()
+                    .map(|p| MachineProcessor {
+                        idle_time: p.get_idle_time(),
+                        kernel_time: p.get_kernel_time(),
+                        user_time: p.get_user_time(),
+                        interrupt_time: p.get_interrupt_time(),
+                        dpc_time: p.get_dpc_time(),
+                    })
+                    .collect(),
+            )
         } else {
             None
         },
