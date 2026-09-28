@@ -9,6 +9,7 @@ use crate::etw::router::KernelRouter;
 use crate::model::{ProcessPriority, ProcessState};
 use crate::probes::{self, Handles};
 use crate::providers::disk::KernelDiskProvider;
+use crate::providers::gpu::{self, Gpu};
 use crate::providers::machine::MachineProbe;
 use crate::providers::network::KernelNetworkProvider;
 use crate::providers::process::passport::SidNames;
@@ -16,7 +17,8 @@ use crate::providers::process::{self, Images};
 use crate::providers::provider::Provider;
 use crate::report::{Diff, Health};
 use crate::sample::{
-    Columns, Demand, Extras, MachineSample, MetricSpec, NO_DATA_U32, ProcessMetrics, Sample, now_100ns,
+    Columns, Demand, Extras, MachineMetric, MachineSample, MetricSpec, NO_DATA_U32, ProcessMetric, ProcessMetrics,
+    Sample, now_100ns,
 };
 use crate::sink::Sink;
 use crate::snapshot::{self, Processes, Row};
@@ -60,6 +62,7 @@ struct Reader {
     processes: Processes,
     handles: Handles,
     machine: MachineProbe,
+    gpu: Gpu,
     snapshots: u64,
     session: Option<u32>,
     fresh: Option<Arc<Sample>>,
@@ -113,6 +116,7 @@ impl Supervisor {
             processes: Processes::new(),
             handles: Handles::default(),
             machine: MachineProbe::new(),
+            gpu: Gpu::default(),
             snapshots: 0,
             session: probes::own_session(),
             fresh: None,
@@ -237,6 +241,18 @@ impl Reader {
         self.handles.sync(rows);
         observe(&mut self.state, &self.handles, rows);
 
+        let wanted = gpu::Wanted {
+            memory: spec.processes.contains(ProcessMetric::GpuDedicated)
+                || spec.processes.contains(ProcessMetric::GpuShared),
+            engines: spec.processes.contains(ProcessMetric::GpuEngines),
+            adapters: spec.machine.contains(MachineMetric::Gpu),
+        };
+        let gpu = if wanted.any() {
+            self.gpu.read(wanted, rows, &self.handles)
+        } else {
+            gpu::Read::default()
+        };
+
         let columns = columns(
             spec.processes,
             rows,
@@ -244,13 +260,15 @@ impl Reader {
                 handles: &self.handles,
                 session: self.session,
                 state: &self.state,
+                gpu: &self.gpu,
             },
         );
-        let machine = if spec.machine.is_empty() {
+        let mut machine = if spec.machine.is_empty() {
             MachineSample::default()
         } else {
             self.machine.sample(spec.machine, self.state.machine_totals())
         };
+        machine.gpus = gpu.adapters;
 
         self.snapshots += 1;
         let sample = Sample {
@@ -262,6 +280,7 @@ impl Reader {
             pids: rows.iter().map(|r| r.pid).collect(),
             sequence_numbers: rows.iter().map(|r| r.sequence_number).collect(),
             columns,
+            gpu_engines: gpu.engines,
             machine,
         };
         self.fresh = Some(Arc::new(sample));
@@ -299,6 +318,7 @@ struct Beside<'a> {
     handles: &'a Handles,
     session: Option<u32>,
     state: &'a SystemState,
+    gpu: &'a Gpu,
 }
 
 impl Beside<'_> {
@@ -325,6 +345,14 @@ impl Extras for Beside<'_> {
 
     fn net_tx_bytes(&self, row: &Row) -> u64 {
         self.state.network(row.pid, row.sequence_number).sent_bytes
+    }
+
+    fn gpu_dedicated(&self, row: &Row) -> u64 {
+        self.gpu.dedicated(row)
+    }
+
+    fn gpu_shared(&self, row: &Row) -> u64 {
+        self.gpu.shared(row)
     }
 }
 

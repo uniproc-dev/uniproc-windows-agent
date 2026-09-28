@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use enumset::{EnumSet, EnumSetType};
 use parking_lot::Mutex;
+use smol_str::SmolStr;
 
 use crate::snapshot::Row;
 
@@ -56,6 +57,10 @@ pub enum ProcessMetric {
     HardFaults,
     PeakThreads,
     ContextSwitches,
+    GpuDedicated,
+    GpuShared,
+    /// Not a column: [`Sample::gpu_engines`].
+    GpuEngines,
 }
 
 /// A group of machine counters.
@@ -66,6 +71,7 @@ pub enum MachineMetric {
     Disk,
     Network,
     Processors,
+    Gpu,
 }
 
 /// A set of process counters, iterated in declaration order.
@@ -152,6 +158,8 @@ pub trait Extras {
     fn gdi_objects(&self, row: &Row) -> u32;
     fn net_rx_bytes(&self, row: &Row) -> u64;
     fn net_tx_bytes(&self, row: &Row) -> u64;
+    fn gpu_dedicated(&self, row: &Row) -> u64;
+    fn gpu_shared(&self, row: &Row) -> u64;
 }
 
 macro_rules! columns {
@@ -237,6 +245,8 @@ columns! {
     hard_faults: u32 = HardFaults, r.hard_faults;
     peak_threads: u32 = PeakThreads, r.peak_threads;
     context_switches: u64 = ContextSwitches, r.context_switches;
+    gpu_dedicated: u64 = GpuDedicated, x.gpu_dedicated(r);
+    gpu_shared: u64 = GpuShared, x.gpu_shared(r);
 }
 
 /// Sums over every logical processor in every group, cumulative, 100 ns.
@@ -288,6 +298,69 @@ pub struct MachineNetwork {
     pub tx_bytes: u64,
 }
 
+/// What a GPU engine does, as the driver declares it (`DXGK_ENGINE_TYPE`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize)]
+pub enum GpuEngineKind {
+    #[default]
+    Other,
+    ThreeD,
+    VideoDecode,
+    VideoEncode,
+    VideoProcessing,
+    SceneAssembly,
+    Copy,
+    Overlay,
+    Crypto,
+    VideoCodec,
+}
+
+/// One engine (node) of an adapter.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct GpuEngine {
+    pub ordinal: u32,
+    pub kind: GpuEngineKind,
+    /// The driver's name for it, often empty.
+    pub name: SmolStr,
+    /// Cumulative, 100 ns, all processes together; wraps.
+    pub running_time: u64,
+    /// Hz; 0 when the driver does not report it.
+    pub frequency: u64,
+    pub max_frequency: u64,
+}
+
+/// One hardware adapter.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct GpuAdapter {
+    /// `HighPart << 32 | LowPart`.
+    pub luid: u64,
+    pub name: SmolStr,
+    /// Bytes: the adapter's own memory, and system memory it maps.
+    pub dedicated_limit: u64,
+    pub dedicated_usage: u64,
+    pub shared_limit: u64,
+    pub shared_usage: u64,
+    /// Tenths of a degree Celsius; 0 when the driver does not report it.
+    pub temperature: u32,
+    pub fan_rpm: u32,
+    /// Tenths of a percent of the adapter's maximum power.
+    pub power: u32,
+    /// Hz.
+    pub memory_frequency: u64,
+    pub engines: Arc<[GpuEngine]>,
+}
+
+/// How long one process has run on one engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ProcessGpuEngine {
+    /// Index into the sample's rows.
+    pub row: u32,
+    pub adapter_luid: u64,
+    /// [`GpuEngine::ordinal`].
+    pub engine: u32,
+    /// Cumulative, 100 ns; wraps.
+    pub running_time: u64,
+}
+
 /// A group is `None` when nobody asked for it or it could not be read.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MachineSample {
@@ -298,6 +371,8 @@ pub struct MachineSample {
     /// Group 0 first, in processor order within a group; they sum to the
     /// times in `cpu`.
     pub processors: Option<Arc<[MachineProcessor]>>,
+    /// Hardware adapters only.
+    pub gpus: Option<Arc<[GpuAdapter]>>,
 }
 
 impl MachineSample {
@@ -308,6 +383,7 @@ impl MachineSample {
             disk: self.disk.filter(|_| wanted.contains(MachineMetric::Disk)),
             network: self.network.filter(|_| wanted.contains(MachineMetric::Network)),
             processors: self.processors.clone().filter(|_| wanted.contains(MachineMetric::Processors)),
+            gpus: self.gpus.clone().filter(|_| wanted.contains(MachineMetric::Gpu)),
         }
     }
 }
@@ -331,6 +407,8 @@ pub struct Sample {
     /// The join key: never reused within a boot, 0 only for the Idle process.
     pub sequence_numbers: Arc<[u64]>,
     pub columns: Columns,
+    /// Sparse: a process and an engine it has run on per entry.
+    pub gpu_engines: Option<Arc<[ProcessGpuEngine]>>,
     pub machine: MachineSample,
 }
 
@@ -347,6 +425,10 @@ impl Sample {
                 Arc::from([])
             },
             columns: self.columns.project(spec.processes),
+            gpu_engines: self
+                .gpu_engines
+                .clone()
+                .filter(|_| spec.processes.contains(ProcessMetric::GpuEngines)),
             machine: self.machine.project(spec.machine),
             ..*self
         }
@@ -412,6 +494,14 @@ mod tests {
             row.pid as u64 * 7
         }
         fn net_tx_bytes(&self, _: &Row) -> u64 {
+            self.0.set(self.0.get() + 1);
+            0
+        }
+        fn gpu_dedicated(&self, _: &Row) -> u64 {
+            self.0.set(self.0.get() + 1);
+            0
+        }
+        fn gpu_shared(&self, _: &Row) -> u64 {
             self.0.set(self.0.get() + 1);
             0
         }

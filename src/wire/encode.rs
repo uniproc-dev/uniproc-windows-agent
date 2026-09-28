@@ -1,6 +1,7 @@
 use uniproc_protocol::windows_capnp::{
     Architecture as WireArchitecture, DpiAwareness as WireDpi, ExtendedCfg as WireExtendedCfg,
-    IoPriority as WireIoPriority, Isolation as WireIsolation, MachineMetric as WireMachineMetric,
+    GpuEngineType as WireGpuEngineType, IoPriority as WireIoPriority, Isolation as WireIsolation,
+    MachineMetric as WireMachineMetric,
     ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority, ServiceState as WireServiceState,
     SignatureStatus as WireSignature, StackProtection as WireStackProtection, Toggle,
     UacVirtualization as WireUac, agent_listener, machine_sample, metric_spec, process_columns,
@@ -8,7 +9,7 @@ use uniproc_protocol::windows_capnp::{
 };
 
 use crate::api::{
-    Architecture, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineMetric, MachineSample,
+    Architecture, DpiAwareness, ExtendedCfg, GpuEngineKind, IoPriority, Isolation, MachineMetric, MachineSample,
     MetricSpec, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState, ProcessStates, Sample,
     ServiceState, ServiceStats, ServiceStatus, SignatureStatus, Snapshot, StackProtection,
     UacVirtualization, Update,
@@ -165,6 +166,24 @@ fn process_metric(m: ProcessMetric) -> WireProcessMetric {
         ProcessMetric::HardFaults => WireProcessMetric::HardFaults,
         ProcessMetric::PeakThreads => WireProcessMetric::PeakThreads,
         ProcessMetric::ContextSwitches => WireProcessMetric::ContextSwitches,
+        ProcessMetric::GpuDedicated => WireProcessMetric::GpuDedicated,
+        ProcessMetric::GpuShared => WireProcessMetric::GpuShared,
+        ProcessMetric::GpuEngines => WireProcessMetric::GpuEngines,
+    }
+}
+
+fn gpu_engine_kind(k: GpuEngineKind) -> WireGpuEngineType {
+    match k {
+        GpuEngineKind::Other => WireGpuEngineType::Other,
+        GpuEngineKind::ThreeD => WireGpuEngineType::ThreeD,
+        GpuEngineKind::VideoDecode => WireGpuEngineType::VideoDecode,
+        GpuEngineKind::VideoEncode => WireGpuEngineType::VideoEncode,
+        GpuEngineKind::VideoProcessing => WireGpuEngineType::VideoProcessing,
+        GpuEngineKind::SceneAssembly => WireGpuEngineType::SceneAssembly,
+        GpuEngineKind::Copy => WireGpuEngineType::Copy,
+        GpuEngineKind::Overlay => WireGpuEngineType::Overlay,
+        GpuEngineKind::Crypto => WireGpuEngineType::Crypto,
+        GpuEngineKind::VideoCodec => WireGpuEngineType::VideoCodec,
     }
 }
 
@@ -175,6 +194,7 @@ fn machine_metric(m: MachineMetric) -> WireMachineMetric {
         MachineMetric::Disk => WireMachineMetric::Disk,
         MachineMetric::Network => WireMachineMetric::Network,
         MachineMetric::Processors => WireMachineMetric::Processors,
+        MachineMetric::Gpu => WireMachineMetric::Gpu,
     }
 }
 
@@ -423,7 +443,19 @@ fn process_columns(sample: &Sample, mut out: process_columns::Builder) -> capnp:
         hard_faults => set_hard_faults,
         peak_threads => set_peak_threads,
         context_switches => set_context_switches,
+        gpu_dedicated => set_gpu_dedicated,
+        gpu_shared => set_gpu_shared,
     );
+    if let Some(engines) = &sample.gpu_engines {
+        let mut list = out.init_gpu_engines(engines.len() as u32);
+        for (i, e) in engines.iter().enumerate() {
+            let mut w = list.reborrow().get(i as u32);
+            w.set_row(e.row);
+            w.set_adapter_luid(e.adapter_luid);
+            w.set_engine(e.engine);
+            w.set_running_time(e.running_time);
+        }
+    }
     Ok(())
 }
 
@@ -436,6 +468,7 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         disk,
         network,
         processors,
+        gpus,
     } = &sample.machine;
     if let Some(cpu) = cpu {
         let mut c = out.reborrow().init_cpu();
@@ -475,6 +508,32 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
             w.set_user_time(p.user_time);
             w.set_interrupt_time(p.interrupt_time);
             w.set_dpc_time(p.dpc_time);
+        }
+    }
+    if let Some(gpus) = gpus {
+        let mut list = out.reborrow().init_gpus(gpus.len() as u32);
+        for (i, gpu) in gpus.iter().enumerate() {
+            let mut w = list.reborrow().get(i as u32);
+            w.set_luid(gpu.luid);
+            w.set_name(gpu.name.as_str());
+            w.set_dedicated_limit(gpu.dedicated_limit);
+            w.set_dedicated_usage(gpu.dedicated_usage);
+            w.set_shared_limit(gpu.shared_limit);
+            w.set_shared_usage(gpu.shared_usage);
+            w.set_temperature(gpu.temperature);
+            w.set_fan_rpm(gpu.fan_rpm);
+            w.set_power(gpu.power);
+            w.set_memory_frequency(gpu.memory_frequency);
+            let mut engines = w.init_engines(gpu.engines.len() as u32);
+            for (j, e) in gpu.engines.iter().enumerate() {
+                let mut we = engines.reborrow().get(j as u32);
+                we.set_ordinal(e.ordinal);
+                we.set_type(gpu_engine_kind(e.kind));
+                we.set_name(e.name.as_str());
+                we.set_running_time(e.running_time);
+                we.set_frequency(e.frequency);
+                we.set_max_frequency(e.max_frequency);
+            }
         }
     }
 }

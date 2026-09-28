@@ -34,7 +34,8 @@ mod tests {
     use super::{decode, encode};
     use crate::api::{
         Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
-        MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample,
+        GpuAdapter, GpuEngine, GpuEngineKind, MachineDisk, MachineMemory, MachineMetric, MachineMetrics,
+        MachineNetwork, MachineProcessor, MachineSample, ProcessGpuEngine,
         MetricSpec, Mitigations, ProcessInfo, ProcessMetric, ProcessMetrics, ProcessPriority,
         ProcessState, ProcessStates, Sample, ServiceState, ServiceStats, ServiceStatus,
         SignatureStatus, Snapshot, StackProtection, Tagged, UacVirtualization, Update,
@@ -303,7 +304,23 @@ mod tests {
                 hard_faults: rows32(330),
                 peak_threads: rows32(340),
                 context_switches: rows(350),
+                gpu_dedicated: rows(360),
+                gpu_shared: rows(370),
             },
+            gpu_engines: Some(Arc::from([
+                ProcessGpuEngine {
+                    row: 1,
+                    adapter_luid: 0x1_0000_2346,
+                    engine: 0,
+                    running_time: 380,
+                },
+                ProcessGpuEngine {
+                    row: 1,
+                    adapter_luid: 0x1_0000_2346,
+                    engine: 3,
+                    running_time: u64::MAX - 1,
+                },
+            ])),
             machine: MachineSample {
                 cpu: Some(MachineCpu {
                     idle_time: 1,
@@ -346,6 +363,36 @@ mod tests {
                         dpc_time: 27,
                     },
                 ])),
+                gpus: Some(Arc::from([GpuAdapter {
+                    luid: 0x1_0000_2346,
+                    name: "NVIDIA GeForce RTX 3060".into(),
+                    dedicated_limit: 28,
+                    dedicated_usage: 29,
+                    shared_limit: 30,
+                    shared_usage: 31,
+                    temperature: 573,
+                    fan_rpm: 32,
+                    power: 119,
+                    memory_frequency: 33,
+                    engines: Arc::from([
+                        GpuEngine {
+                            ordinal: 0,
+                            kind: GpuEngineKind::ThreeD,
+                            name: "".into(),
+                            running_time: 34,
+                            frequency: 35,
+                            max_frequency: 36,
+                        },
+                        GpuEngine {
+                            ordinal: 3,
+                            kind: GpuEngineKind::Copy,
+                            name: "Security".into(),
+                            running_time: 37,
+                            frequency: 0,
+                            max_frequency: 0,
+                        },
+                    ]),
+                }])),
             },
         }
     }
@@ -371,6 +418,8 @@ mod tests {
             spec(ProcessMetrics::empty(), MachineMetric::Cpu | MachineMetric::Network),
             spec(ProcessMetric::Handles, MachineMetrics::empty()),
             spec(ProcessMetric::HardFaults | ProcessMetric::ContextSwitches, MachineMetric::Processors),
+            spec(ProcessMetrics::only(ProcessMetric::GpuEngines), MachineMetric::Gpu),
+            spec(ProcessMetric::GpuDedicated | ProcessMetric::GpuShared, MachineMetrics::empty()),
             spec(ProcessMetrics::empty(), MachineMetrics::empty()),
         ] {
             let sent = full.project(&wanted);

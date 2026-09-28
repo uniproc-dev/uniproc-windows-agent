@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use fxhash::FxHashMap;
 use windows::Win32::{
     CloseHandle, GetCurrentProcessId, GetGuiResources, HANDLE, NtQueryInformationProcess,
-    PROCESS_QUERY_LIMITED_INFORMATION, ProcessIdToSessionId,
+    PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, ProcessIdToSessionId,
 };
 
 use crate::model::IoPriority;
@@ -40,6 +40,7 @@ pub struct Probed {
 
 struct Opened {
     sequence_number: u64,
+    full: bool,
     handle: Option<Owned>,
     listed: u64,
     probed: Probed,
@@ -56,8 +57,9 @@ impl Opened {
     }
 }
 
-/// One limited-query handle per process, opened when it first shows up and
-/// closed when it is gone. A process that could not be opened is not retried.
+/// One query handle per process, opened when it first shows up and closed
+/// when it is gone: with full query rights where the process allows them,
+/// otherwise limited ones. A process that could not be opened is not retried.
 /// A process is probed as it shows up, then in turn by pid, so that each is
 /// probed again within [`PROBE_ROUND`].
 #[derive(Default)]
@@ -80,10 +82,12 @@ impl Handles {
             match self.open.get_mut(&row.pid) {
                 Some(opened) if opened.sequence_number == row.sequence_number => opened.listed = now,
                 _ => {
+                    let full = crate::win::open_process(PROCESS_QUERY_INFORMATION, row.pid).ok();
                     let mut opened = Opened {
                         sequence_number: row.sequence_number,
-                        handle: crate::win::open_process(PROCESS_QUERY_LIMITED_INFORMATION, row.pid)
-                            .ok()
+                        full: full.is_some(),
+                        handle: full
+                            .or_else(|| crate::win::open_process(PROCESS_QUERY_LIMITED_INFORMATION, row.pid).ok())
                             .map(Owned),
                         listed: now,
                         probed: Probed::default(),
@@ -109,6 +113,13 @@ impl Handles {
 
     pub fn get(&self, pid: u32) -> Option<HANDLE> {
         self.open.get(&pid)?.handle.as_ref().map(|owned| owned.0)
+    }
+
+    /// The handle when it was opened with full query rights, which D3DKMT
+    /// needs; a protected process gives only limited ones.
+    pub fn full(&self, pid: u32) -> Option<HANDLE> {
+        let opened = self.open.get(&pid)?;
+        opened.handle.as_ref().filter(|_| opened.full).map(|owned| owned.0)
     }
 
     /// The process's probed values; the default when it could not be read.

@@ -5,17 +5,18 @@ use std::time::Duration;
 use capnp::struct_list;
 use uniproc_protocol::windows_capnp::{
     Architecture as WireArchitecture, DpiAwareness as WireDpi, ExtendedCfg as WireExtendedCfg,
-    IoPriority as WireIoPriority, Isolation as WireIsolation, MachineMetric as WireMachineMetric,
-    ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority, ServiceState as WireServiceState,
-    SignatureStatus as WireSignature, StackProtection as WireStackProtection, Toggle,
-    UacVirtualization as WireUac, lists_update, machine_sample, metric_spec, process_columns,
-    process_info, process_state, service_stats, service_status,
+    GpuEngineType as WireGpuEngineType, IoPriority as WireIoPriority, Isolation as WireIsolation,
+    MachineMetric as WireMachineMetric, ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority,
+    ServiceState as WireServiceState, SignatureStatus as WireSignature, StackProtection as WireStackProtection,
+    Toggle, UacVirtualization as WireUac, gpu_adapter, lists_update, machine_sample, metric_spec,
+    process_columns, process_info, process_state, service_stats, service_status,
 };
 
 use crate::api::{
-    Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
-    MachineDisk, MachineMemory, MachineMetric, MachineNetwork, MachineProcessor, MachineSample, MetricSpec,
-    Mitigations, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState, ProcessStates, Sample,
+    Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, GpuAdapter, GpuEngine, GpuEngineKind, IoPriority,
+    Isolation, MachineCpu, MachineDisk, MachineMemory, MachineMetric, MachineNetwork, MachineProcessor,
+    MachineSample, MetricSpec, Mitigations, ProcessGpuEngine, ProcessInfo, ProcessMetric, ProcessPriority,
+    ProcessState, ProcessStates, Sample,
     ServiceState, ServiceStats, ServiceStatus, SignatureStatus, Snapshot, StackProtection, Tagged,
     UacVirtualization,
 };
@@ -179,6 +180,9 @@ fn process_metric(m: WireProcessMetric) -> ProcessMetric {
         WireProcessMetric::HardFaults => ProcessMetric::HardFaults,
         WireProcessMetric::PeakThreads => ProcessMetric::PeakThreads,
         WireProcessMetric::ContextSwitches => ProcessMetric::ContextSwitches,
+        WireProcessMetric::GpuDedicated => ProcessMetric::GpuDedicated,
+        WireProcessMetric::GpuShared => ProcessMetric::GpuShared,
+        WireProcessMetric::GpuEngines => ProcessMetric::GpuEngines,
     }
 }
 
@@ -189,6 +193,7 @@ fn machine_metric(m: WireMachineMetric) -> MachineMetric {
         WireMachineMetric::Disk => MachineMetric::Disk,
         WireMachineMetric::Network => MachineMetric::Network,
         WireMachineMetric::Processors => MachineMetric::Processors,
+        WireMachineMetric::Gpu => MachineMetric::Gpu,
     }
 }
 
@@ -467,9 +472,74 @@ pub fn sample(
             hard_faults => (has_hard_faults, get_hard_faults),
             peak_threads => (has_peak_threads, get_peak_threads),
             context_switches => (has_context_switches, get_context_switches),
+            gpu_dedicated => (has_gpu_dedicated, get_gpu_dedicated),
+            gpu_shared => (has_gpu_shared, get_gpu_shared),
         ),
+        gpu_engines: if p.has_gpu_engines() {
+            Some(
+                p.get_gpu_engines()?
+                    .iter()
+                    .map(|e| ProcessGpuEngine {
+                        row: e.get_row(),
+                        adapter_luid: e.get_adapter_luid(),
+                        engine: e.get_engine(),
+                        running_time: e.get_running_time(),
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        },
         machine: machine_groups(machine)?,
     })
+}
+
+fn gpu_engine_kind(t: Wire<WireGpuEngineType>) -> GpuEngineKind {
+    match t {
+        Ok(WireGpuEngineType::ThreeD) => GpuEngineKind::ThreeD,
+        Ok(WireGpuEngineType::VideoDecode) => GpuEngineKind::VideoDecode,
+        Ok(WireGpuEngineType::VideoEncode) => GpuEngineKind::VideoEncode,
+        Ok(WireGpuEngineType::VideoProcessing) => GpuEngineKind::VideoProcessing,
+        Ok(WireGpuEngineType::SceneAssembly) => GpuEngineKind::SceneAssembly,
+        Ok(WireGpuEngineType::Copy) => GpuEngineKind::Copy,
+        Ok(WireGpuEngineType::Overlay) => GpuEngineKind::Overlay,
+        Ok(WireGpuEngineType::Crypto) => GpuEngineKind::Crypto,
+        Ok(WireGpuEngineType::VideoCodec) => GpuEngineKind::VideoCodec,
+        Ok(WireGpuEngineType::Other) | Err(_) => GpuEngineKind::Other,
+    }
+}
+
+fn gpus(list: struct_list::Reader<'_, gpu_adapter::Owned>) -> capnp::Result<Arc<[GpuAdapter]>> {
+    list.iter()
+        .map(|g| {
+            Ok(GpuAdapter {
+                luid: g.get_luid(),
+                name: text(g.get_name())?,
+                dedicated_limit: g.get_dedicated_limit(),
+                dedicated_usage: g.get_dedicated_usage(),
+                shared_limit: g.get_shared_limit(),
+                shared_usage: g.get_shared_usage(),
+                temperature: g.get_temperature(),
+                fan_rpm: g.get_fan_rpm(),
+                power: g.get_power(),
+                memory_frequency: g.get_memory_frequency(),
+                engines: g
+                    .get_engines()?
+                    .iter()
+                    .map(|e| {
+                        Ok(GpuEngine {
+                            ordinal: e.get_ordinal(),
+                            kind: gpu_engine_kind(e.get_type()),
+                            name: text(e.get_name())?,
+                            running_time: e.get_running_time(),
+                            frequency: e.get_frequency(),
+                            max_frequency: e.get_max_frequency(),
+                        })
+                    })
+                    .collect::<capnp::Result<_>>()?,
+            })
+        })
+        .collect()
 }
 
 fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample> {
@@ -535,5 +605,6 @@ fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample>
         } else {
             None
         },
+        gpus: if m.has_gpus() { Some(gpus(m.get_gpus()?)?) } else { None },
     })
 }

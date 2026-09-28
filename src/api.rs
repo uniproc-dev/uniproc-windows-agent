@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 pub use uniproc_windows_core::{
-    Architecture, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
+    Architecture, Columns, DpiAwareness, ExtendedCfg, GpuAdapter, GpuEngine, GpuEngineKind, IoPriority, Isolation,
+    MachineCpu, ProcessGpuEngine,
     MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample,
     MetricSpec, Mitigations, NO_DATA_U32, NO_DATA_U64, ProcessMetric, ProcessMetrics, ProcessPriority, ProcessState,
     Sample, SignatureStatus, SmolStr, StackProtection, Tagged, UacVirtualization,

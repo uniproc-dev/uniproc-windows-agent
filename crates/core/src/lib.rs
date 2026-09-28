@@ -21,7 +21,8 @@ pub use model::{
 };
 pub use report::{Diff, Health, Process, SessionHealth, SignatureStatus};
 pub use sample::{
-    Columns, Demand, MAX_INTERVAL, MIN_INTERVAL, MachineCpu, MachineDisk, MachineMemory,
+    Columns, Demand, GpuAdapter, GpuEngine, GpuEngineKind, MAX_INTERVAL, MIN_INTERVAL, MachineCpu, MachineDisk,
+    MachineMemory, ProcessGpuEngine,
     MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample, MetricSpec, NO_DATA_U32,
     NO_DATA_U64, ProcessMetric, ProcessMetrics, Sample,
 };

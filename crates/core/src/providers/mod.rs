@@ -1,5 +1,6 @@
 pub mod display_name;
 pub mod disk;
+pub mod gpu;
 pub mod machine;
 pub mod network;
 pub mod process;
