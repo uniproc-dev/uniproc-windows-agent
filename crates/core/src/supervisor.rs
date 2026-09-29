@@ -17,9 +17,10 @@ use crate::providers::process::{self, Images};
 use crate::providers::provider::Provider;
 use crate::report::{Diff, Health};
 use crate::sample::{
-    Columns, Demand, Extras, MachineMetric, MachineSample, MetricSpec, NO_DATA_U32, ProcessMetric, ProcessMetrics,
-    Sample, now_100ns,
+    Columns, Demand, Extras, MAX_INTERVAL, MachineMetric, MachineSample, MetricSpec, NO_DATA_U32, ProcessMetric,
+    ProcessMetrics, Sample, now_100ns,
 };
+use crate::schedule::Schedule;
 use crate::sink::Sink;
 use crate::snapshot::{self, Processes, Row};
 use crate::state::SystemState;
@@ -42,7 +43,8 @@ pub struct SupervisorConfig {
 
 /// Owns the machine's current picture and the sessions that feed it. Every
 /// tick applies what the providers sent and hands on what changed; a tick
-/// that is due for a sample also reads every process and the machine.
+/// that is due for a sample reads what the due intervals want: the machine,
+/// and every process unless they want the machine alone.
 pub struct Supervisor {
     router: KernelRouter,
     sink: Sink,
@@ -50,8 +52,7 @@ pub struct Supervisor {
     providers: Vec<Box<dyn Provider>>,
     reader: Reader,
     demand: Demand,
-    sampled: Instant,
-    sampled_for: MetricSpec,
+    schedule: Schedule,
     snapshot_error: Option<String>,
 }
 
@@ -121,8 +122,9 @@ impl Supervisor {
             session: probes::own_session(),
             fresh: None,
         };
-        let spec = demand.get();
         let sampled = Instant::now();
+        let mut schedule = Schedule::default();
+        let first = schedule.take(&demand.get(), sampled).map_or_else(MetricSpec::default, |due| due.spec);
         let mut supervisor = Self {
             router,
             sink,
@@ -130,19 +132,19 @@ impl Supervisor {
             providers,
             reader,
             demand,
-            sampled,
-            sampled_for: spec,
+            schedule,
             snapshot_error: None,
         };
-        supervisor.reader.sample(&spec).context("the first snapshot")?;
+        supervisor.reader.sample(&first, true).context("the first snapshot")?;
         supervisor.reader.await_verdicts(sampled + FIRST_VERDICTS);
         Ok(supervisor)
     }
 
-    /// Applies what the providers sent since the last tick, samples when a
-    /// sample is [`due`](Self::due) or the last one does not cover the
-    /// demand, and adds what changed to `diff`, which whoever applies it
-    /// empties before the next tick. The first tick hands on everything.
+    /// Applies what the providers sent since the last tick, samples for the
+    /// intervals that are due or want more than they were last sampled for,
+    /// and adds what changed to `diff`, which whoever applies it empties
+    /// before the next tick. The first tick hands on everything, the first
+    /// sample among it, and samples nothing more itself.
     pub fn tick(&mut self, diff: &mut Diff) {
         for change in self.rx.try_iter() {
             self.reader.state.apply(change);
@@ -151,15 +153,10 @@ impl Supervisor {
             self.reader.state.judge(image);
         }
 
-        let spec = self.demand.get();
-        let grown = !self.sampled_for.covers(&spec);
-        let on_time = self.sampled.elapsed() >= spec.period();
-        if on_time {
-            self.sampled = Instant::now();
-        }
-        if grown || on_time {
-            self.sampled_for = spec;
-            match self.reader.sample(&spec) {
+        if self.reader.fresh.is_none()
+            && let Some(due) = self.schedule.take(&self.demand.get(), Instant::now())
+        {
+            match self.reader.sample(&due.spec, due.reads_processes) {
                 Ok(()) => {
                     if self.snapshot_error.take().is_some() {
                         tracing::info!("the process list reads again");
@@ -188,11 +185,11 @@ impl Supervisor {
         }
     }
 
-    /// When the next sample is due: a period of the demand as it is now
-    /// after the last one taken on time. A sample taken because the demand
-    /// grew does not move it.
+    /// When the next sample is due: the soonest interval's period after it
+    /// was last sampled on time. A sample taken because an interval wants
+    /// more does not move it; a change of the demand wakes the core anyway.
     pub fn due(&self) -> Instant {
-        self.sampled + self.demand.get().period()
+        self.schedule.due().unwrap_or_else(|| Instant::now() + MAX_INTERVAL)
     }
 }
 
@@ -211,35 +208,41 @@ impl Reader {
         }
     }
 
+    /// Reads what `spec` wants; without `reads_processes` only the machine,
+    /// and the sample has no rows.
     #[tracing::instrument(level = "debug", skip_all)]
-    fn sample(&mut self, spec: &MetricSpec) -> Result<()> {
-        self.processes.read()?;
+    fn sample(&mut self, spec: &MetricSpec, reads_processes: bool) -> Result<()> {
+        if reads_processes {
+            self.processes.read()?;
+        }
         let sampled_at = now_100ns();
 
         let snapshot = &self.processes;
         let rows = snapshot.rows();
-        let names = &mut self.names;
-        let images = &self.images;
-        self.state.reconcile(
-            rows,
-            |row| {
-                let image_name = snapshot.image_name(row);
-                Sighted {
-                    is_kernel_process: snapshot::is_kernel_pseudo_process(row.pid, row.parent_pid, &image_name),
-                    image_name: image_name.into(),
-                    read: process::read(
-                        row.pid,
-                        snapshot.user_sid(row).as_deref(),
-                        (snapshot.package_full_name(row), snapshot.app_id(row)),
-                        names,
-                    ),
-                }
-            },
-            |request| images.ask(request),
-        );
+        if reads_processes {
+            let names = &mut self.names;
+            let images = &self.images;
+            self.state.reconcile(
+                rows,
+                |row| {
+                    let image_name = snapshot.image_name(row);
+                    Sighted {
+                        is_kernel_process: snapshot::is_kernel_pseudo_process(row.pid, row.parent_pid, &image_name),
+                        image_name: image_name.into(),
+                        read: process::read(
+                            row.pid,
+                            snapshot.user_sid(row).as_deref(),
+                            (snapshot.package_full_name(row), snapshot.app_id(row)),
+                            names,
+                        ),
+                    }
+                },
+                |request| images.ask(request),
+            );
 
-        self.handles.sync(rows);
-        observe(&mut self.state, &self.handles, rows);
+            self.handles.sync(rows);
+            observe(&mut self.state, &self.handles, rows);
+        }
 
         let wanted = gpu::Wanted {
             memory: spec.processes.contains(ProcessMetric::GpuDedicated)
@@ -277,8 +280,12 @@ impl Reader {
             period: spec.period(),
             wanted: *spec,
             passport_etag: 0,
-            pids: rows.iter().map(|r| r.pid).collect(),
-            sequence_numbers: rows.iter().map(|r| r.sequence_number).collect(),
+            pids: if reads_processes { rows.iter().map(|r| r.pid).collect() } else { Arc::from([]) },
+            sequence_numbers: if reads_processes {
+                rows.iter().map(|r| r.sequence_number).collect()
+            } else {
+                Arc::from([])
+            },
             columns,
             gpu_engines: gpu.engines,
             machine,
@@ -395,11 +402,11 @@ mod tests {
         let _guard = crate::etw::router::tests::ETW_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let demand = Demand::new(MetricSpec {
+        let demand = Demand::new([MetricSpec {
             interval: Duration::from_millis(200),
             processes: ProcessMetrics::all(),
             machine: MachineMetrics::all(),
-        });
+        }]);
         let mut supervisor = Supervisor::start(config(), demand, || {}).expect("elevated");
 
         let first = tick(&mut supervisor);
@@ -434,11 +441,11 @@ mod tests {
         let _guard = crate::etw::router::tests::ETW_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let demand = Demand::new(MetricSpec {
+        let demand = Demand::new([MetricSpec {
             interval: Duration::from_secs(60),
             processes: ProcessMetric::Handles.into(),
             machine: MachineMetric::Cpu.into(),
-        });
+        }]);
         let before = Instant::now();
         let mut supervisor = Supervisor::start(config(), demand, || {}).expect("elevated");
         let first = tick(&mut supervisor);
@@ -446,5 +453,35 @@ mod tests {
         assert!(again.sample.is_none());
         assert!(supervisor.due() >= before + Duration::from_secs(60));
         assert_eq!(first.sample.unwrap().columns.working_set, None, "not asked for");
+    }
+
+    #[test]
+    #[ignore = "requires admin and a real ETW session"]
+    fn the_machine_is_read_on_its_own_interval_without_the_processes() {
+        let _guard = crate::etw::router::tests::ETW_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let demand = Demand::new([
+            MetricSpec {
+                interval: Duration::from_millis(100),
+                processes: ProcessMetrics::empty(),
+                machine: MachineMetric::Cpu | MachineMetric::Memory,
+            },
+            MetricSpec {
+                interval: Duration::from_secs(60),
+                processes: ProcessMetric::Handles.into(),
+                machine: MachineMetrics::empty(),
+            },
+        ]);
+        let mut supervisor = Supervisor::start(config(), demand, || {}).expect("elevated");
+        let first = tick(&mut supervisor);
+        assert!(!first.sample.unwrap().pids.is_empty());
+
+        std::thread::sleep(supervisor.due().saturating_duration_since(Instant::now()));
+        let fast = tick(&mut supervisor);
+        let sample = fast.sample.expect("the machine is due");
+        assert!(sample.pids.is_empty() && sample.columns.handles.is_none(), "no process read");
+        assert!(sample.machine.cpu.is_some() && sample.machine.memory.is_some());
+        assert!(supervisor.due() <= Instant::now() + Duration::from_millis(100));
     }
 }

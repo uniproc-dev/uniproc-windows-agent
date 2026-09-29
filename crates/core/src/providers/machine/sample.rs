@@ -80,6 +80,7 @@ impl Drop for PdhProcessorPerformance {
 }
 
 /// The fastest processor's rated clock and the clock they run at now.
+#[tracing::instrument(name = "cpu frequency", level = "debug", skip_all)]
 pub fn cpu_frequency_mhz(
     pdh: Option<&mut PdhProcessorPerformance>,
     info: &mut Vec<PROCESSOR_POWER_INFORMATION>,
@@ -114,6 +115,7 @@ pub fn cpu_frequency_mhz(
     (max_mhz, current_mhz)
 }
 
+#[tracing::instrument(name = "memory", level = "debug", skip_all)]
 pub fn physical_memory() -> Option<MachineMemory> {
     let mut mem = MEMORYSTATUSEX {
         dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,

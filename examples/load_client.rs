@@ -1,10 +1,13 @@
 //! Load generator against a running agent, for profiling its request path:
 //!   cargo run --release --example load_client -- [processes|states|sample|refresh|ping] [inflight] [seconds]
+//!   cargo run --release --example load_client -- split [machine ms] [seconds] [cpu,memory,disk,network,processors,gpu,adapters]
 //!
 //! Opens one session (the agent serves one at a time) and keeps `inflight`
 //! requests outstanding on it until the deadline, then prints throughput and
-//! latency percentiles. Read-only: it never calls a method that changes the
-//! machine.
+//! latency percentiles. `split` subscribes twice, as uniproc does: the named
+//! machine groups, all of them by default, every `machine ms`, every process
+//! counter every 1.5 s, and counts what each subscription receives.
+//! Read-only: it never calls a method that changes the machine.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,7 +18,7 @@ use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::connect_session;
 use uniproc_protocol::windows_capnp::{sampler, windows_agent};
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
-use uniproc_windows_agent::api::{MachineMetrics, MetricSpec, ProcessMetrics};
+use uniproc_windows_agent::api::{MachineMetric, MachineMetrics, MetricSpec, ProcessMetrics};
 use uniproc_windows_agent::wire::{PROTOCOL, encode};
 
 struct ClientStub;
@@ -44,7 +47,32 @@ impl Method {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let method = match args.next().as_deref() {
+    let first = args.next();
+    if first.as_deref() == Some("split") {
+        let machine_ms: u64 = args.next().map_or(100, |s| s.parse().expect("machine ms"));
+        let seconds: u64 = args.next().map_or(15, |s| s.parse().expect("seconds"));
+        let groups = args.next().map_or_else(MachineMetrics::all, |names| {
+            names
+                .split(',')
+                .map(|name| match name {
+                    "cpu" => MachineMetric::Cpu,
+                    "memory" => MachineMetric::Memory,
+                    "disk" => MachineMetric::Disk,
+                    "network" => MachineMetric::Network,
+                    "processors" => MachineMetric::Processors,
+                    "gpu" => MachineMetric::Gpu,
+                    "adapters" => MachineMetric::NetworkAdapters,
+                    other => panic!("unknown machine group {other:?}"),
+                })
+                .collect()
+        });
+        compio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(split(Duration::from_millis(machine_ms), groups, Duration::from_secs(seconds)))
+            .unwrap();
+        return;
+    }
+    let method = match first.as_deref() {
         None | Some("processes") => Method::Processes,
         Some("states") => Method::States,
         Some("sample") => Method::Sample,
@@ -117,6 +145,78 @@ async fn call(
     }
 }
 
+async fn subscribe(client: &windows_agent::Client, spec: &MetricSpec) -> Result<sampler::Client, capnp::Error> {
+    let mut req = client.subscribe_request();
+    encode::metric_spec(spec, req.get().init_spec());
+    req.send().promise.await?.get()?.get_sampler()
+}
+
+async fn split(
+    machine_every: Duration,
+    groups: MachineMetrics,
+    length: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let endpoint = Endpoint::for_service(APP_NAME, WINDOWS_AGENT_SERVICE)?;
+    let session = connect_session::<windows_agent::Client, _>(
+        &endpoint,
+        &HandshakeMode::version_only(),
+        PROTOCOL,
+        ClientStub,
+    )
+    .await
+    .map_err(|e| format!("{e:?}"))?;
+    let client = session.remote().clone();
+    let specs = [
+        (
+            "machine",
+            MetricSpec {
+                interval: machine_every,
+                processes: ProcessMetrics::empty(),
+                machine: groups,
+            },
+        ),
+        (
+            "processes",
+            MetricSpec {
+                interval: Duration::from_millis(1500),
+                processes: ProcessMetrics::all(),
+                machine: MachineMetrics::empty(),
+            },
+        ),
+    ];
+    let deadline = Instant::now() + length;
+    let mut polls = Vec::new();
+    for (name, spec) in specs {
+        let sampler = subscribe(&client, &spec).await?;
+        polls.push(compio::runtime::spawn(async move {
+            let (mut last, mut samples, mut rows, mut bytes) = (0u64, 0u64, 0u64, 0u64);
+            while Instant::now() < deadline {
+                let mut req = sampler.sample_request();
+                req.get().init_meta().set_if_none_match(last);
+                let Ok(reply) = req.send().promise.await else { break };
+                let Ok(reply) = reply.get() else { break };
+                last = reply.get_meta().map_or(0, |m| m.get_etag());
+                rows += reply.get_processes().and_then(|p| p.get_pids()).map_or(0, |p| p.len() as u64);
+                bytes += reply.total_size().map_or(0, |s| s.word_count * 8);
+                samples += 1;
+            }
+            (name, samples, rows, bytes)
+        }));
+    }
+    for poll in polls {
+        if let Ok((name, samples, rows, bytes)) = poll.await {
+            let seconds = length.as_secs_f64();
+            println!(
+                "{name}: {samples} samples, {:.1}/s, {:.0} rows and {:.1} KiB per sample",
+                samples as f64 / seconds,
+                rows as f64 / samples.max(1) as f64,
+                bytes as f64 / samples.max(1) as f64 / 1024.0,
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn run(method: Method, inflight: usize, length: Duration) -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = Endpoint::for_service(APP_NAME, WINDOWS_AGENT_SERVICE)?;
     let session = connect_session::<windows_agent::Client, _>(
@@ -128,14 +228,12 @@ async fn run(method: Method, inflight: usize, length: Duration) -> Result<(), Bo
     .await
     .map_err(|e| format!("{e:?}"))?;
     let client = session.remote().clone();
-    let mut req = client.subscribe_request();
     let every = MetricSpec {
         interval: Duration::from_secs(1),
         processes: ProcessMetrics::all(),
         machine: MachineMetrics::all(),
     };
-    encode::metric_spec(&every, req.get().init_spec());
-    let sampler = req.send().promise.await?.get()?.get_sampler()?;
+    let sampler = subscribe(&client, &every).await?;
 
     call(&client, &sampler, method, &mut Tags::default()).await?;
 

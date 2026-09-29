@@ -3,6 +3,8 @@ mod processor_times;
 mod sample;
 mod vars;
 
+use std::time::{Duration, Instant};
+
 use ntapi::ntpoapi::PROCESSOR_POWER_INFORMATION;
 
 use crate::providers::machine::adapters::NetworkAdapters;
@@ -13,10 +15,14 @@ use crate::sample::{
 };
 use crate::state::MachineTotals;
 
+/// How long a read of the processors' clocks stands for them.
+const FREQUENCY_EVERY: Duration = Duration::from_secs(1);
+
 /// Reads the machine's counters when a tick asks for them.
 pub struct MachineProbe {
     pdh: Option<PdhProcessorPerformance>,
     power: Vec<PROCESSOR_POWER_INFORMATION>,
+    frequency: Option<(Instant, (u32, u32))>,
     times: ProcessorTimes,
     adapters: NetworkAdapters,
 }
@@ -32,6 +38,7 @@ impl MachineProbe {
         Self {
             pdh: None,
             power: Vec::new(),
+            frequency: None,
             times: ProcessorTimes::new(),
             adapters: NetworkAdapters::default(),
         }
@@ -78,11 +85,20 @@ impl MachineProbe {
         sample
     }
 
+    /// The clocks are read again only [`FREQUENCY_EVERY`]; between, the
+    /// last read stands.
     fn cpu(&mut self, times: MachineProcessor) -> MachineCpu {
-        if self.pdh.is_none() {
-            self.pdh = PdhProcessorPerformance::open();
-        }
-        let (max_mhz, current_mhz) = cpu_frequency_mhz(self.pdh.as_mut(), &mut self.power);
+        let (max_mhz, current_mhz) = match self.frequency {
+            Some((at, clocks)) if at.elapsed() < FREQUENCY_EVERY => clocks,
+            _ => {
+                if self.pdh.is_none() {
+                    self.pdh = PdhProcessorPerformance::open();
+                }
+                let clocks = cpu_frequency_mhz(self.pdh.as_mut(), &mut self.power);
+                self.frequency = Some((Instant::now(), clocks));
+                clocks
+            }
+        };
         MachineCpu {
             idle_time: times.idle_time,
             kernel_time: times.kernel_time,
@@ -141,5 +157,22 @@ mod tests {
             .expect("cpu");
         assert!(cpu.kernel_time >= cpu.idle_time && cpu.user_time > 0);
         assert!(cpu.max_mhz > 0);
+    }
+
+    #[test]
+    fn the_clocks_are_read_once_a_second_and_the_times_every_time() {
+        let mut probe = MachineProbe::new();
+        let mut cpu = || {
+            probe
+                .sample(MachineMetric::Cpu.into(), &MachineTotals::default())
+                .cpu
+                .expect("cpu")
+        };
+        let first = cpu();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let second = cpu();
+        assert_eq!((second.max_mhz, second.current_mhz), (first.max_mhz, first.current_mhz));
+        let busy = |cpu: &MachineCpu| cpu.idle_time + cpu.kernel_time + cpu.user_time;
+        assert!(busy(&second) > busy(&first), "the times move");
     }
 }

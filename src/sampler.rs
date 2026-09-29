@@ -43,9 +43,10 @@ impl Slot {
     }
 }
 
-/// The live subscriptions, kept by the painter: their union is what the
-/// core samples, at the shortest interval any of them asks for, and each
-/// gets the samples it is due, at its own interval.
+/// The live subscriptions, kept by the painter: the core samples each at
+/// its own interval, and each gets the samples it is due. The process list
+/// is read for the ones that ask for a process counter or only for the
+/// lists, and at the idle period when none does.
 pub(crate) struct Subscriptions {
     demand: Demand,
     idle: Duration,
@@ -61,10 +62,13 @@ struct Subscriber {
 
 impl Subscriber {
     /// Takes `published` when its sample covers this subscription, but no
-    /// sooner than its own interval after the last one delivered.
+    /// sooner than its own interval after the last one delivered. One that
+    /// wants only the lists takes a sample that read the process list.
     fn deliver(&mut self, published: &Arc<Published>) {
         let sample = &published.sample;
+        let lists_only = self.spec.processes.is_empty() && self.spec.machine.is_empty();
         let takes = sample.wanted.covers(&self.spec)
+            && (!lists_only || !sample.pids.is_empty())
             && self.delivered.as_ref().is_none_or(|held| {
                 held.snapshot != sample.snapshot && sample.sampled_at >= held.sampled_at + self.due_after(sample)
             });
@@ -86,7 +90,7 @@ impl Subscriptions {
     /// `idle`. `wake` makes the core look at the demand again at once.
     pub fn new(idle: Duration, wake: impl Fn() + Send + 'static) -> Self {
         Self {
-            demand: Demand::new(MetricSpec::idle(idle)),
+            demand: Demand::new([MetricSpec::idle(idle)]),
             idle,
             subscribers: Vec::new(),
             wake: Box::new(wake),
@@ -123,12 +127,12 @@ impl Subscriptions {
         }
     }
 
-    fn wanted(&self) -> MetricSpec {
-        self.subscribers
-            .iter()
-            .map(|s| s.spec)
-            .reduce(MetricSpec::union)
-            .unwrap_or(MetricSpec::idle(self.idle))
+    fn wanted(&self) -> Vec<MetricSpec> {
+        let mut specs: Vec<MetricSpec> = self.subscribers.iter().map(|s| s.spec).collect();
+        if !specs.iter().any(MetricSpec::reads_processes) {
+            specs.push(MetricSpec::idle(self.idle));
+        }
+        specs
     }
 }
 
@@ -254,29 +258,63 @@ mod tests {
     fn with_nobody_subscribed_the_core_reads_only_passports_and_states_at_the_idle_period() {
         let mut painted = Painted::new();
         let demand = painted.subscriptions.demand();
-        assert_eq!(demand.get(), MetricSpec::idle(Duration::from_secs(2)));
+        assert_eq!(*demand.get(), [MetricSpec::idle(Duration::from_secs(2))]);
         painted.requests.send(Request::Idle(Duration::from_secs(1))).unwrap();
         painted.pump();
-        assert_eq!(demand.get(), MetricSpec::idle(Duration::from_secs(1)));
+        assert_eq!(*demand.get(), [MetricSpec::idle(Duration::from_secs(1))]);
     }
 
     #[test]
-    fn the_core_samples_the_union_at_the_shortest_interval() {
+    fn the_core_samples_each_subscription_at_its_own_interval() {
         let mut painted = Painted::new();
         let demand = painted.subscriptions.demand();
-        let a = painted.subscribe(spec(1000, &[ProcessMetric::Handles]));
-        let b = painted.subscribe(spec(250, &[ProcessMetric::Threads]));
-        let now = demand.get();
-        assert_eq!(now.interval, Duration::from_millis(250));
-        assert_eq!(now.processes, ProcessMetric::Handles | ProcessMetric::Threads);
+        let a = spec(1000, &[ProcessMetric::Handles]);
+        let b = spec(250, &[ProcessMetric::Threads]);
+        let first = painted.subscribe(a);
+        let second = painted.subscribe(b);
+        assert_eq!(*demand.get(), [a, b]);
 
-        drop(b);
+        drop(second);
         painted.pump();
-        assert_eq!(demand.get().interval, Duration::from_secs(1));
-        drop(a);
+        assert_eq!(*demand.get(), [a]);
+        drop(first);
         painted.pump();
-        assert_eq!(demand.get(), MetricSpec::idle(Duration::from_secs(2)), "back to the idle period");
+        assert_eq!(*demand.get(), [MetricSpec::idle(Duration::from_secs(2))], "back to the idle period");
         assert!(painted.subscriptions.subscribers.is_empty());
+    }
+
+    #[test]
+    fn with_only_the_machine_subscribed_the_lists_are_read_at_the_idle_period() {
+        let mut painted = Painted::new();
+        let demand = painted.subscriptions.demand();
+        let machine = MetricSpec {
+            interval: Duration::from_millis(100),
+            processes: ProcessMetrics::empty(),
+            machine: uniproc_windows_core::MachineMetric::Cpu.into(),
+        };
+        let _sampler = painted.subscribe(machine);
+        assert_eq!(*demand.get(), [machine, MetricSpec::idle(Duration::from_secs(2))]);
+    }
+
+    #[test]
+    fn a_subscriber_to_the_lists_alone_skips_samples_that_did_not_read_them() {
+        let mut painted = Painted::new();
+        let lists = MetricSpec::idle(Duration::from_millis(100));
+        let sampler = painted.subscribe(lists);
+        let machine_only = MetricSpec {
+            machine: uniproc_windows_core::MachineMetric::Cpu.into(),
+            ..lists
+        };
+        painted.publish(1, 0, machine_only);
+        assert!(sampler.latest().is_none());
+        painted.taken(Sample {
+            snapshot: 2,
+            sampled_at: 1_000_000,
+            wanted: machine_only,
+            pids: [4].as_slice().into(),
+            ..Default::default()
+        });
+        assert_eq!(sampler.latest().unwrap().snapshot, 2);
     }
 
     #[test]
@@ -285,7 +323,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut subscriptions = Subscriptions::new(Duration::from_secs(2), {
             let (demand, seen) = (demand.clone(), seen.clone());
-            move || seen.lock().push(demand.get().unwrap().get().interval)
+            move || seen.lock().push(demand.get().unwrap().get()[0].interval)
         });
         let _ = demand.set(subscriptions.demand());
         let (requests, inbox) = crossbeam_channel::unbounded();

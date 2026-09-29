@@ -9,6 +9,7 @@ mod probes;
 mod providers;
 mod report;
 mod sample;
+mod schedule;
 mod sink;
 mod snapshot;
 mod state;

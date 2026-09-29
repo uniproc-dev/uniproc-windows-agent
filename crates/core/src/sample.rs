@@ -125,6 +125,13 @@ impl MetricSpec {
     pub fn covers(&self, other: &Self) -> bool {
         self.processes.is_superset(other.processes) && self.machine.is_superset(other.machine)
     }
+
+    /// Whether sampling for it reads the process list: it asks for a process
+    /// counter, or for nothing but the lists. A spec with machine groups
+    /// alone does not.
+    pub fn reads_processes(&self) -> bool {
+        !self.processes.is_empty() || self.machine.is_empty()
+    }
 }
 
 impl Default for MetricSpec {
@@ -133,22 +140,22 @@ impl Default for MetricSpec {
     }
 }
 
-/// What the core samples now. Whoever keeps the subscribers sets it; the
-/// core reads it at every tick.
+/// What the core samples now: every spec at its own interval. Whoever keeps
+/// the subscribers sets it; the core reads it at every tick.
 #[derive(Clone)]
-pub struct Demand(Arc<Mutex<MetricSpec>>);
+pub struct Demand(Arc<Mutex<Arc<[MetricSpec]>>>);
 
 impl Demand {
-    pub fn new(spec: MetricSpec) -> Self {
-        Self(Arc::new(Mutex::new(spec)))
+    pub fn new(specs: impl Into<Arc<[MetricSpec]>>) -> Self {
+        Self(Arc::new(Mutex::new(specs.into())))
     }
 
-    pub fn set(&self, spec: MetricSpec) {
-        *self.0.lock() = spec;
+    pub fn set(&self, specs: impl Into<Arc<[MetricSpec]>>) {
+        *self.0.lock() = specs.into();
     }
 
-    pub fn get(&self) -> MetricSpec {
-        *self.0.lock()
+    pub fn get(&self) -> Arc<[MetricSpec]> {
+        self.0.lock().clone()
     }
 }
 

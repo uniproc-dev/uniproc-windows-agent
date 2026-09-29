@@ -742,7 +742,7 @@ mod tests {
 
         let sampler = feed.subscribe(wanted);
         wakes.recv_timeout(Duration::from_secs(5)).expect("the core is woken");
-        assert_eq!(demand.get(), wanted);
+        assert_eq!(*demand.get(), [wanted]);
 
         let diff = Diff {
             passports: vec![passport(10)],
@@ -764,7 +764,7 @@ mod tests {
 
         drop(sampler);
         wakes.recv_timeout(Duration::from_secs(5)).expect("the core is woken");
-        assert_eq!(demand.get(), MetricSpec::idle(Duration::from_secs(2)));
+        assert_eq!(*demand.get(), [MetricSpec::idle(Duration::from_secs(2))]);
 
         drop(painter);
         assert!(changes.send(Change::Services(ServiceEvent::Scan(Vec::new()))).is_err(), "the painter is gone");

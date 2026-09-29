@@ -33,6 +33,7 @@ impl ProcessorTimes {
 
     /// Group 0 first, in processor order within a group; one group answers
     /// per call.
+    #[tracing::instrument(name = "processor times", level = "debug", skip_all)]
     pub fn read(&mut self) -> Result<&[MachineProcessor]> {
         self.processors.clear();
         let groups = unsafe { GetActiveProcessorGroupCount() }.max(1);
