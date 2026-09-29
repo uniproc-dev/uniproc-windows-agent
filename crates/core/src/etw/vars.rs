@@ -48,4 +48,8 @@ pub const SESSION_NAME_PREFIX: &str = "Uniproc-";
 pub const BUFFER_SIZE_KB: u32 = 16;
 pub const MINIMUM_BUFFERS: u32 = 1;
 pub const MAXIMUM_BUFFERS: u32 = 8;
-pub const FLUSH_TIMER_SEC: u32 = 1;
+/// How often a buffer that is not full yet is handed to the consumer; the
+/// machine's disk and network counters move no faster than this.
+pub const FLUSH_TIMER_MS: u32 = 50;
+/// `FlushTimer` counts milliseconds rather than seconds.
+pub const EVENT_TRACE_USE_MS_FLUSH_TIMER: u32 = 0x0000_0010;

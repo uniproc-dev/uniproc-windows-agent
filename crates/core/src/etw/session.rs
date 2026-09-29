@@ -142,14 +142,14 @@ unsafe fn build_props(
     if let Some(g) = guid {
         props.Wnode.Guid = g;
     }
-    props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE as u32;
+    props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE as u32 | crate::etw::vars::EVENT_TRACE_USE_MS_FLUSH_TIMER;
     if mode == SessionMode::SystemLogger {
         props.LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE as u32;
     }
     props.BufferSize = crate::etw::vars::BUFFER_SIZE_KB;
     props.MinimumBuffers = crate::etw::vars::MINIMUM_BUFFERS;
     props.MaximumBuffers = crate::etw::vars::MAXIMUM_BUFFERS;
-    props.FlushTimer = crate::etw::vars::FLUSH_TIMER_SEC;
+    props.FlushTimer = crate::etw::vars::FLUSH_TIMER_MS;
     props.EnableFlags = flags;
     props
 }

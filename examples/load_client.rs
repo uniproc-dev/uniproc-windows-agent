@@ -190,6 +190,7 @@ async fn split(
         let sampler = subscribe(&client, &spec).await?;
         polls.push(compio::runtime::spawn(async move {
             let (mut last, mut samples, mut rows, mut bytes) = (0u64, 0u64, 0u64, 0u64);
+            let mut totals = Vec::new();
             while Instant::now() < deadline {
                 let mut req = sampler.sample_request();
                 req.get().init_meta().set_if_none_match(last);
@@ -199,12 +200,17 @@ async fn split(
                 rows += reply.get_processes().and_then(|p| p.get_pids()).map_or(0, |p| p.len() as u64);
                 bytes += reply.total_size().map_or(0, |s| s.word_count * 8);
                 samples += 1;
+                if let Ok(machine) = reply.get_machine() {
+                    let disk = machine.get_disk().map_or(0, |d| d.get_read_bytes() + d.get_write_bytes());
+                    let network = machine.get_network().map_or(0, |n| n.get_rx_bytes() + n.get_tx_bytes());
+                    totals.push((disk, network));
+                }
             }
-            (name, samples, rows, bytes)
+            (name, samples, rows, bytes, totals)
         }));
     }
     for poll in polls {
-        if let Ok((name, samples, rows, bytes)) = poll.await {
+        if let Ok((name, samples, rows, bytes, totals)) = poll.await {
             let seconds = length.as_secs_f64();
             println!(
                 "{name}: {samples} samples, {:.1}/s, {:.0} rows and {:.1} KiB per sample",
@@ -212,6 +218,13 @@ async fn split(
                 rows as f64 / samples.max(1) as f64,
                 bytes as f64 / samples.max(1) as f64 / 1024.0,
             );
+            let moved = totals.windows(2).filter(|w| w[1] != w[0]).count();
+            if let (Some(first), Some(last)) = (totals.first(), totals.last()) {
+                println!(
+                    "    disk+network bytes: first {first:?}, last {last:?}, moved between {moved} of {} samples",
+                    totals.len().saturating_sub(1)
+                );
+            }
         }
     }
     Ok(())
