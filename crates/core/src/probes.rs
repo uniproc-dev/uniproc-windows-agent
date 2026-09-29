@@ -137,7 +137,7 @@ impl Handles {
 /// with wraparound: the share of the list that `since` is of
 /// [`PROBE_ROUND`], from the first pid at or past `cursor`. Also where the
 /// next turn starts.
-fn turn(rows: &[Row], cursor: u32, since: Duration) -> (usize, usize, u32) {
+pub(crate) fn turn(rows: &[Row], cursor: u32, since: Duration) -> (usize, usize, u32) {
     let share = (rows.len() as u128 * since.as_nanos()).div_ceil(PROBE_ROUND.as_nanos()) as usize;
     let share = share.min(rows.len());
     let start = rows.partition_point(|row| row.pid < cursor) % rows.len().max(1);

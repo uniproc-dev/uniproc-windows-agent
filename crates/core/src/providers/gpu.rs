@@ -21,7 +21,7 @@ use windows::Win32::{
     KMTQAITYPE_GETSEGMENTSIZE, KMTQAITYPE_NODEMETADATA, KMTQAITYPE_NODEPERFDATA, KMTQUERYADAPTERINFOTYPE, LUID,
 };
 
-use crate::probes::Handles;
+use crate::probes::{Handles, turn};
 use crate::sample::{GpuAdapter, GpuEngine, GpuEngineKind, NO_DATA_U64, ProcessGpuEngine};
 use crate::snapshot::Row;
 
@@ -92,9 +92,13 @@ struct Used {
     dedicated: u64,
     shared: u64,
     on: Vec<On>,
+    checked: bool,
 }
 
-/// The hardware adapters, and what each process was last seen using.
+/// The hardware adapters, and what each process was last seen using. A
+/// process is read every tick while it has a context on an adapter; one
+/// that had none when last read is read again in its turn, each within
+/// [`crate::probes::PROBE_ROUND`], and holds nothing until then.
 #[derive(Default)]
 pub struct Gpu {
     adapters: Vec<Adapter>,
@@ -102,6 +106,8 @@ pub struct Gpu {
     processes: FxHashMap<u32, Used>,
     ticks: u64,
     scratch: Vec<u64>,
+    cursor: u32,
+    last: Option<Instant>,
 }
 
 impl Gpu {
@@ -173,6 +179,11 @@ impl Gpu {
         self.ticks += 1;
         let tick = self.ticks;
         let nodes_wanted = wanted.engines || wanted.adapters;
+        let at = Instant::now();
+        let since = self.last.map_or(Duration::ZERO, |last| at - last);
+        self.last = Some(at);
+        let (start, share, next) = turn(rows, self.cursor, since);
+        self.cursor = next;
         let Self {
             adapters,
             processes,
@@ -187,10 +198,12 @@ impl Gpu {
                 dedicated: 0,
                 shared: 0,
                 on: Vec::new(),
+                checked: false,
             });
             if used.sequence_number != row.sequence_number {
                 used.sequence_number = row.sequence_number;
                 used.on.clear();
+                used.checked = false;
             }
             used.listed = tick;
             let Some(handle) = handles.full(row.pid) else {
@@ -201,6 +214,10 @@ impl Gpu {
             };
             used.dedicated = 0;
             used.shared = 0;
+            if used.checked && used.on.is_empty() && !in_turn(index, rows.len(), start, share) {
+                continue;
+            }
+            used.checked = true;
             for adapter in adapters.iter_mut() {
                 let at = used.on.iter().position(|on| on.key == adapter.key);
                 if wanted.memory {
@@ -251,6 +268,12 @@ impl Gpu {
         processes.retain(|_, used| used.listed == tick);
         engines
     }
+}
+
+/// Whether row `index` of `len` is among the `share` rows from `start`,
+/// wrapping around.
+fn in_turn(index: usize, len: usize, start: usize, share: usize) -> bool {
+    (index + len - start) % len < share
 }
 
 /// Adds to each engine's total what a process ran on it since `before`, or
@@ -512,6 +535,28 @@ mod tests {
         assert_eq!(totals(&engines), [135, 7]);
         account(&mut engines, &[130, 7], &[120, 9]);
         assert_eq!(totals(&engines), [135, 9], "a read that went backwards adds nothing");
+    }
+
+    #[test]
+    fn a_turn_wraps_around_the_list() {
+        let turn: Vec<usize> = (0..5).filter(|&i| in_turn(i, 5, 3, 3)).collect();
+        assert_eq!(turn, [0, 3, 4]);
+        assert!((0..5).all(|i| !in_turn(i, 5, 2, 0)), "no time, no turn");
+        assert!((0..5).all(|i| in_turn(i, 5, 2, 5)));
+    }
+
+    #[test]
+    fn a_process_with_no_context_is_read_again_only_in_its_turn() {
+        let mut handles = Handles::default();
+        let rows = [me()];
+        handles.sync(&rows);
+        let mut gpu = Gpu::default();
+        gpu.read(ALL, &rows, &handles);
+        let used = &gpu.processes[&std::process::id()];
+        assert!(used.checked && used.on.is_empty(), "read as it shows up and found idle");
+        gpu.last = Some(Instant::now() + Duration::from_secs(3600));
+        gpu.read(ALL, &rows, &handles);
+        assert_eq!(gpu.dedicated(&rows[0]), 0, "out of turn it holds nothing, not no data");
     }
 
     #[test]

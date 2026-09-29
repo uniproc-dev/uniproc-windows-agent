@@ -2402,8 +2402,8 @@ dependencies = [
 
 [[package]]
 name = "uniproc-protocol"
-version = "0.12.4"
-source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.12.4#ce6f4466a4a5ea875c1a9e993baa8170aa76f4a3"
+version = "0.12.5"
+source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.12.5#31124f0f8576202b3e6de1216701d0b88fa021ab"
 dependencies = [
  "capnp",
  "capnp-rpc",
