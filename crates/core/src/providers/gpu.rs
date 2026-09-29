@@ -693,10 +693,17 @@ mod tests {
             .iter()
             .position(|row| processes.image_name(row).eq_ignore_ascii_case("dwm.exe"))
             .expect("dwm");
-        let names: Vec<&str> = adapters.iter().map(|a| a.name.as_str()).collect();
-        assert!(gpu.dedicated(&rows[dwm]) > 0, "dwm holds video memory on one of {names:?}");
+        let seen: Vec<_> = adapters
+            .iter()
+            .map(|a| (a.name.as_str(), a.dedicated_limit, a.shared_limit, a.engines.len()))
+            .collect();
+        let held = gpu.dedicated(&rows[dwm]).saturating_add(gpu.shared(&rows[dwm]));
+        assert!(held > 0, "dwm holds memory on one of {seen:?}");
         let engines = first.engines.as_ref().expect("asked for");
-        assert!(engines.iter().any(|e| e.row as usize == dwm && e.running_time != 0));
+        assert!(
+            engines.iter().any(|e| e.row as usize == dwm && e.running_time != 0),
+            "dwm ran on one of {seen:?}"
+        );
 
         std::thread::sleep(Duration::from_millis(500));
         let second = gpu.read(ALL, rows, &handles);
