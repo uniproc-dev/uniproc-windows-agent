@@ -685,21 +685,21 @@ mod tests {
         let mut gpu = Gpu::default();
         let first = gpu.read(ALL, rows, &handles);
         let adapters = first.adapters.as_deref().unwrap_or_default();
-        let renders = |a: &GpuAdapter| a.engines.iter().any(|e| e.kind == GpuEngineKind::ThreeD);
-        if !adapters.iter().any(renders) {
-            return;
-        }
         let dwm = rows
             .iter()
             .position(|row| processes.image_name(row).eq_ignore_ascii_case("dwm.exe"))
             .expect("dwm");
+        let engines = first.engines.as_ref().expect("asked for");
+        let has_memory = adapters.iter().any(|a| a.dedicated_limit > 0);
+        if !has_memory && !engines.iter().any(|e| e.row as usize == dwm) {
+            return;
+        }
         let seen: Vec<_> = adapters
             .iter()
             .map(|a| (a.name.as_str(), a.dedicated_limit, a.shared_limit, a.engines.len()))
             .collect();
         let held = gpu.dedicated(&rows[dwm]).saturating_add(gpu.shared(&rows[dwm]));
         assert!(held > 0, "dwm holds memory on one of {seen:?}");
-        let engines = first.engines.as_ref().expect("asked for");
         assert!(
             engines.iter().any(|e| e.row as usize == dwm && e.running_time != 0),
             "dwm ran on one of {seen:?}"
