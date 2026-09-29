@@ -684,22 +684,23 @@ mod tests {
         handles.sync(rows);
         let mut gpu = Gpu::default();
         let first = gpu.read(ALL, rows, &handles);
-        let adapters = first.adapters.as_deref().unwrap_or_default();
+        if gpu.adapters.is_empty() {
+            return;
+        }
         let dwm = rows
             .iter()
             .position(|row| processes.image_name(row).eq_ignore_ascii_case("dwm.exe"))
             .expect("dwm");
         let engines = first.engines.as_ref().expect("asked for");
-        let has_memory = adapters.iter().any(|a| a.dedicated_limit > 0);
-        if !has_memory && !engines.iter().any(|e| e.row as usize == dwm) {
-            return;
-        }
-        let seen: Vec<_> = adapters
+        let seen: Vec<_> = gpu
+            .adapters
             .iter()
-            .map(|a| (a.name.as_str(), a.dedicated_limit, a.shared_limit, a.engines.len()))
+            .map(|a| (a.name.as_str(), a.segments.len(), a.nodes.len()))
             .collect();
-        let held = gpu.dedicated(&rows[dwm]).saturating_add(gpu.shared(&rows[dwm]));
-        assert!(held > 0, "dwm holds memory on one of {seen:?}");
+        if gpu.adapters.iter().any(|a| !a.segments.is_empty()) {
+            let held = gpu.dedicated(&rows[dwm]).saturating_add(gpu.shared(&rows[dwm]));
+            assert!(held > 0, "dwm holds memory on one of {seen:?}");
+        }
         assert!(
             engines.iter().any(|e| e.row as usize == dwm && e.running_time != 0),
             "dwm ran on one of {seen:?}"
