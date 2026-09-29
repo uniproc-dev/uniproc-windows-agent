@@ -195,6 +195,7 @@ fn machine_metric(m: MachineMetric) -> WireMachineMetric {
         MachineMetric::Network => WireMachineMetric::Network,
         MachineMetric::Processors => WireMachineMetric::Processors,
         MachineMetric::Gpu => WireMachineMetric::Gpu,
+        MachineMetric::NetworkAdapters => WireMachineMetric::NetworkAdapters,
     }
 }
 
@@ -469,7 +470,23 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         network,
         processors,
         gpus,
+        network_adapters,
     } = &sample.machine;
+    if let Some(adapters) = network_adapters {
+        let mut list = out.reborrow().init_network_adapters(adapters.len() as u32);
+        for (i, a) in adapters.iter().enumerate() {
+            let mut w = list.reborrow().get(i as u32);
+            w.set_luid(a.luid);
+            w.set_name(a.name.as_str());
+            w.set_description(a.description.as_str());
+            w.set_if_type(a.if_type);
+            w.set_hardware(a.hardware);
+            w.set_receive_link_speed(a.receive_link_speed);
+            w.set_transmit_link_speed(a.transmit_link_speed);
+            w.set_rx_bytes(a.rx_bytes);
+            w.set_tx_bytes(a.tx_bytes);
+        }
+    }
     if let Some(cpu) = cpu {
         let mut c = out.reborrow().init_cpu();
         c.set_idle_time(cpu.idle_time);

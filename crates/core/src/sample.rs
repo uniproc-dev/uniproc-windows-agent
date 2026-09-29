@@ -72,6 +72,7 @@ pub enum MachineMetric {
     Network,
     Processors,
     Gpu,
+    NetworkAdapters,
 }
 
 /// A set of process counters, iterated in declaration order.
@@ -298,6 +299,27 @@ pub struct MachineNetwork {
     pub tx_bytes: u64,
 }
 
+/// One network adapter that is up.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct NetworkAdapter {
+    /// `NET_LUID`.
+    pub luid: u64,
+    /// The connection's name ("Ethernet", "Wi-Fi").
+    pub name: SmolStr,
+    /// The driver's name for the device.
+    pub description: SmolStr,
+    /// IANA ifType: 6 Ethernet, 71 Wi-Fi, 53 a vendor's virtual one.
+    pub if_type: u32,
+    /// A physical adapter, not a virtual switch, host-only adapter or VPN.
+    pub hardware: bool,
+    /// Bits per second.
+    pub receive_link_speed: u64,
+    pub transmit_link_speed: u64,
+    /// Bytes, cumulative, every protocol and header included.
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
 /// What a GPU engine does, as the driver declares it (`DXGK_ENGINE_TYPE`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum GpuEngineKind {
@@ -373,6 +395,7 @@ pub struct MachineSample {
     pub processors: Option<Arc<[MachineProcessor]>>,
     /// Hardware adapters only.
     pub gpus: Option<Arc<[GpuAdapter]>>,
+    pub network_adapters: Option<Arc<[NetworkAdapter]>>,
 }
 
 impl MachineSample {
@@ -384,6 +407,10 @@ impl MachineSample {
             network: self.network.filter(|_| wanted.contains(MachineMetric::Network)),
             processors: self.processors.clone().filter(|_| wanted.contains(MachineMetric::Processors)),
             gpus: self.gpus.clone().filter(|_| wanted.contains(MachineMetric::Gpu)),
+            network_adapters: self
+                .network_adapters
+                .clone()
+                .filter(|_| wanted.contains(MachineMetric::NetworkAdapters)),
         }
     }
 }

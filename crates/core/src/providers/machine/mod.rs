@@ -1,9 +1,11 @@
+mod adapters;
 mod processor_times;
 mod sample;
 mod vars;
 
 use ntapi::ntpoapi::PROCESSOR_POWER_INFORMATION;
 
+use crate::providers::machine::adapters::NetworkAdapters;
 use crate::providers::machine::processor_times::{ProcessorTimes, total};
 use crate::providers::machine::sample::{PdhProcessorPerformance, cpu_frequency_mhz, physical_memory};
 use crate::sample::{
@@ -16,6 +18,7 @@ pub struct MachineProbe {
     pdh: Option<PdhProcessorPerformance>,
     power: Vec<PROCESSOR_POWER_INFORMATION>,
     times: ProcessorTimes,
+    adapters: NetworkAdapters,
 }
 
 impl Default for MachineProbe {
@@ -30,6 +33,7 @@ impl MachineProbe {
             pdh: None,
             power: Vec::new(),
             times: ProcessorTimes::new(),
+            adapters: NetworkAdapters::default(),
         }
     }
 
@@ -61,6 +65,9 @@ impl MachineProbe {
                 read_bytes: totals.disk_read_bytes,
                 write_bytes: totals.disk_write_bytes,
             });
+        }
+        if wanted.contains(MachineMetric::NetworkAdapters) {
+            sample.network_adapters = Some(self.adapters.read());
         }
         if wanted.contains(MachineMetric::Network) {
             sample.network = Some(MachineNetwork {

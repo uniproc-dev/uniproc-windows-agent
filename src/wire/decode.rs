@@ -15,7 +15,7 @@ use uniproc_protocol::windows_capnp::{
 use crate::api::{
     Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, GpuAdapter, GpuEngine, GpuEngineKind, IoPriority,
     Isolation, MachineCpu, MachineDisk, MachineMemory, MachineMetric, MachineNetwork, MachineProcessor,
-    MachineSample, MetricSpec, Mitigations, ProcessGpuEngine, ProcessInfo, ProcessMetric, ProcessPriority,
+    MachineSample, MetricSpec, Mitigations, NetworkAdapter, ProcessGpuEngine, ProcessInfo, ProcessMetric, ProcessPriority,
     ProcessState, ProcessStates, Sample,
     ServiceState, ServiceStats, ServiceStatus, SignatureStatus, Snapshot, StackProtection, Tagged,
     UacVirtualization,
@@ -194,6 +194,7 @@ fn machine_metric(m: WireMachineMetric) -> MachineMetric {
         WireMachineMetric::Network => MachineMetric::Network,
         WireMachineMetric::Processors => MachineMetric::Processors,
         WireMachineMetric::Gpu => MachineMetric::Gpu,
+        WireMachineMetric::NetworkAdapters => MachineMetric::NetworkAdapters,
     }
 }
 
@@ -606,5 +607,27 @@ fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample>
             None
         },
         gpus: if m.has_gpus() { Some(gpus(m.get_gpus()?)?) } else { None },
+        network_adapters: if m.has_network_adapters() {
+            Some(
+                m.get_network_adapters()?
+                    .iter()
+                    .map(|a| {
+                        Ok(NetworkAdapter {
+                            luid: a.get_luid(),
+                            name: text(a.get_name())?,
+                            description: text(a.get_description())?,
+                            if_type: a.get_if_type(),
+                            hardware: a.get_hardware(),
+                            receive_link_speed: a.get_receive_link_speed(),
+                            transmit_link_speed: a.get_transmit_link_speed(),
+                            rx_bytes: a.get_rx_bytes(),
+                            tx_bytes: a.get_tx_bytes(),
+                        })
+                    })
+                    .collect::<capnp::Result<_>>()?,
+            )
+        } else {
+            None
+        },
     })
 }

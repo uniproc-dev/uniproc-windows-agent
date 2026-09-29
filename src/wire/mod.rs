@@ -35,7 +35,7 @@ mod tests {
     use crate::api::{
         Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
         GpuAdapter, GpuEngine, GpuEngineKind, MachineDisk, MachineMemory, MachineMetric, MachineMetrics,
-        MachineNetwork, MachineProcessor, MachineSample, ProcessGpuEngine,
+        MachineNetwork, MachineProcessor, MachineSample, NetworkAdapter, ProcessGpuEngine,
         MetricSpec, Mitigations, ProcessInfo, ProcessMetric, ProcessMetrics, ProcessPriority,
         ProcessState, ProcessStates, Sample, ServiceState, ServiceStats, ServiceStatus,
         SignatureStatus, Snapshot, StackProtection, Tagged, UacVirtualization, Update,
@@ -393,6 +393,17 @@ mod tests {
                         },
                     ]),
                 }])),
+                network_adapters: Some(Arc::from([NetworkAdapter {
+                    luid: 0x6008_0000_0000_0000,
+                    name: "Ethernet".into(),
+                    description: "Realtek Gaming GbE Family Controller".into(),
+                    if_type: 6,
+                    hardware: true,
+                    receive_link_speed: 1_000_000_000,
+                    transmit_link_speed: 100_000_000,
+                    rx_bytes: 38,
+                    tx_bytes: 39,
+                }])),
             },
         }
     }
@@ -420,6 +431,7 @@ mod tests {
             spec(ProcessMetric::HardFaults | ProcessMetric::ContextSwitches, MachineMetric::Processors),
             spec(ProcessMetrics::only(ProcessMetric::GpuEngines), MachineMetric::Gpu),
             spec(ProcessMetric::GpuDedicated | ProcessMetric::GpuShared, MachineMetrics::empty()),
+            spec(ProcessMetrics::empty(), MachineMetric::NetworkAdapters | MachineMetric::Network),
             spec(ProcessMetrics::empty(), MachineMetrics::empty()),
         ] {
             let sent = full.project(&wanted);
