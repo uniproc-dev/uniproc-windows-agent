@@ -21,7 +21,7 @@ use windows::Win32::{
     KMTQAITYPE_GETSEGMENTSIZE, KMTQAITYPE_NODEMETADATA, KMTQAITYPE_NODEPERFDATA, KMTQUERYADAPTERINFOTYPE, LUID,
 };
 
-use crate::probes::{Handles, turn};
+use crate::probes::{Handles, PROBE_ROUND, turn};
 use crate::sample::{GpuAdapter, GpuEngine, GpuEngineKind, NO_DATA_U64, ProcessGpuEngine};
 use crate::snapshot::Row;
 
@@ -96,9 +96,10 @@ struct Used {
 }
 
 /// The hardware adapters, and what each process was last seen using. A
-/// process is read every tick while it has a context on an adapter; one
-/// that had none when last read is read again in its turn, each within
-/// [`crate::probes::PROBE_ROUND`], and holds nothing until then.
+/// process is read every tick while it has a context on an adapter or is
+/// younger than [`PROBE_ROUND`], when most create one; an older one that
+/// had none when last read is read again in its turn, each within
+/// [`PROBE_ROUND`], and holds nothing until then.
 #[derive(Default)]
 pub struct Gpu {
     adapters: Vec<Adapter>,
@@ -184,6 +185,8 @@ impl Gpu {
         self.last = Some(at);
         let (start, share, next) = turn(rows, self.cursor, since);
         self.cursor = next;
+        let now = filetime_now();
+        let young_for = (PROBE_ROUND.as_nanos() / 100) as u64;
         let Self {
             adapters,
             processes,
@@ -214,7 +217,8 @@ impl Gpu {
             };
             used.dedicated = 0;
             used.shared = 0;
-            if used.checked && used.on.is_empty() && !in_turn(index, rows.len(), start, share) {
+            let young = now.saturating_sub(row.create_time) < young_for;
+            if !due(used, young, in_turn(index, rows.len(), start, share)) {
                 continue;
             }
             used.checked = true;
@@ -268,6 +272,21 @@ impl Gpu {
         processes.retain(|_, used| used.listed == tick);
         engines
     }
+}
+
+/// Whether a process is read this tick: never read yet, with a context on
+/// an adapter, young, or in its turn.
+fn due(used: &Used, young: bool, in_turn: bool) -> bool {
+    !used.checked || !used.on.is_empty() || young || in_turn
+}
+
+/// Now as a FILETIME, the clock `Row::create_time` is on.
+fn filetime_now() -> u64 {
+    const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    UNIX_EPOCH_AS_FILETIME + (since_epoch.as_nanos() / 100) as u64
 }
 
 /// Whether row `index` of `len` is among the `share` rows from `start`,
@@ -543,6 +562,34 @@ mod tests {
         assert_eq!(turn, [0, 3, 4]);
         assert!((0..5).all(|i| !in_turn(i, 5, 2, 0)), "no time, no turn");
         assert!((0..5).all(|i| in_turn(i, 5, 2, 5)));
+    }
+
+    #[test]
+    fn an_idle_process_is_read_every_tick_while_young_then_in_its_turn() {
+        let mut used = Used {
+            sequence_number: 1,
+            listed: 1,
+            dedicated: 0,
+            shared: 0,
+            on: Vec::new(),
+            checked: false,
+        };
+        assert!(due(&used, false, false), "never read");
+        used.checked = true;
+        assert!(due(&used, true, false), "young: most create their context now");
+        assert!(!due(&used, false, false), "old and idle waits");
+        assert!(due(&used, false, true), "until its turn");
+        used.on.push(On { key: 1, nodes: Vec::new() });
+        assert!(due(&used, false, false), "one with a context is read every tick");
+    }
+
+    #[test]
+    fn a_process_is_young_by_its_creation_time() {
+        let now = filetime_now();
+        let ten_seconds = (PROBE_ROUND.as_nanos() / 100) as u64;
+        assert!(now > 133_000_000_000_000_000, "after 2022 as a FILETIME");
+        assert!(now.saturating_sub(now - ten_seconds / 2) < ten_seconds);
+        assert!(now.saturating_sub(now - ten_seconds * 2) >= ten_seconds);
     }
 
     #[test]
