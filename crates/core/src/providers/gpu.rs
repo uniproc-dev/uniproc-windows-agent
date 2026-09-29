@@ -684,14 +684,17 @@ mod tests {
         handles.sync(rows);
         let mut gpu = Gpu::default();
         let first = gpu.read(ALL, rows, &handles);
-        if first.adapters.as_ref().is_none_or(|a| a.is_empty()) {
+        let adapters = first.adapters.as_deref().unwrap_or_default();
+        let renders = |a: &GpuAdapter| a.engines.iter().any(|e| e.kind == GpuEngineKind::ThreeD);
+        if !adapters.iter().any(renders) {
             return;
         }
         let dwm = rows
             .iter()
             .position(|row| processes.image_name(row).eq_ignore_ascii_case("dwm.exe"))
             .expect("dwm");
-        assert!(gpu.dedicated(&rows[dwm]) > 0, "dwm holds video memory");
+        let names: Vec<&str> = adapters.iter().map(|a| a.name.as_str()).collect();
+        assert!(gpu.dedicated(&rows[dwm]) > 0, "dwm holds video memory on one of {names:?}");
         let engines = first.engines.as_ref().expect("asked for");
         assert!(engines.iter().any(|e| e.row as usize == dwm && e.running_time != 0));
 
