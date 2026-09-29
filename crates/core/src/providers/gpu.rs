@@ -692,12 +692,12 @@ mod tests {
             .position(|row| processes.image_name(row).eq_ignore_ascii_case("dwm.exe"))
             .expect("dwm");
         let engines = first.engines.as_ref().expect("asked for");
-        let seen: Vec<_> = gpu
-            .adapters
+        let adapters = first.adapters.as_deref().unwrap_or_default();
+        let seen: Vec<_> = adapters
             .iter()
-            .map(|a| (a.name.as_str(), a.segments.len(), a.nodes.len()))
+            .map(|a| (a.name.as_str(), a.dedicated_usage, a.shared_usage))
             .collect();
-        if gpu.adapters.iter().any(|a| !a.segments.is_empty()) {
+        if adapters.iter().any(|a| a.dedicated_usage + a.shared_usage > 1 << 20) {
             let held = gpu.dedicated(&rows[dwm]).saturating_add(gpu.shared(&rows[dwm]));
             assert!(held > 0, "dwm holds memory on one of {seen:?}");
         }

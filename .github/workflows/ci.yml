@@ -55,20 +55,6 @@ jobs:
           Start-Service -Name Spooler
           Get-Service -Name Spooler
 
-      - name: What PDH shows for dwm on the GPU
-        shell: pwsh
-        run: |
-          $dwm = "^pid_($(((Get-Process dwm).Id) -join '|'))_"
-          "dwm: $dwm"
-          $sets = '\GPU Process Memory(*)\Shared Usage', '\GPU Process Memory(*)\Dedicated Usage', '\GPU Process Memory(*)\Total Committed', '\GPU Adapter Memory(*)\Shared Usage', '\GPU Adapter Memory(*)\Dedicated Usage', '\GPU Engine(*)\Running Time'
-          foreach ($set in $sets) {
-            try {
-              (Get-Counter $set -ErrorAction Stop).CounterSamples |
-                Where-Object { $_.InstanceName -notmatch '^pid_' -or $_.InstanceName -match $dwm -or $_.CookedValue -gt 0 } |
-                Select-Object -First 40 | ForEach-Object { "{0} = {1}" -f $_.Path, $_.CookedValue }
-            } catch { "$set failed: $_" }
-          }
-
       - name: Test against live ETW
         env:
           UNIPROC_TEST_SERVICE: Spooler
