@@ -1,4 +1,4 @@
-use windows::Win32::{HANDLE, OpenProcess};
+use windows::Win32::{CloseHandle, HANDLE, OpenProcess};
 use windows::core::{Error, GUID, Result};
 
 pub const PROCESS_NAME_WIN32: u32 = 0;
@@ -12,5 +12,20 @@ pub fn open_process(access: i32, pid: u32) -> Result<HANDLE> {
         Err(Error::from_thread())
     } else {
         Ok(handle)
+    }
+}
+
+/// A process handle, closed when dropped.
+pub struct OwnedProcess(pub HANDLE);
+
+impl OwnedProcess {
+    pub fn open(access: i32, pid: u32) -> Result<Self> {
+        open_process(access, pid).map(Self)
+    }
+}
+
+impl Drop for OwnedProcess {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
     }
 }

@@ -231,6 +231,7 @@ impl Reader {
                         image_name: image_name.into(),
                         read: process::read(
                             row.pid,
+                            row.sequence_number,
                             snapshot.user_sid(row).as_deref(),
                             (snapshot.package_full_name(row), snapshot.app_id(row)),
                             names,

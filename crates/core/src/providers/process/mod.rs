@@ -12,9 +12,11 @@ use crate::providers::display_name;
 use crate::providers::process::passport::{Passport, SidNames};
 use crate::providers::utils::{
     check_signer, get_process_package_info, is_windows_process, parse_cmd_line,
-    query_command_line, query_console_host_pid, query_image_path,
+    query_command_line, query_console_host_pid, query_image_path, query_sequence_number,
 };
 use crate::state::events::{Image, ImageVerdict, ProcessSignature};
+use crate::win::OwnedProcess;
+use windows::Win32::PROCESS_QUERY_LIMITED_INFORMATION;
 
 /// What one process's handle, memory and token tell, read the moment a
 /// snapshot first lists it.
@@ -29,21 +31,35 @@ pub struct ProcessRead {
     pub passport: Passport,
 }
 
-/// Reads `pid`. `user_sid` and `package` are what the snapshot recorded;
-/// the process's own answer about its package wins.
-pub fn read(pid: u32, user_sid: Option<&[u8]>, package: (String, String), names: &mut SidNames) -> ProcessRead {
-    let command_line = unsafe { query_command_line(pid) }
+/// Reads `pid` through one limited-query handle, and nothing when the
+/// handle belongs to another process than the snapshot's `sequence_number`.
+/// `user_sid` and `package` are what the snapshot recorded; the process's
+/// own answer about its package wins.
+pub fn read(
+    pid: u32,
+    sequence_number: u64,
+    user_sid: Option<&[u8]>,
+    package: (String, String),
+    names: &mut SidNames,
+) -> ProcessRead {
+    let process = OwnedProcess::open(PROCESS_QUERY_LIMITED_INFORMATION, pid)
+        .ok()
+        .filter(|p| unsafe { query_sequence_number(p.0) }.is_none_or(|n| n == sequence_number));
+    let handle = process.as_ref().map(|p| p.0);
+    let command_line = handle
+        .and_then(|h| unsafe { query_command_line(h) })
         .map(|s| unsafe { parse_cmd_line(&s) })
         .unwrap_or_default();
-    let image_path = unsafe { query_image_path(pid) }.unwrap_or_default();
-    let (package_full_name, package_relative_app_id) = unsafe { get_process_package_info(pid) }.unwrap_or(package);
-    let passport = passport::probe(pid, user_sid, !package_full_name.is_empty(), names);
+    let image_path = handle.and_then(|h| unsafe { query_image_path(h) }).unwrap_or_default();
+    let (package_full_name, package_relative_app_id) =
+        handle.and_then(|h| unsafe { get_process_package_info(h) }).unwrap_or(package);
+    let passport = passport::probe(handle, user_sid, !package_full_name.is_empty(), names);
     ProcessRead {
         command_line,
         image_path: image_path.into(),
         package_full_name: package_full_name.into(),
         package_relative_app_id: package_relative_app_id.into(),
-        console_host_pid: unsafe { query_console_host_pid(pid) },
+        console_host_pid: handle.map_or(0, |h| unsafe { query_console_host_pid(h) }),
         passport,
     }
 }
@@ -195,11 +211,40 @@ mod tests {
 
     #[test]
     fn this_process_reads_its_own_passport() {
-        let read = read(std::process::id(), None, Default::default(), &mut SidNames::default());
+        let me = unsafe { query_sequence_number(windows::Win32::GetCurrentProcess()) }.expect("sequence number");
+        let read = read(std::process::id(), me, None, Default::default(), &mut SidNames::default());
         assert!(read.image_path.ends_with(".exe"), "{}", read.image_path);
-        assert!(!read.command_line.is_empty());
+        assert_eq!(read.command_line, std::env::args().collect::<Vec<_>>());
         assert!(read.passport.user.contains('\\'));
         assert_ne!(read.passport.architecture, crate::model::Architecture::Unknown);
+    }
+
+    #[test]
+    #[ignore = "requires admin"]
+    fn the_services_of_system_read_with_a_limited_handle() {
+        crate::privileges::enable(windows::core::w!("SeDebugPrivilege")).unwrap();
+        let mut processes = crate::snapshot::Processes::new();
+        processes.read().expect("elevated");
+        let mut names = SidNames::default();
+        let lines: Vec<Vec<String>> = processes
+            .rows()
+            .iter()
+            .filter(|row| processes.image_name(row).eq_ignore_ascii_case("svchost.exe"))
+            .map(|row| read(row.pid, row.sequence_number, None, Default::default(), &mut names).command_line)
+            .collect();
+        assert!(lines.len() > 5, "{} svchosts", lines.len());
+        let read = lines.iter().filter(|line| line.iter().any(|arg| arg == "-k")).count();
+        assert!(read * 2 > lines.len(), "{read} of {} svchost command lines read", lines.len());
+    }
+
+    #[test]
+    fn a_handle_to_another_process_than_the_listed_one_reads_nothing() {
+        let me = unsafe { query_sequence_number(windows::Win32::GetCurrentProcess()) }.expect("sequence number");
+        let package = ("listed".to_string(), "app".to_string());
+        let read = read(std::process::id(), me + 1, None, package, &mut SidNames::default());
+        assert!(read.image_path.is_empty() && read.command_line.is_empty());
+        assert_eq!(read.package_full_name, "listed");
+        assert_eq!(read.passport.architecture, crate::model::Architecture::Unknown);
     }
 
     #[test]

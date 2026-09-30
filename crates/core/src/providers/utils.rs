@@ -1,14 +1,15 @@
-use ntapi::ntrtl::RTL_USER_PROCESS_PARAMETERS;
+use std::mem::size_of;
+
+use ntapi::winapi::shared::ntdef::UNICODE_STRING;
 use windows::Win32::{
     CATALOG_INFO, LocalFree, CERT_NAME_SIMPLE_DISPLAY_TYPE, CloseHandle, CommandLineToArgvW, CreateFileW,
     CertGetNameStringW, CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
     CryptCATAdminEnumCatalogFromHash, CryptCATAdminReleaseCatalogContext,
-    CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, GENERIC_READ, GetApplicationUserModelId, GetPackageFullName, HANDLE,
-    HCATADMIN, HCATINFO, HWND, NtQueryInformationProcess, OPEN_EXISTING, PEB,
-    PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_VM_READ, PROCESSINFOCLASS, ProcessBasicInformation, QueryFullProcessImageNameW,
-    ReadProcessMemory, TRUST_E_NOSIGNATURE, TRUST_E_SUBJECT_FORM_UNKNOWN, WINTRUST_CATALOG_INFO,
+    CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext, ERROR_INSUFFICIENT_BUFFER, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, GENERIC_READ, GetApplicationUserModelId, GetLastError, GetPackageFullName, HANDLE,
+    HCATADMIN, HCATINFO, HWND, NtQueryInformationProcess, OPEN_EXISTING,
+    PROCESSINFOCLASS, QueryFullProcessImageNameW,
+    TRUST_E_NOSIGNATURE, TRUST_E_SUBJECT_FORM_UNKNOWN, WINTRUST_CATALOG_INFO,
     WINTRUST_DATA, WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_CATALOG,
     WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_SAFER_FLAG, WTD_STATEACTION_CLOSE,
     WTD_STATEACTION_VERIFY, WTD_UI_NONE, WTHelperGetProvSignerFromChain,
@@ -17,75 +18,96 @@ use windows::Win32::{
 use windows::core::{PCWSTR, PWSTR};
 
 use crate::state::events::ProcessSignature;
-use crate::win::{PROCESS_NAME_WIN32, WINTRUST_ACTION_GENERIC_VERIFY_V2, open_process};
+use crate::win::{PROCESS_NAME_WIN32, WINTRUST_ACTION_GENERIC_VERIFY_V2};
 
-pub unsafe fn query_command_line(pid: u32) -> Option<String> {
-    let handle = open_process(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, pid).ok()?;
+const PROCESS_COMMAND_LINE_INFORMATION: PROCESSINFOCLASS = 60;
+const PROCESS_SEQUENCE_NUMBER: PROCESSINFOCLASS = 92;
+const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
+const STATUS_BUFFER_TOO_SMALL: i32 = 0xC000_0023_u32 as i32;
+const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005_u32 as i32;
 
-    let mut pbi = PROCESS_BASIC_INFORMATION::default();
-
-    let status = NtQueryInformationProcess(
-        handle,
-        ProcessBasicInformation,
-        &mut pbi as *mut _ as *mut _,
-        std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
-        None,
-    );
-
-    if status.is_err() {
-        let _ = CloseHandle(handle);
-        return None;
-    }
-
-    let mut peb = std::mem::zeroed::<PEB>();
-    let ok = ReadProcessMemory(
-        handle,
-        pbi.PebBaseAddress as *const _,
-        &mut peb as *mut _ as *mut _,
-        std::mem::size_of::<PEB>(),
-        None,
-    );
-    if !ok.as_bool() {
-        let _ = CloseHandle(handle);
-        return None;
-    }
-
-    let mut params = std::mem::zeroed::<RTL_USER_PROCESS_PARAMETERS>();
-    let ok = ReadProcessMemory(
-        handle,
-        peb.ProcessParameters as *const _,
-        &mut params as *mut _ as *mut _,
-        std::mem::size_of::<RTL_USER_PROCESS_PARAMETERS>(),
-        None,
-    );
-    if !ok.as_bool() {
-        let _ = CloseHandle(handle);
-        return None;
-    }
-
-    let len = params.CommandLine.Length as usize / 2;
-    let result = WIDE_SCRATCH.with(|cell| {
+/// The command line as the kernel keeps it; a limited-query handle is
+/// enough and nothing is read from the process's own memory.
+pub unsafe fn query_command_line(process: HANDLE) -> Option<String> {
+    COMMAND_LINE_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
-        scratch.clear();
-        scratch.resize(len, 0);
-        let ok = ReadProcessMemory(
-            handle,
-            params.CommandLine.Buffer as *const _,
-            scratch.as_mut_ptr() as *mut _,
-            params.CommandLine.Length as usize,
-            None,
+        if scratch.is_empty() {
+            scratch.resize(512, 0);
+        }
+        let mut needed = 0u32;
+        let mut status = NtQueryInformationProcess(
+            process,
+            PROCESS_COMMAND_LINE_INFORMATION,
+            scratch.as_mut_ptr().cast(),
+            (scratch.len() * 8) as u32,
+            Some(&mut needed),
         );
-        if !ok.as_bool() {
+        if matches!(status.0, STATUS_INFO_LENGTH_MISMATCH | STATUS_BUFFER_TOO_SMALL | STATUS_BUFFER_OVERFLOW)
+            && needed as usize > scratch.len() * 8
+        {
+            scratch.resize((needed as usize).div_ceil(8), 0);
+            status = NtQueryInformationProcess(
+                process,
+                PROCESS_COMMAND_LINE_INFORMATION,
+                scratch.as_mut_ptr().cast(),
+                (scratch.len() * 8) as u32,
+                Some(&mut needed),
+            );
+        }
+        if status.is_err() {
             return None;
         }
-        Some(String::from_utf16_lossy(&scratch))
-    });
+        unicode_string_in(bytes_of(&scratch)).map(|units| String::from_utf16_lossy(&units))
+    })
+}
 
-    let _ = CloseHandle(handle);
-    result
+fn bytes_of(words: &[u64]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), words.len() * 8) }
+}
+
+/// The characters of the UNICODE_STRING at the start of `buffer`, whose
+/// text must lie inside `buffer` too.
+fn unicode_string_in(buffer: &[u8]) -> Option<Vec<u16>> {
+    let header = size_of::<UNICODE_STRING>();
+    if buffer.len() < header {
+        return None;
+    }
+    let string = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<UNICODE_STRING>()) };
+    let length = string.Length as usize & !1;
+    if length == 0 {
+        return Some(Vec::new());
+    }
+    let start = (string.Buffer as usize).checked_sub(buffer.as_ptr() as usize)?;
+    if start < header || start.checked_add(length)? > buffer.len() {
+        return None;
+    }
+    Some(
+        buffer[start..start + length]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect(),
+    )
+}
+
+/// The process's sequence number, which no other process on this boot
+/// shares; None where Windows does not tell it.
+pub unsafe fn query_sequence_number(process: HANDLE) -> Option<u64> {
+    let mut value = 0u64;
+    NtQueryInformationProcess(
+        process,
+        PROCESS_SEQUENCE_NUMBER,
+        (&mut value as *mut u64).cast(),
+        size_of::<u64>() as u32,
+        None,
+    )
+    .is_ok()
+    .then_some(value)
 }
 
 pub unsafe fn parse_cmd_line(cmd_line: &str) -> Vec<String> {
+    if cmd_line.trim().is_empty() {
+        return Vec::new();
+    }
     with_wide(cmd_line, |cmd_w| {
         let mut argc = 0i32;
         let argv_ptr = CommandLineToArgvW(cmd_w, &mut argc);
@@ -108,12 +130,7 @@ pub unsafe fn parse_cmd_line(cmd_line: &str) -> Vec<String> {
 }
 
 
-pub unsafe fn get_process_package_info(pid: u32) -> Option<(String, String)> {
-
-    let Ok(handle) = open_process(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, pid) else {
-        return None;
-    };
-
+pub unsafe fn get_process_package_info(handle: HANDLE) -> Option<(String, String)> {
     let mut len = 0u32;
     let mut package_full_name = None;
     let mut package_relative_app_id = None;
@@ -138,7 +155,6 @@ pub unsafe fn get_process_package_info(pid: u32) -> Option<(String, String)> {
             }
         }
     }
-    let _ = CloseHandle(handle);
 
     if let Some(package_relative_app_id) = package_relative_app_id && let Some(package_full_name) = package_full_name {
         Some((package_full_name, package_relative_app_id))
@@ -147,33 +163,36 @@ pub unsafe fn get_process_package_info(pid: u32) -> Option<(String, String)> {
         None
     }
 }
-pub unsafe fn query_image_path(pid: u32) -> Option<String> {
-    let handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, pid).ok()?;
-    let result = WIDE_SCRATCH.with(|cell| {
+/// The Win32 path of the image; a path longer than the first buffer is
+/// asked for again with room for the longest one Windows allows.
+pub unsafe fn query_image_path(handle: HANDLE) -> Option<String> {
+    WIDE_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
-        scratch.clear();
-        scratch.resize(1024, 0);
-        let mut len = scratch.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_WIN32,
-            PWSTR(scratch.as_mut_ptr()),
-            &mut len,
-        );
-        ok.ok().ok()?;
-        Some(String::from_utf16_lossy(&scratch[..len as usize]))
-    });
-    let _ = CloseHandle(handle);
-    result
+        for room in [1024, 32 * 1024] {
+            scratch.clear();
+            scratch.resize(room, 0);
+            let mut len = scratch.len() as u32;
+            let ok = QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(scratch.as_mut_ptr()),
+                &mut len,
+            );
+            if ok.as_bool() {
+                return Some(String::from_utf16_lossy(&scratch[..len as usize]));
+            }
+            if GetLastError() != ERROR_INSUFFICIENT_BUFFER as u32 {
+                return None;
+            }
+        }
+        None
+    })
 }
 
 const PROCESS_CONSOLE_HOST_PROCESS: PROCESSINFOCLASS = 49;
 
-/// Pid of the conhost serving `pid`'s console, or 0 when it has none.
-pub unsafe fn query_console_host_pid(pid: u32) -> u32 {
-    let Ok(handle) = open_process(PROCESS_QUERY_LIMITED_INFORMATION, pid) else {
-        return 0;
-    };
+/// Pid of the conhost serving the process's console, or 0 when it has none.
+pub unsafe fn query_console_host_pid(handle: HANDLE) -> u32 {
     let mut value = 0usize;
     let status = NtQueryInformationProcess(
         handle,
@@ -182,7 +201,6 @@ pub unsafe fn query_console_host_pid(pid: u32) -> u32 {
         std::mem::size_of::<usize>() as u32,
         None,
     );
-    let _ = CloseHandle(handle);
     if status.is_err() {
         return 0;
     }
@@ -199,6 +217,8 @@ fn console_host_from(value: usize) -> u32 {
 
 thread_local! {
     static WIDE_SCRATCH: std::cell::RefCell<Vec<u16>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static COMMAND_LINE_SCRATCH: std::cell::RefCell<Vec<u64>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -533,9 +553,122 @@ mod console_host_tests {
 
     #[test]
     fn a_test_run_from_a_console_sees_its_host() {
-        let host = unsafe { query_console_host_pid(std::process::id()) };
+        let host = unsafe { query_console_host_pid(windows::Win32::GetCurrentProcess()) };
         if host != 0 {
             assert_ne!(host, std::process::id());
         }
+    }
+}
+
+#[cfg(test)]
+mod command_line_tests {
+    use std::mem::size_of;
+
+    use ntapi::winapi::shared::ntdef::UNICODE_STRING;
+    use windows::Win32::{GetCurrentProcess, HANDLE};
+
+    use super::{bytes_of, parse_cmd_line, query_command_line, query_sequence_number, unicode_string_in};
+
+    fn buffer(length: u16, text_at: Option<usize>, words: usize) -> Vec<u64> {
+        let mut buffer = vec![0u64; words];
+        let base = buffer.as_mut_ptr() as usize;
+        let text = size_of::<UNICODE_STRING>();
+        for (i, unit) in "abcdefgh".encode_utf16().enumerate() {
+            let at = text + i * 2;
+            if at + 2 <= words * 8 {
+                unsafe { std::ptr::write_unaligned((base + at) as *mut u16, unit) };
+            }
+        }
+        let string = UNICODE_STRING {
+            Length: length,
+            MaximumLength: length,
+            Buffer: text_at.map_or(text, |at| at).wrapping_add(base) as *mut u16,
+        };
+        unsafe { std::ptr::write_unaligned(base as *mut UNICODE_STRING, string) };
+        buffer
+    }
+
+    #[test]
+    fn an_odd_length_drops_the_half_character() {
+        let buffer = buffer(7, None, 8);
+        assert_eq!(unicode_string_in(bytes_of(&buffer)), Some("abc".encode_utf16().collect()));
+    }
+
+    #[test]
+    fn text_outside_the_buffer_is_refused() {
+        let past_the_end = buffer(16, None, 3);
+        assert_eq!(unicode_string_in(bytes_of(&past_the_end)), None);
+        let before_the_text = buffer(4, Some(0), 8);
+        assert_eq!(unicode_string_in(bytes_of(&before_the_text)), None);
+        let elsewhere = buffer(4, Some(usize::MAX / 2), 8);
+        assert_eq!(unicode_string_in(bytes_of(&elsewhere)), None);
+    }
+
+    #[test]
+    fn this_process_reads_its_own_arguments() {
+        let line = unsafe { query_command_line(GetCurrentProcess()) }.expect("command line");
+        let args = unsafe { parse_cmd_line(&line) };
+        assert_eq!(args, std::env::args().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn an_empty_command_line_has_no_arguments() {
+        assert!(unsafe { parse_cmd_line("") }.is_empty());
+        assert!(unsafe { parse_cmd_line("  ") }.is_empty());
+    }
+
+    #[test]
+    fn a_child_that_writes_an_odd_length_into_its_peb_reads_safely() {
+        use std::os::windows::io::AsRawHandle;
+
+        use ntapi::ntpebteb::PEB;
+        use ntapi::ntpsapi::{NtQueryInformationProcess, PROCESS_BASIC_INFORMATION, ProcessBasicInformation};
+        use ntapi::ntrtl::RTL_USER_PROCESS_PARAMETERS;
+        use windows::Win32::{ReadProcessMemory, WriteProcessMemory};
+
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "ping", "-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("child");
+        let process = HANDLE(child.as_raw_handle());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let before = unsafe { query_command_line(process) }.expect("command line");
+        assert!(before.to_ascii_lowercase().contains("ping"), "{before:?}");
+        unsafe {
+            let mut basic = std::mem::zeroed::<PROCESS_BASIC_INFORMATION>();
+            let status = NtQueryInformationProcess(
+                process.0.cast(),
+                ProcessBasicInformation,
+                (&mut basic as *mut PROCESS_BASIC_INFORMATION).cast(),
+                size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(status, 0);
+            let mut peb = std::mem::zeroed::<PEB>();
+            let read = |from: usize, to: *mut u8, len: usize| {
+                ReadProcessMemory(process, from as _, to.cast(), len, None).as_bool()
+            };
+            assert!(read(basic.PebBaseAddress as usize, (&mut peb as *mut PEB).cast(), size_of::<PEB>()));
+            let mut params = std::mem::zeroed::<RTL_USER_PROCESS_PARAMETERS>();
+            let at = peb.ProcessParameters as usize;
+            assert!(read(at, (&mut params as *mut RTL_USER_PROCESS_PARAMETERS).cast(), size_of::<RTL_USER_PROCESS_PARAMETERS>()));
+            let odd: u16 = (params.CommandLine.Length | 1).min(params.CommandLine.MaximumLength | 1);
+            let field = at + std::mem::offset_of!(RTL_USER_PROCESS_PARAMETERS, CommandLine);
+            let wrote = WriteProcessMemory(process, field as _, (&odd as *const u16).cast(), 2, None);
+            assert!(wrote.as_bool(), "write the odd length");
+
+            let after = query_command_line(process);
+            let _ = child.kill();
+            assert!(
+                after.as_ref().is_none_or(|line| before.starts_with(line.as_str())),
+                "the kernel refuses an odd length or hands whole characters: {after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn this_process_has_a_sequence_number() {
+        assert!(unsafe { query_sequence_number(GetCurrentProcess()) }.is_some_and(|n| n != 0));
     }
 }

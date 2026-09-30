@@ -10,7 +10,7 @@ use windows::Win32::{
     DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, DPI_AWARENESS_CONTEXT_UNAWARE,
     DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED, GetDpiAwarenessContextForProcess, GetProcessInformation,
     GetProcessMitigationPolicy, GetTokenInformation, HANDLE, IsWow64Process2, LookupAccountSidW,
-    OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PSID, ProcessControlFlowGuardPolicy,
+    OpenProcessToken, PSID, ProcessControlFlowGuardPolicy,
     ProcessDEPPolicy, ProcessMachineTypeInfo, ProcessUserShadowStackPolicy, TOKEN_QUERY,
     TokenElevation, TokenUser,
 };
@@ -76,20 +76,20 @@ impl SidNames {
 /// Reads what the process lets a limited-query handle see. `sid` is the
 /// user's SID when the caller already has it; otherwise it is read from the
 /// token. A packaged process in an AppContainer is `Uwp`.
-pub fn probe(pid: u32, sid: Option<&[u8]>, packaged: bool, names: &mut SidNames) -> Passport {
-    let Ok(process) = crate::win::open_process(PROCESS_QUERY_LIMITED_INFORMATION, pid).map(Owned) else {
+pub fn probe(process: Option<HANDLE>, sid: Option<&[u8]>, packaged: bool, names: &mut SidNames) -> Passport {
+    let Some(process) = process else {
         return Passport {
             user: sid.map(|sid| names.name(sid)).unwrap_or_default(),
             ..Default::default()
         };
     };
-    let token = open_token(process.0);
+    let token = open_token(process);
     let sid = sid
         .map(Box::from)
         .or_else(|| token.as_ref().and_then(|t| token_user(t.0)));
 
     let app_container = token.as_ref().and_then(|t| token_flag(t.0, TOKEN_IS_APP_CONTAINER));
-    let architecture = architecture(process.0);
+    let architecture = architecture(process);
     Passport {
         user: sid.map(|sid| names.name(&sid)).unwrap_or_default(),
         architecture,
@@ -101,8 +101,8 @@ pub fn probe(pid: u32, sid: Option<&[u8]>, packaged: bool, names: &mut SidNames)
             )
         }),
         isolation: isolation(app_container, packaged),
-        dpi_awareness: dpi_awareness(process.0),
-        mitigations: mitigations(process.0, architecture),
+        dpi_awareness: dpi_awareness(process),
+        mitigations: mitigations(process, architecture),
     }
 }
 
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn this_process_reads_back_as_itself() {
         let mut names = SidNames::default();
-        let passport = probe(std::process::id(), None, false, &mut names);
+        let passport = probe(Some(unsafe { windows::Win32::GetCurrentProcess() }), None, false, &mut names);
         let expected = if cfg!(target_arch = "x86_64") { Architecture::X64 } else { passport.architecture };
         assert_eq!(passport.architecture, expected);
         assert!(passport.user.contains('\\'), "{:?}", passport.user);
@@ -318,7 +318,7 @@ mod tests {
     fn a_gone_process_is_unknown_but_keeps_a_known_user() {
         let mut names = SidNames::default();
         let system = [1u8, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
-        let passport = probe(u32::MAX - 3, Some(&system), false, &mut names);
+        let passport = probe(None, Some(&system), false, &mut names);
         assert!(passport.user.ends_with("SYSTEM"), "{:?}", passport.user);
         assert_eq!(passport.architecture, Architecture::Unknown);
         assert_eq!(passport.mitigations, None);
