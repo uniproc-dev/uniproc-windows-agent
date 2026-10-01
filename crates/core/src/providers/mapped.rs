@@ -329,17 +329,17 @@ mod tests {
 
     #[test]
     fn a_process_is_due_when_new_moved_or_a_round_old() {
-        let now = Instant::now();
+        let probed = Instant::now();
+        let soon = probed + Duration::from_secs(1);
         let listed = |shared| Listed { pid: 8, sequence_number: 1, shared };
-        let seen = |shared, ago| Probe { sequence_number: 1, shared, at: now - ago };
-        let moment = Duration::from_secs(1);
-        assert!(is_due(None, &listed(100 << 20), now), "new");
-        assert!(is_due(Some(&Probe { sequence_number: 2, ..seen(100 << 20, moment) }), &listed(100 << 20), now), "pid reused");
-        assert!(!is_due(Some(&seen(100 << 20, moment)), &listed((100 << 20) + (3 << 20)), now), "3 MB of 100");
-        assert!(is_due(Some(&seen(100 << 20, moment)), &listed((100 << 20) - (4 << 20)), now), "4 MB of 100");
-        assert!(is_due(Some(&seen(20 << 20, moment)), &listed((20 << 20) + (1 << 20)), now), "a twentieth");
-        assert!(!is_due(Some(&seen(0, moment)), &listed(0), now), "nothing shared, nothing moved");
-        assert!(is_due(Some(&seen(100 << 20, FULL_ROUND)), &listed(100 << 20), now), "a round old");
+        let seen = |shared| Probe { sequence_number: 1, shared, at: probed };
+        assert!(is_due(None, &listed(100 << 20), soon), "new");
+        assert!(is_due(Some(&Probe { sequence_number: 2, ..seen(100 << 20) }), &listed(100 << 20), soon), "pid reused");
+        assert!(!is_due(Some(&seen(100 << 20)), &listed((100 << 20) + (3 << 20)), soon), "3 MB of 100");
+        assert!(is_due(Some(&seen(100 << 20)), &listed((100 << 20) - (4 << 20)), soon), "4 MB of 100");
+        assert!(is_due(Some(&seen(20 << 20)), &listed((20 << 20) + (1 << 20)), soon), "a twentieth");
+        assert!(!is_due(Some(&seen(0)), &listed(0), soon), "nothing shared, nothing moved");
+        assert!(is_due(Some(&seen(100 << 20)), &listed(100 << 20), probed + FULL_ROUND), "a round old");
     }
 
     #[test]
