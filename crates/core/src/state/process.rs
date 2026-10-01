@@ -137,7 +137,9 @@ impl ProcessTable {
 
     /// Makes the table exactly the snapshot's processes: a pid whose sequence
     /// number moved is a new process, read by `sight` as it joins. Hands
-    /// `ask` each image nobody asked a verdict for yet.
+    /// `ask` the image of every process that joins: one already judged takes
+    /// the verdict at once and is judged again, since the file at that path
+    /// may have been replaced while the earlier process ran.
     pub fn reconcile(
         &mut self,
         rows: &[Row],
@@ -171,13 +173,13 @@ impl ProcessTable {
                                 processes: 1,
                             },
                         );
-                        ask(ImageRequest {
-                            path: entry.image_path.clone(),
-                            package_full_name: entry.package_name.clone(),
-                            package_relative_app_id: entry.package_relative_app_id.clone(),
-                        });
                     }
                 }
+                ask(ImageRequest {
+                    path: entry.image_path.clone(),
+                    package_full_name: entry.package_name.clone(),
+                    package_relative_app_id: entry.package_relative_app_id.clone(),
+                });
             }
             if let Some(earlier) = self.processes.insert(row.pid, entry) {
                 self.gone.push((row.pid, earlier.sequence_number));
@@ -432,12 +434,12 @@ mod tests {
     }
 
     #[test]
-    fn an_image_is_asked_for_once_whoever_runs_it() {
+    fn every_process_that_joins_asks_for_its_image() {
         let mut t = ProcessTable::new();
         let first = sync(&mut t, &[row(100, 1), row(200, 2)], "a.exe");
-        assert_eq!(paths(&first), ["a.exe"]);
+        assert_eq!(paths(&first), ["a.exe", "a.exe"]);
         let later = sync(&mut t, &[row(100, 1), row(200, 2), row(300, 3)], "a.exe");
-        assert!(later.is_empty(), "still pending");
+        assert_eq!(paths(&later), ["a.exe"], "only the one that joined");
         assert_eq!(t.pending().collect::<Vec<_>>(), ["a.exe"]);
     }
 
@@ -459,8 +461,8 @@ mod tests {
         let mut t = table(&[row(100, 1)], "a.exe");
         t.judge(verdict("a.exe", "App"));
         let requests = sync(&mut t, &[row(100, 1), row(200, 2)], "a.exe");
-        assert!(requests.is_empty());
-        assert_eq!(t.get(200).unwrap().display_name, "App");
+        assert_eq!(paths(&requests), ["a.exe"], "judged again: the file may have been replaced");
+        assert_eq!(t.get(200).unwrap().display_name, "App", "named at once all the same");
     }
 
     #[test]
@@ -493,7 +495,7 @@ mod tests {
         let mut t = table(&[row(100, 1), row(200, 2)], "a.exe");
         t.judge(verdict("a.exe", "App"));
         sync(&mut t, &[row(200, 2)], "a.exe");
-        assert!(sync(&mut t, &[row(200, 2), row(300, 3)], "a.exe").is_empty());
+        assert_eq!(paths(&sync(&mut t, &[row(200, 2), row(300, 3)], "a.exe")), ["a.exe"]);
         assert_eq!(t.get(300).unwrap().display_name, "App");
 
         sync(&mut t, &[row(200, 9)], "b.exe");

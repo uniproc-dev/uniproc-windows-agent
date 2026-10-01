@@ -16,7 +16,8 @@ use crate::providers::utils::{
 };
 use crate::state::events::{Image, ImageVerdict, ProcessSignature};
 use crate::win::OwnedProcess;
-use windows::Win32::PROCESS_QUERY_LIMITED_INFORMATION;
+use windows::Win32::{DRIVE_REMOTE, GetDriveTypeW, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::core::PCWSTR;
 
 /// What one process's handle, memory and token tell, read the moment a
 /// snapshot first lists it.
@@ -91,8 +92,9 @@ impl Images {
         let worker = std::thread::Builder::new()
             .name("image-judge".into())
             .spawn(move || {
+                let mut judged_before = Judged::default();
                 for request in asked.iter().take_while(|request| !request.path.is_empty()) {
-                    let verdict = judge(&request, persisted.as_ref());
+                    let verdict = judge(&request, persisted.as_ref(), &mut judged_before);
                     if judged.send(Image { path: request.path, verdict }).is_err() {
                         break;
                     }
@@ -130,13 +132,40 @@ impl Drop for Images {
     }
 }
 
+/// The verdicts this run worked out, each with the stamp of the file it
+/// describes.
+type Judged = std::collections::HashMap<SmolStr, (signature_cache::Stamp, ImageVerdict)>;
+
 #[tracing::instrument(level = "debug", skip_all, fields(path = %request.path))]
-fn judge(request: &ImageRequest, persisted: Option<&signature_cache::PersistentSignatures>) -> ImageVerdict {
+fn judge(
+    request: &ImageRequest,
+    persisted: Option<&signature_cache::PersistentSignatures>,
+    judged_before: &mut Judged,
+) -> ImageVerdict {
     let path = &request.path;
-    if !std::path::Path::new(path).exists() {
+    if is_remote(path) || !std::path::Path::new(path).exists() {
         return ImageVerdict::default();
     }
     let stamp = signature_cache::file_stamp(path);
+    if let Some(stamp) = stamp
+        && let Some((before, verdict)) = judged_before.get(path)
+        && *before == stamp
+    {
+        return verdict.clone();
+    }
+    let verdict = judge_afresh(request, stamp, persisted);
+    if let Some(stamp) = stamp {
+        judged_before.insert(path.clone(), (stamp, verdict.clone()));
+    }
+    verdict
+}
+
+fn judge_afresh(
+    request: &ImageRequest,
+    stamp: Option<signature_cache::Stamp>,
+    persisted: Option<&signature_cache::PersistentSignatures>,
+) -> ImageVerdict {
+    let path = &request.path;
     let cache = persisted.map(|p| p.cache());
     let hit = match (stamp, cache) {
         (Some(stamp), Some(cache)) => cache.lookup(path, stamp),
@@ -164,9 +193,11 @@ fn judge(request: &ImageRequest, persisted: Option<&signature_cache::PersistentS
                         is_windows_process: is_windows,
                         display_name: display_name.clone(),
                         signer: signer.clone(),
-                        size: stamp.0,
-                        modified_ms: stamp.1,
+                        size: stamp.size,
+                        modified_ms: stamp.modified_ms,
                         resolver: signature_cache::RESOLVER,
+                        file_id: stamp.file_id,
+                        usn: stamp.usn,
                     },
                 );
             }
@@ -183,6 +214,25 @@ fn judge(request: &ImageRequest, persisted: Option<&signature_cache::PersistentS
         is_windows_process: is_windows,
         display_name: display_name.into(),
         publisher: publisher.into(),
+    }
+}
+
+/// Whether `path` names a file on another machine. The service would open it
+/// with the machine's own account, so it is never opened at all.
+fn is_remote(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix(r"\\?\").or_else(|| lower.strip_prefix(r"\\.\")) {
+        return rest.starts_with(r"unc\") || rest.starts_with(r"globalroot\device\mup");
+    }
+    if lower.starts_with(r"\\") || lower.starts_with(r"\device\mup") {
+        return true;
+    }
+    match lower.as_bytes() {
+        [letter, b':', ..] if letter.is_ascii_alphabetic() => {
+            let root: Vec<u16> = [*letter as u16, b':' as u16, b'\\' as u16, 0].into();
+            unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) == DRIVE_REMOTE as u32 }
+        }
+        _ => false,
     }
 }
 
@@ -208,6 +258,35 @@ fn signature_of(image_path: &str, package_full_name: &str) -> (ProcessSignature,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_on_another_machine_is_remote() {
+        for remote in [
+            r"\\host\share\a.exe",
+            r"\\?\UNC\host\share\a.exe",
+            r"\\.\UNC\host\share\a.exe",
+            r"\Device\Mup\host\share\a.exe",
+            r"\\?\GLOBALROOT\Device\Mup\host\share\a.exe",
+        ] {
+            assert!(is_remote(remote), "{remote}");
+        }
+        for local in [r"C:\Windows\explorer.exe", r"\\?\C:\Windows\explorer.exe", r"\\.\C:\x.exe", "Registry"] {
+            assert!(!is_remote(local), "{local}");
+        }
+    }
+
+    #[test]
+    fn a_remote_image_is_judged_without_being_opened() {
+        let verdict = judge(
+            &ImageRequest {
+                path: r"\\uniproc-no-such-host.invalid\share\a.exe".into(),
+                ..Default::default()
+            },
+            None,
+            &mut Judged::default(),
+        );
+        assert_eq!(verdict.signature, ProcessSignature::Unknown);
+    }
 
     #[test]
     fn this_process_reads_its_own_passport() {
@@ -277,7 +356,7 @@ mod tests {
             path: r"C:\no\such\image.exe".into(),
             ..Default::default()
         };
-        assert_eq!(judge(&request, None), ImageVerdict::default());
+        assert_eq!(judge(&request, None, &mut Judged::default()), ImageVerdict::default());
     }
 
     #[test]

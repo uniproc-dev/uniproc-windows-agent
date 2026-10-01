@@ -1,5 +1,12 @@
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
+
+use windows::Win32::{
+    DeviceIoControl, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FSCTL_READ_FILE_USN_DATA, FileIdInfo, GetFileInformationByHandleEx, HANDLE,
+};
 
 use amethystate::store::builder::Backend;
 use amethystate::store::config::AfterGivingUp;
@@ -11,7 +18,7 @@ use crate::state::events::ProcessSignature;
 /// Which resolver produced a verdict. Raised whenever the way a verdict is
 /// worked out changes, so entries an older build wrote are recomputed instead
 /// of served - the file they describe has not changed, the answer has.
-pub const RESOLVER: u32 = 5;
+pub const RESOLVER: u32 = 6;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CachedVerdict {
@@ -24,6 +31,22 @@ pub struct CachedVerdict {
     pub modified_ms: u64,
     #[serde(default)]
     pub resolver: u32,
+    #[serde(default)]
+    pub file_id: [u64; 2],
+    #[serde(default)]
+    pub usn: i64,
+}
+
+/// What tells one version of a file from another. Size and modification
+/// time can be set by whoever writes the file; the file id changes when it
+/// is replaced, and the volume's change journal moves the USN on every
+/// write, which nobody sets by hand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stamp {
+    pub size: u64,
+    pub modified_ms: u64,
+    pub file_id: [u64; 2],
+    pub usn: i64,
 }
 
 #[amethystate(prefix = "signatures")]
@@ -50,15 +73,68 @@ pub fn signature_from_code(code: u8) -> ProcessSignature {
     }
 }
 
-pub fn file_stamp(path: &str) -> Option<(u64, u64)> {
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis() as u64;
-    Some((meta.len(), modified))
+/// The file's stamp, read through a handle that may only read attributes.
+/// The USN is 0 on a volume without a change journal.
+pub fn file_stamp(path: &str) -> Option<Stamp> {
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES as u32)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    let modified_ms = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+    let handle = HANDLE(file.as_raw_handle());
+
+    let mut id = FILE_ID_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&mut id as *mut FILE_ID_INFO).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    }
+    .ok()
+    .ok()?;
+    let bytes = id.FileId.Identifier;
+    let file_id = [
+        u64::from_le_bytes(bytes[..8].try_into().ok()?),
+        u64::from_le_bytes(bytes[8..].try_into().ok()?),
+    ];
+
+    Some(Stamp {
+        size: meta.len(),
+        modified_ms,
+        file_id,
+        usn: last_usn(handle).unwrap_or(0),
+    })
+}
+
+/// The USN of the last change the volume's journal recorded for the file.
+fn last_usn(file: HANDLE) -> Option<i64> {
+    let mut record = [0u64; 128];
+    let mut returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            file,
+            FSCTL_READ_FILE_USN_DATA as u32,
+            None,
+            0,
+            Some(record.as_mut_ptr().cast()),
+            (record.len() * 8) as u32,
+            Some(&mut returned),
+            None,
+        )
+    }
+    .ok()
+    .ok()?;
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(record.as_ptr().cast(), returned as usize) };
+    let at = match u16::from_le_bytes(bytes.get(4..6)?.try_into().ok()?) {
+        2 => 24,
+        3 => 40,
+        _ => return None,
+    };
+    Some(i64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
 /// Where the store `name` lives, with the files its backends write claimed
@@ -142,15 +218,20 @@ pub fn open(name: &str) -> Option<PersistentSignatures> {
 }
 
 impl CachedVerdict {
-    /// Whether this verdict still answers for the file: the same size and
-    /// modification time, worked out by the resolver this build runs.
-    fn describes(&self, stamp: (u64, u64)) -> bool {
-        self.size == stamp.0 && self.modified_ms == stamp.1 && self.resolver == RESOLVER
+    /// Whether this verdict still answers for the file: the same stamp, a
+    /// change journal behind it, worked out by the resolver this build runs.
+    fn describes(&self, stamp: Stamp) -> bool {
+        stamp.usn != 0
+            && self.size == stamp.size
+            && self.modified_ms == stamp.modified_ms
+            && self.file_id == stamp.file_id
+            && self.usn == stamp.usn
+            && self.resolver == RESOLVER
     }
 }
 
 impl SignatureCache {
-    pub fn lookup(&self, path: &str, stamp: (u64, u64)) -> Option<CachedVerdict> {
+    pub fn lookup(&self, path: &str, stamp: Stamp) -> Option<CachedVerdict> {
         self.verdicts().get(path).filter(|cached| cached.describes(stamp))
     }
 
@@ -171,36 +252,75 @@ mod tests {
         assert_send_sync::<PersistentSignatures>();
     }
 
-    fn verdict(size: u64) -> CachedVerdict {
+    fn stamp() -> Stamp {
+        Stamp {
+            size: 10,
+            modified_ms: 1,
+            file_id: [7, 0],
+            usn: 900,
+        }
+    }
+
+    fn verdict(stamp: Stamp) -> CachedVerdict {
         CachedVerdict {
             signature: 3,
             is_windows_process: false,
             display_name: "probe".to_string(),
             signer: "CN=Probe".to_string(),
-            size,
-            modified_ms: 1,
+            size: stamp.size,
+            modified_ms: stamp.modified_ms,
             resolver: RESOLVER,
+            file_id: stamp.file_id,
+            usn: stamp.usn,
         }
     }
 
     #[test]
     fn a_verdict_answers_for_the_file_it_was_worked_out_from() {
-        assert!(verdict(10).describes((10, 1)));
+        assert!(verdict(stamp()).describes(stamp()));
     }
 
     #[test]
     fn a_changed_file_is_recomputed() {
-        assert!(!verdict(10).describes((11, 1)), "size changed");
-        assert!(!verdict(10).describes((10, 2)), "modified since");
+        let cached = verdict(stamp());
+        assert!(!cached.describes(Stamp { size: 11, ..stamp() }), "size changed");
+        assert!(!cached.describes(Stamp { modified_ms: 2, ..stamp() }), "modified since");
+        assert!(!cached.describes(Stamp { file_id: [8, 0], ..stamp() }), "another file at the path");
+        assert!(!cached.describes(Stamp { usn: 901, ..stamp() }), "written with size and time put back");
+    }
+
+    #[test]
+    fn a_volume_without_a_change_journal_is_never_served_from_the_cache() {
+        let unjournaled = Stamp { usn: 0, ..stamp() };
+        assert!(!verdict(unjournaled).describes(unjournaled));
     }
 
     #[test]
     fn a_verdict_an_older_resolver_wrote_is_recomputed() {
         let stale = CachedVerdict {
             resolver: RESOLVER - 1,
-            ..verdict(10)
+            ..verdict(stamp())
         };
-        assert!(!stale.describes((10, 1)));
+        assert!(!stale.describes(stamp()));
+    }
+
+    #[test]
+    fn a_write_that_puts_size_and_time_back_moves_the_stamp() {
+        let path = std::env::temp_dir().join(format!("uniproc-stamp-{}.bin", std::process::id()));
+        std::fs::write(&path, b"first").unwrap();
+        let path_text = path.to_str().unwrap();
+        let before = file_stamp(path_text).expect("stamp");
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        std::fs::write(&path, b"other").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        let after = file_stamp(path_text).expect("stamp");
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!((after.size, after.modified_ms, after.file_id), (before.size, before.modified_ms, before.file_id));
+        if before.usn != 0 {
+            assert_ne!(after.usn, before.usn, "the change journal saw the write");
+        }
     }
 
     #[test]
