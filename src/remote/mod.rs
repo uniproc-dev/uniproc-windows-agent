@@ -144,6 +144,7 @@ impl Remote {
     /// The agent samples for it until the sampler is dropped.
     pub async fn subscribe(&self, spec: MetricSpec) -> Result<RemoteSampler> {
         let (tx, calls) = mpsc::unbounded();
+        let spec = wire::known_to(self.agent, spec);
         match self.call(Request::Subscribe { spec, calls }).await? {
             Reply::Subscribed => Ok(RemoteSampler { calls: tx }),
             _ => bail!("a subscribe answered with something else"),
@@ -183,7 +184,7 @@ impl Remote {
         let (updates, rx) = mpsc::unbounded();
         let (release, released) = oneshot::channel();
         let request = Request::WatchAgent {
-            spec,
+            spec: wire::known_to(self.agent, spec),
             updates,
             released,
         };

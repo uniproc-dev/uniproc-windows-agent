@@ -12,6 +12,7 @@ use crate::probes::{self, Handles};
 use crate::providers::disk::KernelDiskProvider;
 use crate::providers::gpu::{self, Gpu};
 use crate::providers::machine::MachineProbe;
+use crate::providers::mapped::Mapped;
 use crate::providers::network::KernelNetworkProvider;
 use crate::providers::process::passport::SidNames;
 use crate::providers::process::{self, Images};
@@ -78,6 +79,7 @@ struct Reader {
     handles: Handles,
     machine: MachineProbe,
     gpu: Gpu,
+    mapped: Mapped,
     snapshots: u64,
     session: Option<u32>,
     fresh: Option<Arc<Sample>>,
@@ -130,6 +132,7 @@ impl Supervisor {
             handles: Handles::default(),
             machine: MachineProbe::new(),
             gpu: Gpu::default(),
+            mapped: Mapped::start()?,
             snapshots: 0,
             session: probes::own_session(),
             fresh: None,
@@ -323,6 +326,9 @@ impl Reader {
             engines: spec.processes.contains(ProcessMetric::GpuEngines),
             adapters: spec.machine.contains(MachineMetric::Gpu),
         };
+        if reads_processes && spec.processes.contains(ProcessMetric::ExclusiveMapped) {
+            self.mapped.read(rows);
+        }
         let gpu = if wanted.any() {
             self.gpu.read(wanted, rows, &self.handles)
         } else {
@@ -337,6 +343,7 @@ impl Reader {
                 session: self.session,
                 state: &self.state,
                 gpu: &self.gpu,
+                mapped: &self.mapped,
             },
         );
         let mut machine = if spec.machine.is_empty() {
@@ -399,6 +406,7 @@ struct Beside<'a> {
     session: Option<u32>,
     state: &'a SystemState,
     gpu: &'a Gpu,
+    mapped: &'a Mapped,
 }
 
 impl Beside<'_> {
@@ -433,6 +441,10 @@ impl Extras for Beside<'_> {
 
     fn gpu_shared(&self, row: &Row) -> u64 {
         self.gpu.shared(row)
+    }
+
+    fn exclusive_mapped(&self, row: &Row) -> u64 {
+        self.mapped.get(row)
     }
 }
 

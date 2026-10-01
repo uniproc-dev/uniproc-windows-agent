@@ -61,6 +61,7 @@ pub enum ProcessMetric {
     GpuShared,
     /// Not a column: [`Sample::gpu_engines`].
     GpuEngines,
+    ExclusiveMapped,
 }
 
 /// A group of machine counters.
@@ -168,6 +169,7 @@ pub trait Extras {
     fn net_tx_bytes(&self, row: &Row) -> u64;
     fn gpu_dedicated(&self, row: &Row) -> u64;
     fn gpu_shared(&self, row: &Row) -> u64;
+    fn exclusive_mapped(&self, row: &Row) -> u64;
 }
 
 macro_rules! columns {
@@ -255,6 +257,7 @@ columns! {
     context_switches: u64 = ContextSwitches, r.context_switches;
     gpu_dedicated: u64 = GpuDedicated, x.gpu_dedicated(r);
     gpu_shared: u64 = GpuShared, x.gpu_shared(r);
+    exclusive_mapped: u64 = ExclusiveMapped, x.exclusive_mapped(r);
 }
 
 /// Sums over every logical processor in every group, cumulative, 100 ns.
@@ -538,6 +541,10 @@ mod tests {
             0
         }
         fn gpu_shared(&self, _: &Row) -> u64 {
+            self.0.set(self.0.get() + 1);
+            0
+        }
+        fn exclusive_mapped(&self, _: &Row) -> u64 {
             self.0.set(self.0.get() + 1);
             0
         }

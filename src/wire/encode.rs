@@ -169,6 +169,7 @@ fn process_metric(m: ProcessMetric) -> WireProcessMetric {
         ProcessMetric::GpuDedicated => WireProcessMetric::GpuDedicated,
         ProcessMetric::GpuShared => WireProcessMetric::GpuShared,
         ProcessMetric::GpuEngines => WireProcessMetric::GpuEngines,
+        ProcessMetric::ExclusiveMapped => WireProcessMetric::ExclusiveMapped,
     }
 }
 
@@ -446,6 +447,7 @@ fn process_columns(sample: &Sample, mut out: process_columns::Builder) -> capnp:
         context_switches => set_context_switches,
         gpu_dedicated => set_gpu_dedicated,
         gpu_shared => set_gpu_shared,
+        exclusive_mapped => set_exclusive_mapped,
     );
     if let Some(engines) = &sample.gpu_engines {
         let mut list = out.init_gpu_engines(engines.len() as u32);

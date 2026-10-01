@@ -5,6 +5,7 @@ pub mod encode;
 
 use ogurpchik::auth::handshake::{Protocol, Version};
 use uniproc_protocol::WINDOWS_PROTOCOL;
+use uniproc_windows_core::{MetricSpec, ProcessMetric};
 
 /// What both ends of the service's pipe present in the handshake: the windows schema's id and version.
 pub const PROTOCOL: Protocol = Protocol::new(
@@ -23,6 +24,15 @@ pub fn takes_gaps(peer: Option<Version>) -> bool {
 /// Whether an agent has `watch`, which came in windows 2.2.
 pub fn takes_watch(agent: Version) -> bool {
     (agent.major, agent.minor) >= (2, 2)
+}
+
+/// `spec` without the metrics `agent` has no name for: an agent older than
+/// windows 2.6 refuses a spec that asks for exclusiveMapped.
+pub fn known_to(agent: Version, mut spec: MetricSpec) -> MetricSpec {
+    if (agent.major, agent.minor) < (2, 6) {
+        spec.processes.remove(ProcessMetric::ExclusiveMapped);
+    }
+    spec
 }
 
 #[cfg(test)]
@@ -350,6 +360,7 @@ mod tests {
                 context_switches: rows(350),
                 gpu_dedicated: rows(360),
                 gpu_shared: rows(370),
+                exclusive_mapped: rows(390),
             },
             gpu_engines: Some(Arc::from([
                 ProcessGpuEngine {
@@ -475,12 +486,24 @@ mod tests {
             spec(ProcessMetric::HardFaults | ProcessMetric::ContextSwitches, MachineMetric::Processors),
             spec(ProcessMetrics::only(ProcessMetric::GpuEngines), MachineMetric::Gpu),
             spec(ProcessMetric::GpuDedicated | ProcessMetric::GpuShared, MachineMetrics::empty()),
+            spec(ProcessMetrics::only(ProcessMetric::ExclusiveMapped), MachineMetrics::empty()),
             spec(ProcessMetrics::empty(), MachineMetric::NetworkAdapters | MachineMetric::Network),
             spec(ProcessMetrics::empty(), MachineMetrics::empty()),
         ] {
             let sent = full.project(&wanted);
             assert_eq!(round_trip(&sent), sent);
         }
+    }
+
+    #[test]
+    fn an_agent_older_than_2_6_is_not_asked_for_exclusive_mapped() {
+        let asked = spec(ProcessMetric::ExclusiveMapped | ProcessMetric::WorkingSet, MachineMetrics::empty());
+        let version = |minor| ogurpchik::auth::handshake::Version { major: 2, minor, patch: 0 };
+        assert_eq!(
+            super::known_to(version(5), asked).processes,
+            ProcessMetrics::only(ProcessMetric::WorkingSet)
+        );
+        assert_eq!(super::known_to(version(6), asked), asked);
     }
 
     #[test]
