@@ -63,13 +63,13 @@ pub unsafe fn query_command_line(process: HANDLE) -> Option<String> {
     })
 }
 
-fn bytes_of(words: &[u64]) -> &[u8] {
+pub(crate) fn bytes_of(words: &[u64]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), words.len() * 8) }
 }
 
 /// The characters of the UNICODE_STRING at the start of `buffer`, whose
 /// text must lie inside `buffer` too.
-fn unicode_string_in(buffer: &[u8]) -> Option<Vec<u16>> {
+pub(crate) fn unicode_string_in(buffer: &[u8]) -> Option<Vec<u16>> {
     let header = size_of::<UNICODE_STRING>();
     if buffer.len() < header {
         return None;

@@ -5,5 +5,7 @@ pub mod machine;
 pub mod mapped;
 pub mod network;
 pub mod process;
+pub mod prober;
 pub mod provider;
 pub mod utils;
+pub mod vm_host;

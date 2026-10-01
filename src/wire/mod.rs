@@ -275,6 +275,7 @@ mod tests {
                     power_throttling: Some(true),
                     job_object_id: 7,
                     io_priority: IoPriority::VeryLow,
+                    vm_host: Some(true),
                 },
                 ProcessState {
                     pid: 200,

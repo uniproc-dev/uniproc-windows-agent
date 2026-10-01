@@ -283,6 +283,7 @@ pub fn process_states(list: struct_list::Reader<'_, process_state::Owned>) -> Ar
             power_throttling: toggle(s.get_power_throttling()),
             job_object_id: s.get_job_object_id(),
             io_priority: io_priority(s.get_io_priority()),
+            vm_host: toggle(s.get_vm_host()),
         })
         .collect()
 }

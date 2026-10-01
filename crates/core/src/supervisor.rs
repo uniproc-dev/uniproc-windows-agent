@@ -17,6 +17,7 @@ use crate::providers::network::KernelNetworkProvider;
 use crate::providers::process::passport::SidNames;
 use crate::providers::process::{self, Images};
 use crate::providers::provider::Provider;
+use crate::providers::vm_host::VmHosts;
 use crate::report::{Diff, Health};
 use crate::sample::{
     Columns, Demand, Extras, MAX_INTERVAL, MachineMetric, MachineSample, MetricSpec, NO_DATA_U32, ProcessMetric,
@@ -80,6 +81,7 @@ struct Reader {
     machine: MachineProbe,
     gpu: Gpu,
     mapped: Mapped,
+    vm_hosts: VmHosts,
     snapshots: u64,
     session: Option<u32>,
     fresh: Option<Arc<Sample>>,
@@ -133,6 +135,7 @@ impl Supervisor {
             machine: MachineProbe::new(),
             gpu: Gpu::default(),
             mapped: Mapped::start()?,
+            vm_hosts: VmHosts::start()?,
             snapshots: 0,
             session: probes::own_session(),
             fresh: None,
@@ -317,7 +320,8 @@ impl Reader {
             );
 
             self.handles.sync(rows);
-            observe(&mut self.state, &self.handles, rows);
+            self.vm_hosts.read(rows);
+            observe(&mut self.state, &self.handles, &self.vm_hosts, rows);
         }
 
         let wanted = gpu::Wanted {
@@ -376,7 +380,7 @@ impl Reader {
 }
 
 #[tracing::instrument(name = "states", level = "debug", skip_all)]
-fn observe(state: &mut SystemState, handles: &Handles, rows: &[Row]) {
+fn observe(state: &mut SystemState, handles: &Handles, vm_hosts: &VmHosts, rows: &[Row]) {
     for row in rows {
         let probed = handles.probed(row.pid);
         let base_priority = ProcessPriority::from_base(row.base_priority);
@@ -392,6 +396,7 @@ fn observe(state: &mut SystemState, handles: &Handles, rows: &[Row]) {
             power_throttling: probed.power_throttling,
             job_object_id: row.job_object_id,
             io_priority: probed.io_priority,
+            vm_host: vm_hosts.get(row),
         });
     }
 }

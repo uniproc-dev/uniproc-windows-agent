@@ -264,6 +264,7 @@ fn process_state(e: &ProcessState, mut s: process_state::Builder) {
     s.set_power_throttling(toggle(e.power_throttling));
     s.set_job_object_id(e.job_object_id);
     s.set_io_priority(io_priority(e.io_priority));
+    s.set_vm_host(toggle(e.vm_host));
 }
 
 pub fn services(services: &[ServiceStats], mut out: windows_agent::get_services_results::Builder) {

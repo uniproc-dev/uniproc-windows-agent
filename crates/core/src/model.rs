@@ -130,6 +130,9 @@ pub struct ProcessState {
     /// Kernel id of the process's job, 0 when it is in none.
     pub job_object_id: u32,
     pub io_priority: IoPriority,
+    /// Runs a virtual machine on the Windows Hypervisor Platform; Off below
+    /// 256 MB of shared working set, which is not checked.
+    pub vm_host: Option<bool>,
 }
 
 #[cfg(test)]

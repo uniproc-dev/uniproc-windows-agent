@@ -1,19 +1,16 @@
 //! The part of each process's working set it holds alone in pages backed by
 //! a section: mapped files, images and pagefile-backed shared memory.
 
-use std::sync::{Arc, OnceLock};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use anyhow::Result;
-use crossbeam_channel::{Receiver, Sender};
-use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
 use windows::Win32::{
     ERROR_BAD_LENGTH, GetLastError, GetSystemInfo, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, QueryWorkingSet,
     SYSTEM_INFO,
 };
 
+use crate::providers::prober::{FULL_ROUND, IsDue, Listed, Prober, Seen};
 use crate::sample::NO_DATA_U64;
 use crate::snapshot::Row;
 use crate::win::OwnedProcess;
@@ -23,139 +20,41 @@ const SHARE_COUNT_MASK: usize = 0b111;
 const SHARED: usize = 1 << 8;
 const FIRST_BLOCKS: usize = 1 << 16;
 
-/// How long a probe stands while the shared working set stays put.
-pub const FULL_ROUND: Duration = Duration::from_secs(300);
 /// How far the shared working set moves before the process is probed again:
 /// this many bytes, or one part in [`MOVED_PARTS`].
 const MOVED_BYTES: u64 = 4 << 20;
 const MOVED_PARTS: u64 = 20;
-/// The worker rests this many times as long as a probe took, so it keeps to
-/// a quarter of a core.
-const REST: u32 = 3;
-
-/// A listed process as the worker is told of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Listed {
-    pid: u32,
-    sequence_number: u64,
-    shared: u64,
-}
-
-/// What the worker last saw of a process it probed.
-struct Probe {
-    sequence_number: u64,
-    shared: u64,
-    at: Instant,
-}
 
 /// Each listed process's section-backed working set held alone, probed on a
 /// thread of its own: as it shows up, when its shared working set moves by
 /// [`MOVED_BYTES`] or a [`MOVED_PARTS`]th, and at least every
 /// [`FULL_ROUND`]. A walk of a working set costs about 270 ns a page, and a
-/// shared working set at rest leaves the answer as it was. The thread stops
-/// when this is dropped, after the process it is reading.
-pub struct Mapped {
-    lists: Sender<Vec<Listed>>,
-    probed: Arc<Mutex<FxHashMap<u32, (u64, u64)>>>,
-    stop: Option<Sender<()>>,
-    worker: Option<JoinHandle<()>>,
-}
+/// shared working set at rest leaves the answer as it was.
+pub struct Mapped(Prober<u64>);
 
 impl Mapped {
     pub fn start() -> Result<Self> {
-        let (lists, listed) = crossbeam_channel::unbounded();
-        let (stop, stopped) = crossbeam_channel::bounded(0);
-        let probed = Arc::new(Mutex::new(FxHashMap::default()));
-        let worker = std::thread::Builder::new().name("exclusive-mapped".into()).spawn({
-            let probed = probed.clone();
-            move || work(listed, stopped, probed)
-        })?;
-        Ok(Self {
-            lists,
-            probed,
-            stop: Some(stop),
-            worker: Some(worker),
-        })
+        let mut blocks = Vec::new();
+        let prober = Prober::start("exclusive-mapped", IS_DUE, move |pid| exclusive_mapped(pid, &mut blocks))?;
+        Ok(Self(prober))
     }
 
     /// Hands the worker the processes of `rows` and their shared working sets.
     pub fn read(&self, rows: &[Row]) {
-        let list = rows
-            .iter()
-            .map(|row| Listed {
-                pid: row.pid,
-                sequence_number: row.sequence_number,
-                shared: row.working_set.saturating_sub(row.private_working_set),
-            })
-            .collect();
-        let _ = self.lists.send(list);
+        self.0.read(rows);
     }
 
     /// The bytes last probed for this process; [`NO_DATA_U64`] when its
     /// working set could not be read or was not probed yet.
     pub fn get(&self, row: &Row) -> u64 {
-        match self.probed.lock().get(&row.pid) {
-            Some(&(sequence_number, bytes)) if sequence_number == row.sequence_number => bytes,
-            _ => NO_DATA_U64,
-        }
+        self.0.get(row).unwrap_or(NO_DATA_U64)
     }
 }
 
-impl Drop for Mapped {
-    fn drop(&mut self) {
-        self.stop.take();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-fn work(lists: Receiver<Vec<Listed>>, stopped: Receiver<()>, probed: Arc<Mutex<FxHashMap<u32, (u64, u64)>>>) {
-    let mut known: FxHashMap<u32, Probe> = FxHashMap::default();
-    let mut blocks = Vec::new();
-    loop {
-        let mut list = crossbeam_channel::select! {
-            recv(lists) -> list => match list {
-                Ok(list) => list,
-                Err(_) => return,
-            },
-            recv(stopped) -> _ => return,
-        };
-        if let Some(newer) = lists.try_iter().last() {
-            list = newer;
-        }
-        let listed: FxHashMap<u32, u64> = list.iter().map(|l| (l.pid, l.sequence_number)).collect();
-        let still_listed = |pid: &u32, sequence_number: u64| listed.get(pid) == Some(&sequence_number);
-        known.retain(|pid, probe| still_listed(pid, probe.sequence_number));
-        probed.lock().retain(|pid, (sequence_number, _)| still_listed(pid, *sequence_number));
-
-        let now = Instant::now();
-        let due: Vec<Listed> = list.into_iter().filter(|l| is_due(known.get(&l.pid), l, now)).collect();
-        for l in due {
-            if !lists.is_empty() {
-                break;
-            }
-            let at = Instant::now();
-            let bytes = exclusive_mapped(l.pid, &mut blocks);
-            let took = at.elapsed();
-            known.insert(
-                l.pid,
-                Probe {
-                    sequence_number: l.sequence_number,
-                    shared: l.shared,
-                    at,
-                },
-            );
-            probed.lock().insert(l.pid, (l.sequence_number, bytes));
-            if !matches!(stopped.recv_timeout(took * REST), Err(crossbeam_channel::RecvTimeoutError::Timeout)) {
-                return;
-            }
-        }
-    }
-}
+const IS_DUE: IsDue = is_due;
 
 /// Whether `listed` is to be probed now, given what was seen of it last.
-fn is_due(last: Option<&Probe>, listed: &Listed, now: Instant) -> bool {
+fn is_due(last: Option<&Seen>, listed: &Listed, now: Instant) -> bool {
     let Some(last) = last.filter(|last| last.sequence_number == listed.sequence_number) else {
         return true;
     };
@@ -225,7 +124,9 @@ fn working_set(pid: u32, blocks: &mut Vec<usize>) -> Option<&[usize]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustc_hash::FxHashMap;
     use std::os::windows::io::AsRawHandle;
+    use std::time::Duration;
     use windows::Win32::{
         CreateFileMappingW, FILE_MAP_WRITE, HANDLE, INVALID_HANDLE_VALUE, MapViewOfFile, PAGE_READWRITE,
         UnmapViewOfFile,
@@ -318,23 +219,13 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_resting_after_a_probe_stops_at_once() {
-        let mapped = Mapped::start().unwrap();
-        mapped.read(&[me()]);
-        std::thread::sleep(Duration::from_millis(50));
-        let at = Instant::now();
-        drop(mapped);
-        assert!(at.elapsed() < Duration::from_millis(500), "{:?}", at.elapsed());
-    }
-
-    #[test]
     fn a_process_is_due_when_new_moved_or_a_round_old() {
         let probed = Instant::now();
         let soon = probed + Duration::from_secs(1);
         let listed = |shared| Listed { pid: 8, sequence_number: 1, shared };
-        let seen = |shared| Probe { sequence_number: 1, shared, at: probed };
+        let seen = |shared| Seen { sequence_number: 1, shared, at: probed };
         assert!(is_due(None, &listed(100 << 20), soon), "new");
-        assert!(is_due(Some(&Probe { sequence_number: 2, ..seen(100 << 20) }), &listed(100 << 20), soon), "pid reused");
+        assert!(is_due(Some(&Seen { sequence_number: 2, ..seen(100 << 20) }), &listed(100 << 20), soon), "pid reused");
         assert!(!is_due(Some(&seen(100 << 20)), &listed((100 << 20) + (3 << 20)), soon), "3 MB of 100");
         assert!(is_due(Some(&seen(100 << 20)), &listed((100 << 20) - (4 << 20)), soon), "4 MB of 100");
         assert!(is_due(Some(&seen(20 << 20)), &listed((20 << 20) + (1 << 20)), soon), "a twentieth");
