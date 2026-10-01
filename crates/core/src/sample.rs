@@ -299,7 +299,9 @@ pub struct MachineDisk {
     pub write_bytes: u64,
 }
 
-/// All network adapters together, cumulative since the agent started.
+/// The TCP and UDP payload of every process together, cumulative since the
+/// agent started. Traffic to or from a loopback address is left out; traffic
+/// a process sends to the machine's own non-loopback address is not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MachineNetwork {
     pub rx_bytes: u64,

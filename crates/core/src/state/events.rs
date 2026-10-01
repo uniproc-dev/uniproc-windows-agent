@@ -65,25 +65,35 @@ impl DiskDelta {
     }
 }
 
-/// One process's traffic since the previous batch.
+/// One process's traffic since the previous batch. The loopback bytes are
+/// counted in `rx_bytes` and `tx_bytes` as well.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct NetDelta {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub rx_packets: u64,
     pub tx_packets: u64,
+    pub loopback_rx_bytes: u64,
+    pub loopback_tx_bytes: u64,
 }
 
 impl NetDelta {
     pub fn add(&mut self, e: &NetworkEvent) {
+        let size = e.size as u64;
         match e.event_type {
             NetworkEventType::Send => {
-                self.tx_bytes += e.size as u64;
+                self.tx_bytes += size;
                 self.tx_packets += 1;
+                if e.loopback {
+                    self.loopback_tx_bytes += size;
+                }
             }
             NetworkEventType::Recv => {
-                self.rx_bytes += e.size as u64;
+                self.rx_bytes += size;
                 self.rx_packets += 1;
+                if e.loopback {
+                    self.loopback_rx_bytes += size;
+                }
             }
             _ => {}
         }
@@ -101,6 +111,8 @@ pub struct NetworkEvent {
     pub pid: u32,
     pub event_type: NetworkEventType,
     pub size: u32,
+    /// Sent to or from a loopback address, so it never left the machine.
+    pub loopback: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +147,7 @@ mod tests {
             pid: 1,
             event_type,
             size,
+            loopback: false,
         }
     }
 
@@ -152,8 +165,19 @@ mod tests {
                 tx_bytes: 120,
                 rx_packets: 1,
                 tx_packets: 2,
+                ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn loopback_traffic_is_the_process_s_and_counted_apart() {
+        let mut d = NetDelta::default();
+        d.add(&net(NetworkEventType::Send, 100));
+        d.add(&NetworkEvent { loopback: true, ..net(NetworkEventType::Send, 30) });
+        d.add(&NetworkEvent { loopback: true, ..net(NetworkEventType::Recv, 5) });
+        assert_eq!((d.tx_bytes, d.rx_bytes), (130, 5));
+        assert_eq!((d.loopback_tx_bytes, d.loopback_rx_bytes), (30, 5));
     }
 
     #[test]

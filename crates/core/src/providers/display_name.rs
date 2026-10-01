@@ -24,7 +24,8 @@ use std::ptr::addr_of;
 use windows::Win32::{
     ERROR_SUCCESS, FILE_ATTRIBUTE_NORMAL, GetFileVersionInfoSizeW, GetFileVersionInfoW,
     GetPackagePathByFullName, GetStagedPackagePathByFullName, PACKAGE_ID, PACKAGE_INFORMATION_BASIC,
-    PACKAGE_INFORMATION_FULL, PackageIdFromFullName, SHFILEINFOW, SHGFI_DISPLAYNAME,
+    PACKAGE_INFORMATION_FULL, PackageIdFromFullName, PackageOrigin, PackageOrigin_Inbox,
+    PackageOrigin_Store, GetStagedPackageOrigin, SHFILEINFOW, SHGFI_DISPLAYNAME,
     SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHLoadIndirectString, VerQueryValueW,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
@@ -56,6 +57,16 @@ pub fn resolve(image_path: &str, package_full_name: &str, app_id: &str) -> Optio
     }
 
     file_description(image_path).or_else(|| shell_display_name(image_path))
+}
+
+/// Whether the package came with Windows or from the Store. A sideloaded
+/// package may be signed by any certificate the machine was told to trust,
+/// whatever publisher name that certificate carries.
+pub fn package_from_windows_or_store(package_full_name: &str) -> bool {
+    let full_name = HSTRING::from(package_full_name);
+    let mut origin = PackageOrigin::default();
+    let status = unsafe { GetStagedPackageOrigin(PCWSTR(full_name.as_ptr()), &mut origin) };
+    status == ERROR_SUCCESS && (origin == PackageOrigin_Inbox || origin == PackageOrigin_Store)
 }
 
 /// The publisher of a packaged app, as the OS recorded it at install time

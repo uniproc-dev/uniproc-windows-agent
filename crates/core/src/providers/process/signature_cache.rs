@@ -18,7 +18,7 @@ use crate::state::events::ProcessSignature;
 /// Which resolver produced a verdict. Raised whenever the way a verdict is
 /// worked out changes, so entries an older build wrote are recomputed instead
 /// of served - the file they describe has not changed, the answer has.
-pub const RESOLVER: u32 = 6;
+pub const RESOLVER: u32 = 7;
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CachedVerdict {

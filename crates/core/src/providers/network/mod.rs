@@ -1,6 +1,8 @@
 mod events;
 mod vars;
 
+use std::net::{Ipv4Addr, Ipv6Addr};
+
 use anyhow::Result;
 use windows::Win32::{EVENT_RECORD, EVENT_TRACE_FLAG_NETWORK_TCPIP};
 
@@ -74,18 +76,21 @@ fn event(record: &EVENT_RECORD, data: &[u8]) -> Option<NetworkEvent> {
         _ => return None,
     };
 
-    let (pid, size) = if is_v6 {
+    let (pid, size, loopback) = if is_v6 {
         let f = parse::<Ipv6Flow>(data)?;
-        (f.pid, f.size)
+        let loopback = [f.dst_addr, f.src_addr].into_iter().any(|a| Ipv6Addr::from(a).to_canonical().is_loopback());
+        (f.pid, f.size, loopback)
     } else {
         let f = parse::<Ipv4Flow>(data)?;
-        (f.pid, f.size)
+        let loopback = [f.dst_addr, f.src_addr].into_iter().any(|a| Ipv4Addr::from(a).is_loopback());
+        (f.pid, f.size, loopback)
     };
 
     Some(NetworkEvent {
         pid,
         event_type,
         size,
+        loopback,
     })
 }
 
@@ -158,6 +163,27 @@ mod tests {
     fn tcp_connect_ipv6() {
         let e = network_event(event(&record(TCPIP_TASK_GUID, TCPIP_CONNECT_V6), &v6_dump()));
         assert!(matches!(e.event_type, NetworkEventType::Connect));
+    }
+
+    #[test]
+    fn traffic_to_a_loopback_address_is_loopback() {
+        let send_v4 = record(TCPIP_TASK_GUID, TCPIP_SEND_V4);
+        let send_v6 = record(TCPIP_TASK_GUID, TCPIP_SEND_V6);
+        assert!(!network_event(event(&send_v4, &v4_dump())).loopback);
+        assert!(!network_event(event(&send_v6, &v6_dump())).loopback);
+
+        let mut v4 = v4_dump();
+        v4[8..12].copy_from_slice(&[127, 0, 0, 1]);
+        v4[12..16].copy_from_slice(&[127, 0, 0, 1]);
+        assert!(network_event(event(&send_v4, &v4)).loopback);
+
+        let mut mapped = v6_dump();
+        mapped[20..24].copy_from_slice(&[127, 0, 0, 1]);
+        assert!(network_event(event(&send_v6, &mapped)).loopback, "v4-mapped 127.0.0.1");
+
+        let mut v6 = v6_dump();
+        v6[8..24].copy_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+        assert!(network_event(event(&send_v6, &v6)).loopback, "::1");
     }
 
     #[test]

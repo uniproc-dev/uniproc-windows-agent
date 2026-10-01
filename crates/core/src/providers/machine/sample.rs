@@ -1,6 +1,6 @@
 use ntapi::ntpoapi::PROCESSOR_POWER_INFORMATION;
 use windows::Win32::{
-    CallNtPowerInformation, GlobalMemoryStatusEx, MEMORYSTATUSEX, PDH_FMT_COUNTERVALUE,
+    ALL_PROCESSOR_GROUPS, CallNtPowerInformation, GetActiveProcessorCount, GlobalMemoryStatusEx, MEMORYSTATUSEX, PDH_FMT_COUNTERVALUE,
     PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery,
     PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW, ProcessorInformation,
     STATUS_SUCCESS,
@@ -85,9 +85,7 @@ pub fn cpu_frequency_mhz(
     pdh: Option<&mut PdhProcessorPerformance>,
     info: &mut Vec<PROCESSOR_POWER_INFORMATION>,
 ) -> (u32, u32) {
-    let cpu_count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let cpu_count = (unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS as u16) } as usize).max(1);
     info.clear();
     info.resize(cpu_count, unsafe { std::mem::zeroed() });
 

@@ -1,6 +1,8 @@
 pub mod passport;
 mod signature_cache;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -76,10 +78,12 @@ pub struct ImageRequest {
 /// Judges images on a thread of its own: verifying a signature and reading
 /// a version resource take far too long for the tick. Every verdict
 /// persists per path and file stamp, so a restart finds most of them at
-/// once. No verdict is lost; the thread stops when this is dropped.
+/// once. The thread stops when this is dropped, after the image it is
+/// judging; the requests still queued are left.
 pub struct Images {
     requests: Sender<ImageRequest>,
     verdicts: Receiver<Image>,
+    stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -89,11 +93,13 @@ impl Images {
         let (requests, asked) = crossbeam_channel::unbounded::<ImageRequest>();
         let (judged, verdicts) = crossbeam_channel::unbounded();
         let persisted = signature_cache::open(signature_store);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
         let worker = std::thread::Builder::new()
             .name("image-judge".into())
             .spawn(move || {
                 let mut judged_before = Judged::default();
-                for request in asked.iter().take_while(|request| !request.path.is_empty()) {
+                for request in asked.iter().take_while(|_| !stopped.load(Ordering::Relaxed)) {
                     let verdict = judge(&request, persisted.as_ref(), &mut judged_before);
                     if judged.send(Image { path: request.path, verdict }).is_err() {
                         break;
@@ -104,6 +110,7 @@ impl Images {
         Ok(Self {
             requests,
             verdicts,
+            stop,
             worker: Some(worker),
         })
     }
@@ -125,6 +132,7 @@ impl Images {
 
 impl Drop for Images {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         let _ = self.requests.send(ImageRequest::default());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -248,12 +256,23 @@ fn signature_of(image_path: &str, package_full_name: &str) -> (ProcessSignature,
         return (signature, signer);
     }
 
-    match display_name::package_publisher(package_full_name) {
-        Some(publisher) if publisher.contains("Microsoft") => (ProcessSignature::Microsoft, None),
-        Some(_) => (ProcessSignature::ThirdParty, None),
+    match package_signature(package_full_name) {
+        Some(signature) => (signature, None),
         None => (signature, signer),
     }
 }
+
+fn package_signature(package_full_name: &str) -> Option<ProcessSignature> {
+    let publisher = display_name::package_publisher(package_full_name)?;
+    let microsoft = MICROSOFT_PUBLISHERS.contains(&publisher.as_str())
+        && display_name::package_from_windows_or_store(package_full_name);
+    Some(if microsoft { ProcessSignature::Microsoft } else { ProcessSignature::ThirdParty })
+}
+
+const MICROSOFT_PUBLISHERS: [&str; 2] = [
+    "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+    "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+];
 
 #[cfg(test)]
 mod tests {
@@ -357,6 +376,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(judge(&request, None, &mut Judged::default()), ImageVerdict::default());
+    }
+
+    #[test]
+    fn an_installed_microsoft_package_is_microsoft() {
+        let packages = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "(Get-AppxPackage -Publisher 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' | Select-Object -First 1).PackageFullName"])
+            .output()
+            .expect("powershell");
+        let full_name = String::from_utf8_lossy(&packages.stdout).trim().to_string();
+        if full_name.is_empty() {
+            return;
+        }
+        assert_eq!(package_signature(&full_name), Some(ProcessSignature::Microsoft), "{full_name}");
     }
 
     #[test]

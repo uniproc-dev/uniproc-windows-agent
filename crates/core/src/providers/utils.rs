@@ -2,7 +2,9 @@ use std::mem::size_of;
 
 use ntapi::winapi::shared::ntdef::UNICODE_STRING;
 use windows::Win32::{
-    CATALOG_INFO, LocalFree, CERT_NAME_SIMPLE_DISPLAY_TYPE, CloseHandle, CommandLineToArgvW, CreateFileW,
+    CATALOG_INFO, LocalFree, CERT_CHAIN_POLICY_MICROSOFT_ROOT, CERT_CHAIN_POLICY_PARA,
+    CERT_CHAIN_POLICY_STATUS, CERT_NAME_SIMPLE_DISPLAY_TYPE, CertVerifyCertificateChainPolicy,
+    MICROSOFT_ROOT_CERT_CHAIN_POLICY_CHECK_APPLICATION_ROOT_FLAG, PCCERT_CHAIN_CONTEXT, CloseHandle, CommandLineToArgvW, CreateFileW,
     CertGetNameStringW, CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
     CryptCATAdminEnumCatalogFromHash, CryptCATAdminReleaseCatalogContext,
     CryptCATAdminReleaseContext, CryptCATCatalogInfoFromContext, ERROR_INSUFFICIENT_BUFFER, FILE_SHARE_DELETE,
@@ -293,7 +295,7 @@ fn catalog_signature(path: &str) -> Option<(ProcessSignature, Option<String>)> {
         let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
         let status = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
 
-        let verdict = (status == 0).then(|| signer_verdict(signer_subject(data.hWVTStateData)));
+        let verdict = (status == 0).then(|| signer_verdict(data.hWVTStateData));
 
         data.dwStateAction = WTD_STATEACTION_CLOSE as u32;
         let _ = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
@@ -404,13 +406,40 @@ impl CatalogContext<'_> {
     }
 }
 
-fn signer_verdict(subject: Option<String>) -> (ProcessSignature, Option<String>) {
-    let signature = match &subject {
-        Some(subject) if subject.contains("Microsoft") => ProcessSignature::Microsoft,
-        Some(_) => ProcessSignature::ThirdParty,
-        None => ProcessSignature::Unknown,
+/// Microsoft only when the signer's chain ends in one of Microsoft's own
+/// roots; a subject naming Microsoft proves nothing.
+unsafe fn signer_verdict(state: HANDLE) -> (ProcessSignature, Option<String>) {
+    let Some((subject, chain)) = (unsafe { signer_of(state) }) else {
+        return (ProcessSignature::Unknown, None);
+    };
+    let signature = if unsafe { roots_at_microsoft(chain) } {
+        ProcessSignature::Microsoft
+    } else {
+        ProcessSignature::ThirdParty
     };
     (signature, subject)
+}
+
+/// The product root check and the application root check each accept only
+/// their own roots, so both are asked.
+unsafe fn roots_at_microsoft(chain: PCCERT_CHAIN_CONTEXT) -> bool {
+    if chain.is_null() {
+        return false;
+    }
+    [0, MICROSOFT_ROOT_CERT_CHAIN_POLICY_CHECK_APPLICATION_ROOT_FLAG as u32].into_iter().any(|flags| {
+        let para = CERT_CHAIN_POLICY_PARA {
+            cbSize: size_of::<CERT_CHAIN_POLICY_PARA>() as u32,
+            dwFlags: flags,
+            ..Default::default()
+        };
+        let mut status = CERT_CHAIN_POLICY_STATUS {
+            cbSize: size_of::<CERT_CHAIN_POLICY_STATUS>() as u32,
+            ..Default::default()
+        };
+        unsafe { CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_MICROSOFT_ROOT, chain, &para, &mut status) }
+            .as_bool()
+            && status.dwError == 0
+    })
 }
 
 #[cfg(test)]
@@ -441,7 +470,7 @@ pub fn check_signer(path: &str) -> (ProcessSignature, Option<String>) {
         let status = WinVerifyTrust(HWND::default(), &mut action, &mut data as *mut _ as *mut _);
 
         let result = if status == 0 {
-            signer_verdict(signer_subject(data.hWVTStateData))
+            signer_verdict(data.hWVTStateData)
         } else if status == TRUST_E_NOSIGNATURE.0 || status == TRUST_E_SUBJECT_FORM_UNKNOWN.0 {
             // No *embedded* signature is not the same as unsigned: most of
             // Windows' own binaries (dwm.exe, winlogon.exe, wslservice.exe)
@@ -458,7 +487,9 @@ pub fn check_signer(path: &str) -> (ProcessSignature, Option<String>) {
     })
 }
 
-unsafe fn signer_subject(state: HANDLE) -> Option<String> {
+/// The first signer's subject name and the chain WinVerifyTrust built for
+/// it, valid until the state is closed.
+unsafe fn signer_of(state: HANDLE) -> Option<(Option<String>, PCCERT_CHAIN_CONTEXT)> {
     unsafe {
         let prov_data = WTHelperProvDataFromStateData(state);
         if prov_data.is_null() {
@@ -478,12 +509,12 @@ unsafe fn signer_subject(state: HANDLE) -> Option<String> {
         }
         let kind = CERT_NAME_SIMPLE_DISPLAY_TYPE as u32;
         let len = CertGetNameStringW(cert, kind, 0, None, None, 0);
-        if len <= 1 {
-            return None;
-        }
-        let mut buf = vec![0u16; len as usize];
-        CertGetNameStringW(cert, kind, 0, None, Some(PWSTR(buf.as_mut_ptr())), len);
-        Some(String::from_utf16_lossy(&buf[..len as usize - 1]))
+        let subject = (len > 1).then(|| {
+            let mut buf = vec![0u16; len as usize];
+            CertGetNameStringW(cert, kind, 0, None, Some(PWSTR(buf.as_mut_ptr())), len);
+            String::from_utf16_lossy(&buf[..len as usize - 1])
+        });
+        Some((subject, sgnr.pChainContext))
     }
 }
 

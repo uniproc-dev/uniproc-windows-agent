@@ -50,8 +50,8 @@ impl SystemState {
             }
             StateChange::Network(deltas) => {
                 for d in deltas.values() {
-                    self.machine_totals.net_rx_bytes += d.rx_bytes;
-                    self.machine_totals.net_tx_bytes += d.tx_bytes;
+                    self.machine_totals.net_rx_bytes += d.rx_bytes - d.loopback_rx_bytes;
+                    self.machine_totals.net_tx_bytes += d.tx_bytes - d.loopback_tx_bytes;
                 }
                 self.network.charge(&deltas, &self.processes);
             }
