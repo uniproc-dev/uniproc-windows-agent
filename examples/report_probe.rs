@@ -124,6 +124,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         for s in states.iter().filter(|s| s.efficiency_mode == Some(true)).take(5) {
             println!("         efficiency mode: {s:?}");
         }
+        let unknown = states.iter().filter(|s| s.vm_host.is_none()).count();
+        println!("         vm hosts ({unknown} unknown):");
+        for s in states.iter().filter(|s| s.vm_host == Some(true)) {
+            println!("         vm host: pid={} sequence_number={}", s.pid, s.sequence_number);
+        }
     }
 
     Ok(())
