@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use ogurpchik::auth::handshake::HandshakeMode;
 use ogurpchik::endpoint::Endpoint;
-use ogurpchik::rpc::accept_session;
+use ogurpchik::rpc::SessionAcceptor;
 use uniproc_protocol::windows_capnp::windows_agent;
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
 use uniproc_windows_agent::local::Local;
@@ -20,24 +20,15 @@ pub async fn run(agent: Arc<Local>) -> Result<()> {
     let endpoint = Endpoint::for_service(APP_NAME, WINDOWS_AGENT_SERVICE)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let listener = endpoint.listen().await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let mut acceptor = SessionAcceptor::new(&listener, HandshakeMode::version_only(), PROTOCOL);
     let attached = Rc::new(Cell::new(0usize));
 
     loop {
         let peer = Rc::new(Cell::new(None));
-        let session = match accept_session::<windows_agent::Client, _>(
-            &listener,
-            &HandshakeMode::version_only(),
-            PROTOCOL,
-            AgentImpl::new(agent.clone(), peer.clone()),
-        )
-        .await
-        {
-            Ok(session) => session,
-            Err(e) => {
-                tracing::error!("accept_session failed: {e:?}");
-                continue;
-            }
-        };
+        let session = acceptor
+            .next::<windows_agent::Client, _>(AgentImpl::new(agent.clone(), peer.clone()))
+            .await
+            .map_err(|e| anyhow::anyhow!("the agent's pipe stopped accepting: {e:?}"))?;
         peer.set(session.peer_version());
         attached.set(attached.get() + 1);
         agent.set_attached(true);

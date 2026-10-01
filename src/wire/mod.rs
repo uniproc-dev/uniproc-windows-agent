@@ -20,6 +20,11 @@ pub fn takes_gaps(peer: Option<Version>) -> bool {
     peer.is_some_and(|v| (v.major, v.minor) >= (2, 1))
 }
 
+/// Whether an agent has `watch`, which came in windows 2.2.
+pub fn takes_watch(agent: Version) -> bool {
+    (agent.major, agent.minor) >= (2, 2)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

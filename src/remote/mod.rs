@@ -20,7 +20,9 @@ use crate::api::{
     Command, CommandResult, MetricSpec, ProcessInfo, ProcessStates, Sample, ServiceStats,
     ServiceStatus, Snapshot, Tagged, Update,
 };
-use crate::wire::{PROTOCOL, decode, encode};
+use crate::wire::{self, PROTOCOL, decode, encode};
+
+pub use ogurpchik::auth::handshake::Version;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
 const JOIN_ATTEMPTS: usize = 3;
@@ -78,9 +80,21 @@ struct Envelope {
 #[derive(Clone)]
 pub struct Remote {
     tx: mpsc::UnboundedSender<Envelope>,
+    agent: Version,
 }
 
 impl Remote {
+    /// The windows schema version the agent said it speaks in the handshake.
+    pub fn agent_version(&self) -> Version {
+        self.agent
+    }
+
+    /// Whether the agent has `watch`; one older than windows 2.2 has only
+    /// `subscribe`.
+    pub fn can_watch(&self) -> bool {
+        wire::takes_watch(self.agent)
+    }
+
     /// Connects to the service, waiting up to `give_up_after` for its pipe to appear.
     pub async fn connect(give_up_after: Duration) -> Result<Self> {
         Self::connect_to(WINDOWS_AGENT_SERVICE, give_up_after).await
@@ -96,10 +110,10 @@ impl Remote {
             compio::runtime::spawn(serve(service, give_up_after, ready_tx, rx)).detach();
         }))?;
 
-        ready_rx
+        let agent = ready_rx
             .await
             .map_err(|_| anyhow!("the agent I/O thread stopped before connecting"))??;
-        Ok(Self { tx })
+        Ok(Self { tx, agent })
     }
 
     async fn call(&self, request: Request) -> Result<Reply> {
@@ -160,8 +174,12 @@ impl Remote {
     }
 
     /// The agent pushes every sample `spec` is due, with the lists it was
-    /// taken against, until the watch is dropped.
+    /// taken against, until the watch is dropped. An agent that cannot
+    /// watch ([`Remote::can_watch`]) is refused here, before anything is sent.
     pub async fn watch(&self, spec: MetricSpec) -> Result<RemoteWatch> {
+        if !self.can_watch() {
+            bail!("the agent speaks windows {}; watch needs 2.2", self.agent);
+        }
         let (updates, rx) = mpsc::unbounded();
         let (release, released) = oneshot::channel();
         let request = Request::WatchAgent {
@@ -267,17 +285,17 @@ fn run_io(mut queue: mpsc::UnboundedReceiver<Job>) {
 async fn serve(
     service: String,
     give_up_after: Duration,
-    ready: oneshot::Sender<Result<()>>,
+    ready: oneshot::Sender<Result<Version>>,
     mut rx: mpsc::UnboundedReceiver<Envelope>,
 ) {
-    let session = match Session::connect(&service, give_up_after).await {
-        Ok(session) => Rc::new(session),
+    let (session, agent) = match Session::connect(&service, give_up_after).await {
+        Ok((session, agent)) => (Rc::new(session), agent),
         Err(error) => {
             let _ = ready.send(Err(error));
             return;
         }
     };
-    if ready.send(Ok(())).is_err() {
+    if ready.send(Ok(agent)).is_err() {
         return;
     }
 
@@ -425,20 +443,22 @@ struct Session {
 }
 
 impl Session {
-    async fn connect(service: &str, give_up_after: Duration) -> Result<Self> {
+    async fn connect(service: &str, give_up_after: Duration) -> Result<(Self, Version)> {
         let endpoint = Endpoint::for_service(APP_NAME, service).map_err(|e| anyhow!("{e:?}"))?;
         let mut conn = endpoint
             .connect_ready(give_up_after)
             .await
             .map_err(|e| anyhow!("{e:?}"))?;
-        authenticate_client(&mut conn, &HandshakeMode::version_only(), PROTOCOL)
+        let agent = authenticate_client(&mut conn, &HandshakeMode::version_only(), PROTOCOL)
             .await
-            .map_err(|e| anyhow!("{e:?}"))?;
-        Ok(Self {
+            .map_err(|e| anyhow!("{e:?}"))?
+            .ok_or_else(|| anyhow!("the agent did not say its version"))?;
+        let session = Self {
             rpc: spawn_session(conn, Side::Client, ClientStub),
             cache: RefCell::new(Cache::default()),
             nonce: Cell::new(0),
-        })
+        };
+        Ok((session, agent))
     }
 
     fn client(&self) -> &windows_agent::Client {
@@ -682,12 +702,67 @@ mod tests {
 
     #[test]
     fn a_pipe_nobody_serves_is_an_error_every_time() {
+        assert!(Endpoint::for_service(APP_NAME, "uniproc-no-agent-serves-this").is_ok());
         for _ in 0..2 {
             let connected = futures::executor::block_on(Remote::connect_to(
-                "uniproc.no-agent-serves-this",
+                "uniproc-no-agent-serves-this",
                 Duration::from_millis(200),
             ));
             assert!(connected.is_err());
         }
+    }
+
+    struct Answering;
+
+    impl windows_agent::Server for Answering {}
+
+    /// Serves `name` on the I/O thread as an agent of windows 2.`minor`
+    /// that answers no method.
+    fn serve_as(name: &'static str, minor: u32) {
+        use ogurpchik::auth::handshake::Protocol;
+        use ogurpchik::rpc::SessionAcceptor;
+
+        let (up, listening) = std::sync::mpsc::channel();
+        submit(Box::new(move || {
+            compio::runtime::spawn(async move {
+                let endpoint = Endpoint::for_service(APP_NAME, name).expect("pipe name");
+                let listener = endpoint.listen().await.expect("listen");
+                let _ = up.send(());
+                let protocol = Protocol::new(PROTOCOL.id, PROTOCOL.version.major, minor, 0);
+                let mut acceptor = SessionAcceptor::new(&listener, HandshakeMode::version_only(), protocol);
+                while let Ok(session) = acceptor.next::<windows_agent::Client, _>(Answering).await {
+                    compio::runtime::spawn(async move {
+                        let _ = session.wait().await;
+                    })
+                    .detach();
+                }
+            })
+            .detach();
+        }))
+        .unwrap();
+        listening.recv_timeout(Duration::from_secs(5)).expect("the agent listens");
+    }
+
+    #[test]
+    fn an_agent_older_than_2_2_says_so_and_is_not_asked_to_watch() {
+        serve_as("uniproc-test-agent-2-1", 1);
+        let remote = futures::executor::block_on(Remote::connect_to("uniproc-test-agent-2-1", Duration::from_secs(5)))
+            .expect("connect");
+        let agent = remote.agent_version();
+        assert_eq!((agent.major, agent.minor), (PROTOCOL.version.major, 1));
+        assert!(!remote.can_watch());
+        let refused = futures::executor::block_on(remote.watch(MetricSpec::default())).err().expect("refused");
+        assert!(refused.to_string().contains("watch needs 2.2"), "{refused:#}");
+    }
+
+    #[test]
+    fn this_agent_can_watch() {
+        serve_as("uniproc-test-agent-current", PROTOCOL.version.minor);
+        let remote =
+            futures::executor::block_on(Remote::connect_to("uniproc-test-agent-current", Duration::from_secs(5)))
+                .expect("connect");
+        let agent = remote.agent_version();
+        assert_eq!((agent.major, agent.minor), (PROTOCOL.version.major, PROTOCOL.version.minor));
+        assert!(remote.can_watch());
     }
 }
