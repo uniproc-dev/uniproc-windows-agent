@@ -30,7 +30,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 arc-swap = "1.7"
 
-compio = { version = "0.18.0", features = ["time"] }
+compio = { version = "0.19.1", features = ["time"] }
 futures = "0.3"
 
 [profile.profiling]

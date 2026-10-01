@@ -14,6 +14,6 @@ uniproc-protocol = { git = "https://github.com/uniproc-dev/uniproc-protocol", ta
 futures = "0.3"
 capnp = "0.27"
 capnp-rpc = "0.27"
-compio = { version = "0.18.0", features = ["time"] }
+compio = { version = "0.19.1", features = ["time"] }
 anyhow = "1"
 tracing = "0.1"
