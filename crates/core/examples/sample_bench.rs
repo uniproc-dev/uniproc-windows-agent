@@ -10,7 +10,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {

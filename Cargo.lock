@@ -154,9 +154,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arc-swap"
@@ -350,12 +350,6 @@ name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
@@ -864,7 +858,7 @@ dependencies = [
  "lazy_static",
  "mintex",
  "parking_lot",
- "rustc-hash",
+ "rustc-hash 1.1.0",
  "serde",
  "serde_json",
  "thousands",
@@ -1137,15 +1131,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "fxhash"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
-dependencies = [
- "byteorder",
 ]
 
 [[package]]
@@ -1901,6 +1886,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2070,9 +2061,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
 ]
@@ -2406,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-agent"
-version = "0.1.0"
+version = "0.14.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2427,17 +2418,17 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-core"
-version = "0.1.0"
+version = "0.14.6"
 dependencies = [
  "amethystate",
  "anyhow",
  "binrw",
  "crossbeam-channel",
  "enumset",
- "fxhash",
  "ntapi",
  "parking_lot",
  "roxmltree",
+ "rustc-hash 2.1.3",
  "serde",
  "smol_str",
  "tracing",
@@ -2448,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-http"
-version = "0.1.0"
+version = "0.14.6"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -2462,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-rpc"
-version = "0.1.0"
+version = "0.14.6"
 dependencies = [
  "anyhow",
  "capnp",
@@ -2477,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-service"
-version = "0.1.0"
+version = "0.14.6"
 dependencies = [
  "anyhow",
  "clap",

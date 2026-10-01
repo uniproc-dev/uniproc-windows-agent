@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 use windows::Win32::{
     D3DKMT_ADAPTER_PERFDATA, D3DKMT_ADAPTERINFO, D3DKMT_ADAPTERREGISTRYINFO, D3DKMT_ADAPTERTYPE,

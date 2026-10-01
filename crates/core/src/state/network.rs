@@ -1,4 +1,4 @@
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 use crate::state::events::NetDeltas;
 use crate::state::process::ProcessTable;

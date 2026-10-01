@@ -1,8 +1,10 @@
 [package]
 name = "uniproc-windows-core"
-version = "0.1.0"
+version = "0.14.6"
 edition = "2024"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", features = [
@@ -13,7 +15,7 @@ windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", 
     "winver", "fileapi", "appmodel", "shellapi", "shlwapi",
     "mscat", "mssip", "wincrypt", "wintrust", "ntsecapi", "winuser", "wow64apiset", "netioapi"] }
 ntapi = "0.4.3"
-fxhash = "0.2.1"
+rustc-hash = "2"
 binrw = "0.15.0"
 amethystate = { version = "0.22", default-features = false, features = ["redb"] }
 serde = { version = "1", features = ["derive", "rc"] }

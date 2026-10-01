@@ -90,11 +90,11 @@ impl NetDelta {
     }
 }
 
-pub type NetDeltas = fxhash::FxHashMap<u32, NetDelta>;
+pub type NetDeltas = rustc_hash::FxHashMap<u32, NetDelta>;
 
 /// Disk transfers keyed by the thread that issued them. Cached writes are
 /// issued by the lazy writer's threads and so land on System.
-pub type DiskDeltas = fxhash::FxHashMap<u32, DiskDelta>;
+pub type DiskDeltas = rustc_hash::FxHashMap<u32, DiskDelta>;
 
 #[derive(Clone, Debug)]
 pub struct NetworkEvent {

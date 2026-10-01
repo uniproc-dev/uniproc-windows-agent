@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use fxhash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
 use crate::model::{Architecture, DpiAwareness, Isolation, Mitigations, ProcessState, UacVirtualization};

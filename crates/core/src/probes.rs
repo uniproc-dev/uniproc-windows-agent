@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use windows::Win32::{
     CloseHandle, GetCurrentProcessId, GetGuiResources, HANDLE, NtQueryInformationProcess,
     PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, ProcessIdToSessionId,

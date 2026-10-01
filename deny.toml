@@ -1,0 +1,53 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; it reaches us only as a proc-macro of compio-driver" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+deny = []
+skip = [
+    { crate = "windows-sys", reason = "windows-service, winreg and socket2 each pin their own windows-sys" },
+    { crate = "windows-targets", reason = "follows the windows-sys versions above" },
+    { crate = "windows_x86_64_msvc", reason = "follows the windows-targets versions above" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/microsoft/windows-rs",
+]
+
+[sources.allow-org]
+github = ["guinea-rs", "uniproc-dev"]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+exceptions = []
+
+[licenses.private]
+ignore = true
