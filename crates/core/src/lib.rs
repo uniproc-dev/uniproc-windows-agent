@@ -2,6 +2,7 @@
 #![allow(non_snake_case, non_camel_case_types)]
 
 mod aligned;
+pub mod data;
 mod etw;
 mod model;
 mod privileges;

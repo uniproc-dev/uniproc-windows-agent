@@ -3,7 +3,6 @@ mod service;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tracing::info;
 use uniproc_windows_agent::api::{SERVICE_DISPLAY_NAME, SERVICE_NAME};
 
 const SERVICE_DESC: &str = "Provides system monitoring (processes, disk I/O, network, CPU) \
@@ -45,17 +44,17 @@ fn main() -> Result<()> {
         Some(Command::Install) => {
             service::install(SERVICE_NAME, SERVICE_DISPLAY_NAME, SERVICE_DESC)
                 .context("Failed to install service")?;
-            info!("[+] Service installed successfully.");
+            println!("[+] Service installed successfully.");
         }
         Some(Command::Uninstall) => {
             service::uninstall(SERVICE_NAME).context("Failed to uninstall service")?;
-            info!("[+] Service uninstalled successfully.");
+            println!("[+] Service uninstalled successfully.");
         }
         Some(Command::Run) => {
             service::run_direct(logger::init())?;
         }
         None => {
-            service::run_as_service(SERVICE_NAME)?;
+            service::run_as_service()?;
         }
     }
 

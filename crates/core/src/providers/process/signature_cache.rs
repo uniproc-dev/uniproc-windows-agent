@@ -61,11 +61,13 @@ pub fn file_stamp(path: &str) -> Option<(u64, u64)> {
     Some((meta.len(), modified))
 }
 
-fn store_path(name: &str) -> PathBuf {
-    let root = std::env::var_os("ProgramData")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"));
-    root.join("Uniproc").join(name)
+/// Where the store `name` lives, with the files its backends write claimed
+/// for the agent.
+fn store_path(name: &str) -> std::io::Result<PathBuf> {
+    for extension in ["redb", "meta", "json"] {
+        crate::data::claim(&format!("{name}.{extension}"))?;
+    }
+    Ok(crate::data::dir()?.join(name))
 }
 
 fn builder(path: PathBuf) -> StoreBuilder {
@@ -104,13 +106,13 @@ impl Drop for PersistentSignatures {
 }
 
 pub fn open(name: &str) -> Option<PersistentSignatures> {
-    let path = store_path(name);
-    if let Some(parent) = path.parent()
-        && let Err(err) = std::fs::create_dir_all(parent)
-    {
-        tracing::warn!(%err, "could not create the signature cache directory");
-        return None;
-    }
+    let path = match store_path(name) {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::warn!(%err, "the signature cache stays in memory: the agent's directory is not its own");
+            return None;
+        }
+    };
 
     let store = match builder(path).build() {
         Ok(store) => store,

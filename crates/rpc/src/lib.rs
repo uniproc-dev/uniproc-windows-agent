@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use ogurpchik::auth::handshake::HandshakeMode;
 use ogurpchik::endpoint::Endpoint;
+pub use ogurpchik::net::Listener;
 use ogurpchik::rpc::SessionAcceptor;
 use uniproc_protocol::windows_capnp::windows_agent;
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
@@ -15,12 +16,19 @@ use uniproc_windows_agent::wire::PROTOCOL;
 
 use crate::handler::AgentImpl;
 
-/// Serves the agent on the service's pipe, a session per client, until the runtime stops.
-pub async fn run(agent: Arc<Local>) -> Result<()> {
+/// The service's pipe, bound; fails when another process holds its name.
+pub async fn listen() -> Result<Listener> {
     let endpoint = Endpoint::for_service(APP_NAME, WINDOWS_AGENT_SERVICE)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let listener = endpoint.listen().await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let mut acceptor = SessionAcceptor::new(&listener, HandshakeMode::version_only(), PROTOCOL);
+    endpoint
+        .listen()
+        .await
+        .map_err(|e| anyhow::anyhow!("the agent's pipe: {e:?}"))
+}
+
+/// Serves the agent on `listener`, a session per client, until the runtime stops.
+pub async fn serve(listener: &Listener, agent: Arc<Local>) -> Result<()> {
+    let mut acceptor = SessionAcceptor::new(listener, HandshakeMode::version_only(), PROTOCOL);
     let attached = Rc::new(Cell::new(0usize));
 
     loop {

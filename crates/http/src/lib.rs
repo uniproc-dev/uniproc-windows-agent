@@ -33,7 +33,8 @@ use uniproc_windows_agent::local::Local;
 const PREFERRED: &str = "127.0.0.1:47386";
 
 /// Where it answers and what it wants, written where the agent's own data
-/// lives: whoever cannot read that directory cannot ask.
+/// lives, which only SYSTEM and Administrators can read: whoever cannot
+/// read that directory cannot ask.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Access {
     pub url: String,
@@ -49,10 +50,7 @@ pub fn access_path() -> PathBuf {
 
 impl Access {
     fn write(&self) -> io::Result<()> {
-        let path = access_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let path = uniproc_windows_agent::data::claim("agent.http.json")?;
         let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
         std::fs::write(path, text)
     }

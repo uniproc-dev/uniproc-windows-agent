@@ -1,6 +1,6 @@
 [package]
 name = "uniproc-windows-core"
-version = "0.14.6"
+version = "0.14.7"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,8 @@ windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", 
     "processthreadsapi", "winbase", "securitybaseapi", "winternl", "ntddk", "memoryapi",
     "profileapi", "pdh", "powerbase", "sysinfoapi",
     "winver", "fileapi", "appmodel", "shellapi", "shlwapi",
-    "mscat", "mssip", "wincrypt", "wintrust", "ntsecapi", "winuser", "wow64apiset", "netioapi"] }
+    "mscat", "mssip", "wincrypt", "wintrust", "ntsecapi", "winuser", "wow64apiset", "netioapi",
+    "aclapi", "accctrl", "sddl"] }
 ntapi = "0.4.3"
 rustc-hash = "2"
 binrw = "0.15.0"
