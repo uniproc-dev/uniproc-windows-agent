@@ -288,15 +288,23 @@ pub fn process_states(list: struct_list::Reader<'_, process_state::Owned>) -> Ar
 
 /// The lists after one watch update, applied to `before`, which the previous
 /// updates built, and what moved in them. Fails on a delta that does not
-/// apply to what `before` holds.
-pub fn lists(before: Option<&Snapshot>, lists: lists_update::Reader<'_>) -> capnp::Result<(Snapshot, Changes)> {
+/// apply to what `before` holds. None when a list comes in a form this
+/// client does not know: the caller reads the lists afresh.
+pub fn lists(before: Option<&Snapshot>, lists: lists_update::Reader<'_>) -> capnp::Result<Option<(Snapshot, Changes)>> {
+    let (Ok(passport_list), Ok(state_list), Ok(service_list)) = (
+        lists.get_passports().which(),
+        lists.get_states().which(),
+        lists.get_services().which(),
+    ) else {
+        return Ok(None);
+    };
     let mut changes = Changes {
         full: before.is_none(),
         ..Changes::default()
     };
     let passport_etag = lists.get_passport_etag();
 
-    let processes = match lists.get_passports().which()? {
+    let processes = match passport_list {
         lists_update::passports::Unchanged(()) => held(before, |s| &s.processes)?.value.clone(),
         lists_update::passports::Full(list) => {
             let list = processes(list?)?;
@@ -314,7 +322,7 @@ pub fn lists(before: Option<&Snapshot>, lists: lists_update::Reader<'_>) -> capn
         }
     };
 
-    let states = match lists.get_states().which()? {
+    let states = match state_list {
         lists_update::states::Unchanged(()) => held(before, |s| &s.states)?.value.states.clone(),
         lists_update::states::Full(list) => {
             let list = process_states(list?);
@@ -331,7 +339,7 @@ pub fn lists(before: Option<&Snapshot>, lists: lists_update::Reader<'_>) -> capn
         }
     };
 
-    let services = match lists.get_services().which()? {
+    let services = match service_list {
         lists_update::services::Unchanged(()) => held(before, |s| &s.services)?.value.clone(),
         lists_update::services::Full(list) => {
             changes.services = true;
@@ -353,7 +361,7 @@ pub fn lists(before: Option<&Snapshot>, lists: lists_update::Reader<'_>) -> capn
             value: ProcessStates { passport_etag, states },
         },
     };
-    Ok((snapshot, changes))
+    Ok(Some((snapshot, changes)))
 }
 
 fn held<'a, T>(before: Option<&'a Snapshot>, list: impl Fn(&'a Snapshot) -> &'a Tagged<T>) -> capnp::Result<&'a Tagged<T>> {

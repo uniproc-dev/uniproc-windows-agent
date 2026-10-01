@@ -137,8 +137,46 @@ mod tests {
         let mut message = capnp::message::Builder::new_default();
         encode::update(&update, before, message.init_root::<agent_listener::update_params::Builder>()).unwrap();
         let reader = message.get_root_as_reader::<agent_listener::update_params::Reader>().unwrap();
-        let applied = decode::lists(before, reader.get_lists().unwrap()).unwrap();
+        let applied = decode::lists(before, reader.get_lists().unwrap()).unwrap().expect("known lists");
         (update, applied)
+    }
+
+    fn update_words(lists: &Snapshot, before: Option<&Snapshot>) -> Vec<u8> {
+        let update = Update {
+            snapshot: lists.clone(),
+            sample: full_sample(),
+            changes: crate::watch::changes(before, lists),
+        };
+        let mut message = capnp::message::Builder::new_default();
+        encode::update(&update, before, message.init_root::<agent_listener::update_params::Builder>()).unwrap();
+        capnp::serialize::write_message_to_words(&message)
+    }
+
+    /// Where the data section of the update's lists starts in `words`.
+    fn lists_data(words: &[u8]) -> (usize, usize) {
+        let message = capnp::serialize::read_message_from_flat_slice(&mut &words[..], Default::default()).unwrap();
+        let lists = message.get_root::<agent_listener::update_params::Reader>().unwrap().get_lists().unwrap();
+        let data = capnp::raw::get_struct_data_section(lists);
+        (data.as_ptr() as usize - words.as_ptr() as usize, data.len())
+    }
+
+    #[test]
+    fn lists_in_a_form_this_client_does_not_know_ask_for_a_fresh_read() {
+        let first = lists((1, 1, 1), vec![process(100)], vec![state(100)], &["a"]);
+        let full = update_words(&first, None);
+        let mut unchanged = update_words(&first, Some(&first));
+        let (full_at, len) = lists_data(&full);
+        let (unchanged_at, _) = lists_data(&unchanged);
+        let differing: Vec<usize> = (0..len).filter(|&i| full[full_at + i] != unchanged[unchanged_at + i]).collect();
+        assert!(!differing.is_empty(), "the unions' discriminants differ");
+        for i in differing {
+            let at = unchanged_at + (i & !1);
+            unchanged[at..at + 2].copy_from_slice(&0x7fffu16.to_le_bytes());
+        }
+
+        let message = capnp::serialize::read_message_from_flat_slice(&mut &unchanged[..], Default::default()).unwrap();
+        let reader = message.get_root::<agent_listener::update_params::Reader>().unwrap();
+        assert!(matches!(decode::lists(Some(&first), reader.get_lists().unwrap()), Ok(None)));
     }
 
     #[test]
@@ -193,6 +231,7 @@ mod tests {
         let elsewhere = lists((9, 9, 1), vec![process(100)], vec![state(100)], &[]);
         assert!(decode::lists(Some(&elsewhere), reader.get_lists().unwrap()).is_err());
         assert!(decode::lists(None, reader.get_lists().unwrap()).is_err());
+        assert!(matches!(decode::lists(Some(&first), reader.get_lists().unwrap()), Ok(Some(_))));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -17,7 +17,7 @@ use uniproc_protocol::windows_capnp::{agent_listener, sampler, service_watcher, 
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
 
 use crate::api::{
-    Command, CommandResult, MetricSpec, ProcessInfo, ProcessStates, Sample, ServiceStats,
+    Changes, Command, CommandResult, MetricSpec, ProcessInfo, ProcessStates, Sample, ServiceStats,
     ServiceStatus, Snapshot, Tagged, Update,
 };
 use crate::wire::{self, PROTOCOL, decode, encode};
@@ -373,18 +373,45 @@ struct ListenerImpl {
     spec: MetricSpec,
     snapshot: RefCell<Option<Snapshot>>,
     updates: mpsc::UnboundedSender<Delivery>,
+    session: Weak<Session>,
 }
 
 impl ListenerImpl {
-    fn decode(&self, params: &agent_listener::UpdateParams) -> Result<Update> {
+    /// None when the lists came in a form this client does not know.
+    fn decode(&self, params: &agent_listener::UpdateParams) -> Result<Option<Update>> {
         let params = params.get()?;
-        let (snapshot, changes) = decode::lists(self.snapshot.borrow().as_ref(), params.get_lists()?)?;
+        let Some((snapshot, changes)) = decode::lists(self.snapshot.borrow().as_ref(), params.get_lists()?)? else {
+            return Ok(None);
+        };
         let sample = decode::sample(params.get_processes()?, params.get_machine()?, self.spec)?;
+        *self.snapshot.borrow_mut() = Some(snapshot.clone());
+        Ok(Some(Update {
+            snapshot,
+            sample,
+            changes,
+        }))
+    }
+
+    /// The update with the lists read afresh through the session, all of
+    /// them counted as new.
+    async fn resync(&self, params: &agent_listener::UpdateParams) -> Result<Update> {
+        let sample = {
+            let params = params.get()?;
+            decode::sample(params.get_processes()?, params.get_machine()?, self.spec)?
+        };
+        let session = self.session.upgrade().ok_or_else(|| anyhow!("the agent session ended"))?;
+        let snapshot = session
+            .snapshot()
+            .await?
+            .ok_or_else(|| anyhow!("the lists kept changing while they were read afresh"))?;
         *self.snapshot.borrow_mut() = Some(snapshot.clone());
         Ok(Update {
             snapshot,
             sample,
-            changes,
+            changes: Changes {
+                full: true,
+                ..Changes::default()
+            },
         })
     }
 
@@ -405,7 +432,11 @@ impl agent_listener::Server for ListenerImpl {
         params: agent_listener::UpdateParams,
         _: agent_listener::UpdateResults,
     ) -> Result<(), capnp::Error> {
-        let update = self.decode(&params);
+        let update = match self.decode(&params) {
+            Ok(Some(update)) => Ok(update),
+            Ok(None) => self.resync(&params).await,
+            Err(e) => Err(e),
+        };
         let failed = update.as_ref().err().map(|e| capnp::Error::failed(format!("{e:#}")));
         self.deliver(update).await?;
         failed.map_or(Ok(()), Err)
@@ -432,8 +463,15 @@ fn etag<T>(held: &Option<Tagged<T>>) -> u64 {
     held.as_ref().map_or(0, |t| t.etag)
 }
 
-fn not_modified(meta: response_meta::Reader<'_>) -> bool {
-    matches!(meta.get_status(), Ok(ResponseStatus::NotModified))
+/// Whether the agent left the payload out because the caller's tag still
+/// holds. A status this client does not know is an error, so nothing is
+/// kept under its etag.
+fn not_modified(meta: response_meta::Reader<'_>) -> Result<bool> {
+    match meta.get_status() {
+        Ok(ResponseStatus::Ok) => Ok(false),
+        Ok(ResponseStatus::NotModified) => Ok(true),
+        Err(capnp::NotInSchema(status)) => bail!("the agent answered with status {status}, which this client does not know"),
+    }
 }
 
 struct Session {
@@ -465,7 +503,7 @@ impl Session {
         self.rpc.remote()
     }
 
-    async fn dispatch(&self, request: Request) -> Result<Reply> {
+    async fn dispatch(self: Rc<Self>, request: Request) -> Result<Reply> {
         match request {
             Request::Ping => self.ping().await.map(|()| Reply::Pong),
             Request::Snapshot => self.snapshot().await.map(Reply::Snapshot),
@@ -501,6 +539,7 @@ impl Session {
                     spec,
                     snapshot: RefCell::new(None),
                     updates,
+                    session: Rc::downgrade(&self),
                 };
                 let mut request = self.client().watch_request();
                 encode::metric_spec(&spec, request.get().init_spec());
@@ -540,7 +579,7 @@ impl Session {
     fn keep_processes(&self, reply: &Response<windows_agent::get_processes_results::Owned>) -> Result<()> {
         let reply = reply.get()?;
         let meta = reply.get_meta()?;
-        if !not_modified(meta) {
+        if !not_modified(meta)? {
             self.cache.borrow_mut().processes = Some(Tagged {
                 etag: meta.get_etag(),
                 value: decode::processes(reply.get_processes()?)?,
@@ -552,7 +591,7 @@ impl Session {
     fn keep_services(&self, reply: &Response<windows_agent::get_services_results::Owned>) -> Result<()> {
         let reply = reply.get()?;
         let meta = reply.get_meta()?;
-        if !not_modified(meta) {
+        if !not_modified(meta)? {
             self.cache.borrow_mut().services = Some(Tagged {
                 etag: meta.get_etag(),
                 value: decode::services(reply.get_services()?)?,
@@ -573,7 +612,7 @@ impl Session {
     fn keep_states(&self, reply: &Response<windows_agent::get_process_states_results::Owned>) -> Result<()> {
         let reply = reply.get()?;
         let meta = reply.get_meta()?;
-        if !not_modified(meta) {
+        if !not_modified(meta)? {
             self.cache.borrow_mut().states = Some(Tagged {
                 etag: meta.get_etag(),
                 value: ProcessStates {
@@ -710,6 +749,29 @@ mod tests {
             ));
             assert!(connected.is_err());
         }
+    }
+
+    fn meta_with_status(status: u16) -> Vec<u8> {
+        let mut words = Vec::new();
+        words.extend_from_slice(&0x0000_0002_0000_0000u64.to_le_bytes());
+        words.extend_from_slice(&7u64.to_le_bytes());
+        words.extend_from_slice(&(status as u64).to_le_bytes());
+        words
+    }
+
+    #[test]
+    fn a_status_this_client_does_not_know_is_an_error() {
+        let read = |status: u16| {
+            let words = meta_with_status(status);
+            let segments: &[&[u8]] = &[&words];
+            let message = capnp::message::Reader::new(capnp::message::SegmentArray::new(segments), Default::default());
+            let meta = message.get_root::<response_meta::Reader>().unwrap();
+            assert_eq!(meta.get_etag(), 7);
+            not_modified(meta).map_err(|e| e.to_string())
+        };
+        assert_eq!(read(0), Ok(false));
+        assert_eq!(read(1), Ok(true));
+        assert!(read(2).is_err_and(|e| e.contains("status 2")));
     }
 
     struct Answering;
