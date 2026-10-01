@@ -13,16 +13,53 @@ use uniproc_windows_agent::api::{Command, CommandResult, Snapshot};
 use uniproc_windows_agent::local::{Local, LocalSampler, LocalWatch, ServiceWatch};
 use uniproc_windows_agent::wire::{self, decode, encode};
 
+/// How many samplers and watches one session may hold at once.
+pub const MAX_HELD: usize = 256;
+
 #[derive(Clone)]
 pub struct AgentImpl {
     agent: Arc<Local>,
     peer: Rc<Cell<Option<Version>>>,
+    held: Holds,
+}
+
+/// The samplers and watches of one session.
+#[derive(Clone, Default)]
+struct Holds(Rc<Cell<usize>>);
+
+impl Holds {
+    fn take(&self) -> Result<Hold, capnp::Error> {
+        if self.0.get() >= MAX_HELD {
+            return Err(capnp::Error::overloaded(format!(
+                "a session holds at most {MAX_HELD} samplers and watches"
+            )));
+        }
+        self.0.set(self.0.get() + 1);
+        Ok(Hold(self.0.clone()))
+    }
+}
+
+/// One sampler or watch a session holds, given back on drop.
+struct Hold(Rc<Cell<usize>>);
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
 }
 
 impl AgentImpl {
     /// `peer` is the version the client presented, set once its handshake is done.
     pub fn new(agent: Arc<Local>, peer: Rc<Cell<Option<Version>>>) -> Self {
-        Self { agent, peer }
+        Self {
+            agent,
+            peer,
+            held: Holds::default(),
+        }
+    }
+
+    fn hold(&self) -> Result<Hold, capnp::Error> {
+        self.held.take()
     }
 
     /// A command that panicked fails the call rather than answer a code.
@@ -39,6 +76,7 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 struct SamplerImpl {
     sampler: LocalSampler,
     gaps: bool,
+    _hold: Hold,
 }
 
 impl sampler::Server for SamplerImpl {
@@ -61,6 +99,7 @@ impl sampler::Server for SamplerImpl {
 
 struct WatchHandleImpl {
     _release: oneshot::Sender<()>,
+    _hold: Hold,
 }
 
 impl watch_handle::Server for WatchHandleImpl {}
@@ -204,9 +243,11 @@ impl windows_agent::Server for AgentImpl {
         mut results: windows_agent::SubscribeResults,
     ) -> Result<(), capnp::Error> {
         let spec = decode::metric_spec(params.get()?.get_spec()?)?;
+        let hold = self.hold()?;
         let sampler = SamplerImpl {
             sampler: self.agent.subscribe(spec),
             gaps: wire::takes_gaps(self.peer.get()),
+            _hold: hold,
         };
         unconditional(results.get().init_meta());
         results.get().set_sampler(capnp_rpc::new_client(sampler));
@@ -287,12 +328,14 @@ impl windows_agent::Server for AgentImpl {
         let params = params.get()?;
         let name = name(params.get_name()?)?;
         let watcher = params.get_watcher()?;
+        let hold = self.hold()?;
         let (release, released) = oneshot::channel();
         compio::runtime::spawn(forward(self.agent.watch_service(&name), watcher, released)).detach();
         unconditional(results.get().init_meta());
-        results
-            .get()
-            .set_handle(capnp_rpc::new_client(WatchHandleImpl { _release: release }));
+        results.get().set_handle(capnp_rpc::new_client(WatchHandleImpl {
+            _release: release,
+            _hold: hold,
+        }));
         Ok(())
     }
 
@@ -304,12 +347,14 @@ impl windows_agent::Server for AgentImpl {
         let params = params.get()?;
         let spec = decode::metric_spec(params.get_spec()?)?;
         let listener = params.get_listener()?;
+        let hold = self.hold()?;
         let (release, released) = oneshot::channel();
         compio::runtime::spawn(push(self.agent.watch(spec), listener, released)).detach();
         unconditional(results.get().init_meta());
-        results
-            .get()
-            .set_handle(capnp_rpc::new_client(WatchHandleImpl { _release: release }));
+        results.get().set_handle(capnp_rpc::new_client(WatchHandleImpl {
+            _release: release,
+            _hold: hold,
+        }));
         Ok(())
     }
 
@@ -318,4 +363,21 @@ impl windows_agent::Server for AgentImpl {
     service_method!(service_pause, ServicePauseParams, ServicePauseResults, ServicePause);
     service_method!(service_resume, ServiceResumeParams, ServiceResumeResults, ServiceResume);
     service_method!(service_restart, ServiceRestartParams, ServiceRestartResults, ServiceRestart);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_holds_up_to_the_limit_and_a_release_makes_room() {
+        let holds = Holds::default();
+        let mut held: Vec<Hold> = (0..MAX_HELD).map(|_| holds.take().expect("under the limit")).collect();
+        let refused = holds.take().err().expect("over the limit");
+        assert_eq!(refused.kind, capnp::ErrorKind::Overloaded);
+        held.pop();
+        held.push(holds.take().expect("a released one makes room"));
+        drop(held);
+        assert_eq!(holds.0.get(), 0);
+    }
 }

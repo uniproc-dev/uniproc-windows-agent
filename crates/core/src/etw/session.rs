@@ -4,9 +4,9 @@ use anyhow::{Result, bail};
 use tracing::{info, warn};
 use windows::Win32::{
     CONTROLTRACE_ID, ControlTraceW, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION_2,
-    ERROR_ALREADY_EXISTS, ERROR_SUCCESS, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+    ERROR_ALREADY_EXISTS, ERROR_MORE_DATA, ERROR_SUCCESS, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
     EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
-    EVENT_TRACE_SYSTEM_LOGGER_MODE, EnableTraceEx2, StartTraceW, StopTraceW,
+    EVENT_TRACE_SYSTEM_LOGGER_MODE, EnableTraceEx2, QueryAllTracesW, StartTraceW, StopTraceW,
     TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
 };
 use windows::core::{GUID, PCWSTR};
@@ -87,18 +87,52 @@ pub struct SessionCounters {
 
 impl Drop for EtwSession {
     fn drop(&mut self) {
-        let w = session_name_wide(&self.name);
-        let name_ptr = PCWSTR(w.as_ptr());
-        let props_size = size_of::<EVENT_TRACE_PROPERTIES>() + w.len() * 2 + 512;
-        let mut buf = AlignedBuf::zeroed(props_size);
-        let props = unsafe { build_props(&mut buf, None, 0, SessionMode::Normal) };
-        let _ = unsafe { StopTraceW(CONTROLTRACE_ID::default(), name_ptr, props) };
+        stop(&self.name);
         info!("ETW session '{}' stopped", self.name);
     }
 }
 
 pub fn session_name_wide(name: &str) -> Vec<u16> {
     name.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Stops the session of this name; true when ETW had one.
+pub fn stop(name: &str) -> bool {
+    let w = session_name_wide(name);
+    let props_size = size_of::<EVENT_TRACE_PROPERTIES>() + w.len() * 2 + 512;
+    let mut buf = AlignedBuf::zeroed(props_size);
+    let props = unsafe { build_props(&mut buf, None, 0, SessionMode::Normal) };
+    unsafe { StopTraceW(CONTROLTRACE_ID::default(), PCWSTR(w.as_ptr()), props) == ERROR_SUCCESS as u32 }
+}
+
+/// The names of the trace sessions running now, as many as ETW lists.
+pub fn running() -> Vec<String> {
+    const MOST: usize = 64;
+    const NAME_BYTES: usize = 1024;
+    let stride = size_of::<EVENT_TRACE_PROPERTIES>() + 2 * NAME_BYTES;
+    let mut buf = AlignedBuf::zeroed(stride * MOST);
+    let base = buf.as_mut_ptr();
+    let mut all: Vec<*mut EVENT_TRACE_PROPERTIES> = (0..MOST)
+        .map(|i| unsafe {
+            let props = base.add(i * stride).cast::<EVENT_TRACE_PROPERTIES>();
+            (*props).Wnode.BufferSize = stride as u32;
+            (*props).LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+            (*props).LogFileNameOffset = (size_of::<EVENT_TRACE_PROPERTIES>() + NAME_BYTES) as u32;
+            props
+        })
+        .collect();
+    let mut listed = 0u32;
+    let status = unsafe { QueryAllTracesW(all.as_mut_ptr(), MOST as u32, &mut listed) };
+    if status != ERROR_SUCCESS as u32 && status != ERROR_MORE_DATA as u32 {
+        return Vec::new();
+    }
+    all[..(listed as usize).min(MOST)]
+        .iter()
+        .filter_map(|&props| unsafe {
+            let name = props.cast::<u8>().add((*props).LoggerNameOffset as usize).cast::<u16>();
+            PCWSTR(name).to_string().ok()
+        })
+        .collect()
 }
 
 fn start_raw(
@@ -212,14 +246,6 @@ mod tests {
         props.EnableFlags
     }
 
-    fn stop(name: &str) {
-        let w = session_name_wide(name);
-        let size = size_of::<EVENT_TRACE_PROPERTIES>() + 2048;
-        let mut buf = AlignedBuf::zeroed(size);
-        let props = unsafe { build_props(&mut buf, None, 0, SessionMode::Normal) };
-        let _ = unsafe { StopTraceW(CONTROLTRACE_ID::default(), PCWSTR(w.as_ptr()), props) };
-    }
-
     #[test]
     #[ignore = "requires admin and a real ETW session"]
     fn a_leftover_session_is_restarted_with_its_flags() {
@@ -236,5 +262,18 @@ mod tests {
         let after_restart = enabled_flags(name);
         stop(name);
         assert_eq!(after_restart, flags, "the restarted session lost its kernel flags");
+    }
+
+    #[test]
+    #[ignore = "requires admin and a real ETW session"]
+    fn a_running_session_is_listed_and_stopped_by_name() {
+        let name = "Uniproc-ListTest";
+        stop(name);
+        let session = EtwSession::start(name, 0, SessionMode::Normal).unwrap();
+        assert!(running().iter().any(|n| n == name), "{:?}", running());
+        assert!(stop(name));
+        assert!(!running().iter().any(|n| n == name));
+        assert!(!stop(name), "nothing left to stop");
+        drop(session);
     }
 }

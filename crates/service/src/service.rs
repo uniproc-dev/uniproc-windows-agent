@@ -194,8 +194,9 @@ pub fn install(service_name: &str, display_name: &str, description: &str) -> Res
     Ok(())
 }
 
-/// Stops the service, waits up to a minute for it to stop, and deletes it.
-pub fn uninstall(service_name: &str) -> Result<()> {
+/// Stops the service, waits up to a minute for it to stop, deletes it, and
+/// stops the trace sessions a killed service left behind, which it names.
+pub fn uninstall(service_name: &str) -> Result<Vec<String>> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     let service = manager.open_service(
         service_name,
@@ -210,5 +211,5 @@ pub fn uninstall(service_name: &str) -> Result<()> {
         std::thread::sleep(Duration::from_millis(250));
     }
     service.delete()?;
-    Ok(())
+    Ok(uniproc_windows_agent::stop_leftover_sessions())
 }

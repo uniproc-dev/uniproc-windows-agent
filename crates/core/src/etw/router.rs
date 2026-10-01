@@ -8,7 +8,7 @@ use windows::Win32::{EVENT_RECORD, ProcessTrace};
 use windows::core::{GUID, w};
 
 use crate::etw::consumer::{Events, TraceConsumer};
-use crate::etw::session::{EtwSession, SessionMode};
+use crate::etw::session::{self, EtwSession, SessionMode};
 use crate::etw::vars::{KERNEL_SESSION_NAME, SESSION_NAME_PREFIX};
 use crate::report::SessionHealth;
 use crate::sink::Sink;
@@ -21,6 +21,29 @@ fn manifest_session_name(guid: &GUID) -> String {
 
 fn manifest_session_name_in(prefix: &str, guid: &GUID) -> String {
     format!("{prefix}{guid:?}").replace(['{', '}'], "")
+}
+
+/// Whether a router in the default namespace starts a session of this name;
+/// one in another namespace never does.
+pub fn is_default_session(name: &str) -> bool {
+    name == KERNEL_SESSION_NAME || name.strip_prefix(SESSION_NAME_PREFIX).is_some_and(is_guid)
+}
+
+fn is_guid(text: &str) -> bool {
+    text.len() == 36
+        && text.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Stops the sessions a router in the default namespace left running, as a
+/// killed service does, and names them.
+pub fn stop_leftover_sessions() -> Vec<String> {
+    session::running()
+        .into_iter()
+        .filter(|name| is_default_session(name) && session::stop(name))
+        .collect()
 }
 
 /// `d` in the unit of an event's TimeStamp: the consumer is opened without
@@ -364,6 +387,22 @@ pub(crate) mod tests {
     pub(crate) static ETW_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     const TEST_GUID: GUID = guid!("9a280ac0-c8e0-11d1-84e2-00c04fb998a2");
+
+    #[test]
+    fn only_the_default_namespace_s_sessions_are_its_own() {
+        assert!(is_default_session(KERNEL_SESSION_NAME));
+        assert!(is_default_session(&manifest_session_name(&KERNEL_PROCESS_PROVIDER)));
+        for other in [
+            "Uniproc-Embedded-Kernel".to_string(),
+            manifest_session_name_in("Uniproc-Embedded-", &KERNEL_PROCESS_PROVIDER),
+            manifest_session_name_in("Uniproc-HealthTest-", &KERNEL_PROCESS_PROVIDER),
+            "Uniproc-RestartTest".to_string(),
+            "Uniproc-Kernel-2".to_string(),
+            "NT Kernel Logger".to_string(),
+        ] {
+            assert!(!is_default_session(&other), "{other}");
+        }
+    }
 
     fn session_exists(name: &str) -> bool {
         let out = std::process::Command::new("logman")

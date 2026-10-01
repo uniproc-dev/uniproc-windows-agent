@@ -26,6 +26,10 @@ pub async fn listen() -> Result<Listener> {
         .map_err(|e| anyhow::anyhow!("the agent's pipe: {e:?}"))
 }
 
+/// How many clients the agent serves at once; one more is let go after its
+/// handshake.
+pub const MAX_SESSIONS: usize = 16;
+
 /// Serves the agent on `listener`, a session per client, until the runtime stops.
 pub async fn serve(listener: &Listener, agent: Arc<Local>) -> Result<()> {
     let mut acceptor = SessionAcceptor::new(listener, HandshakeMode::version_only(), PROTOCOL);
@@ -37,6 +41,10 @@ pub async fn serve(listener: &Listener, agent: Arc<Local>) -> Result<()> {
             .next::<windows_agent::Client, _>(AgentImpl::new(agent.clone(), peer.clone()))
             .await
             .map_err(|e| anyhow::anyhow!("the agent's pipe stopped accepting: {e:?}"))?;
+        if attached.get() >= MAX_SESSIONS {
+            tracing::warn!("a client let go: {MAX_SESSIONS} sessions are open already");
+            continue;
+        }
         peer.set(session.peer_version());
         attached.set(attached.get() + 1);
         agent.set_attached(true);

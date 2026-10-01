@@ -2397,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-agent"
-version = "0.14.8"
+version = "0.14.9"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-core"
-version = "0.14.8"
+version = "0.14.9"
 dependencies = [
  "amethystate",
  "anyhow",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-http"
-version = "0.14.8"
+version = "0.14.9"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -2453,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-rpc"
-version = "0.14.8"
+version = "0.14.9"
 dependencies = [
  "anyhow",
  "capnp",
@@ -2468,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-service"
-version = "0.14.8"
+version = "0.14.9"
 dependencies = [
  "anyhow",
  "clap",

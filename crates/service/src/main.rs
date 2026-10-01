@@ -47,8 +47,11 @@ fn main() -> Result<()> {
             println!("[+] Service installed successfully.");
         }
         Some(Command::Uninstall) => {
-            service::uninstall(SERVICE_NAME).context("Failed to uninstall service")?;
+            let leftovers = service::uninstall(SERVICE_NAME).context("Failed to uninstall service")?;
             println!("[+] Service uninstalled successfully.");
+            for name in leftovers {
+                println!("[+] Stopped the leftover trace session {name}.");
+            }
         }
         Some(Command::Run) => {
             service::run_direct(logger::init())?;

@@ -28,6 +28,7 @@ pub use sample::{
     MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample, MetricSpec, NO_DATA_U32,
     NO_DATA_U64, ProcessMetric, ProcessMetrics, Sample,
 };
+pub use etw::router::stop_leftover_sessions;
 pub use smol_str::SmolStr;
 pub use supervisor::{Supervisor, SupervisorConfig};
 pub use uniproc_agent_kit::{Epoch, Tagged};

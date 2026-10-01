@@ -7,7 +7,7 @@ pub mod local;
 pub mod remote;
 pub mod wire;
 
-pub use uniproc_windows_core::data;
+pub use uniproc_windows_core::{data, stop_leftover_sessions};
 
 mod commands;
 mod feed;
