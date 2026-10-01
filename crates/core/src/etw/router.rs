@@ -322,6 +322,12 @@ impl KernelRouter {
         self.core.lock().hand_over_due(timestamp_now());
     }
 
+    /// Sets how many milliseconds every session holds a buffer that is not
+    /// full yet.
+    pub fn set_flush_timer(&self, ms: u32) -> Result<()> {
+        self.sessions.iter().try_for_each(|session| session.set_flush_timer(ms))
+    }
+
     /// Whether every session still runs and is still read.
     pub fn healthy(&self) -> bool {
         self.health().iter().all(SessionHealth::is_healthy)
@@ -621,6 +627,45 @@ pub(crate) mod tests {
 
         assert!(disk, "no StateChange::Disk after taking over a leftover kernel session");
         assert!(network, "no StateChange::Network after taking over a leftover kernel session");
+    }
+
+    #[test]
+    #[ignore = "requires admin; a measurement, run in release with --nocapture"]
+    fn what_a_short_flush_timer_costs() {
+        use windows::Win32::{FILETIME, GetCurrentProcess, GetProcessTimes};
+        let cpu = || {
+            let (mut created, mut exited, mut kernel, mut user) = Default::default();
+            unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) }.unwrap();
+            let ticks = |t: FILETIME| (t.dwHighDateTime as u64) << 32 | t.dwLowDateTime as u64;
+            std::time::Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+        };
+        let (sink, rx) = Sink::bounded(1 << 16, || {});
+        let mut builder = KernelRouter::builder();
+        builder.session_namespace("Uniproc-FlushCost-");
+        crate::providers::disk::KernelDiskProvider::new().register(&mut builder).unwrap();
+        crate::providers::network::KernelNetworkProvider::new().register(&mut builder).unwrap();
+        let router = builder.start(sink).expect("router start");
+        let span = std::time::Duration::from_secs(30);
+        for ms in [50, 1000, 50, 1000] {
+            router.set_flush_timer(ms).unwrap();
+            let written = |r: &KernelRouter| r.sessions.iter().filter_map(|s| s.query()).map(|c| c.buffers_written).sum::<u32>();
+            let (cpu0, buffers0, start) = (cpu(), written(&router), std::time::Instant::now());
+            let mut changes = 0usize;
+            while start.elapsed() < span {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                router.flush();
+                changes += rx.try_iter().count();
+            }
+            let used = cpu() - cpu0;
+            eprintln!(
+                "flush {ms:>4} ms: cpu {:>7.1} ms over {}s ({:.4}% of one core), {} buffers, {changes} changes",
+                used.as_secs_f64() * 1000.0,
+                span.as_secs(),
+                used.as_secs_f64() / span.as_secs_f64() * 100.0,
+                written(&router) - buffers0,
+            );
+        }
+        drop(router);
     }
 
     #[test]

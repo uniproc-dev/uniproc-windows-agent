@@ -5,7 +5,7 @@ use tracing::{info, warn};
 use windows::Win32::{
     CONTROLTRACE_ID, ControlTraceW, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION_2,
     ERROR_ALREADY_EXISTS, ERROR_MORE_DATA, ERROR_SUCCESS, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-    EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
+    EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_UPDATE, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
     EVENT_TRACE_SYSTEM_LOGGER_MODE, EnableTraceEx2, QueryAllTracesW, StartTraceW, StopTraceW,
     TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
 };
@@ -49,22 +49,9 @@ impl EtwSession {
     /// longer has one. Asked by name: a logger id ETW freed may since name
     /// someone else's session.
     pub fn query(&self) -> Option<SessionCounters> {
-        let size = size_of::<EVENT_TRACE_PROPERTIES>() + 2048;
-        let mut buf = AlignedBuf::zeroed(size);
-        let props = unsafe { &mut *(buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES) };
-        props.Wnode.BufferSize = size as u32;
-        props.LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
-        props.LogFileNameOffset = (size_of::<EVENT_TRACE_PROPERTIES>() + 1024) as u32;
-        let name = session_name_wide(&self.name);
-        let status = unsafe {
-            ControlTraceW(
-                CONTROLTRACE_ID::default(),
-                PCWSTR(name.as_ptr()),
-                props,
-                EVENT_TRACE_CONTROL_QUERY as u32,
-            )
-        };
-        (status == ERROR_SUCCESS as u32).then_some(SessionCounters {
+        let mut buf = control(&self.name, EVENT_TRACE_CONTROL_QUERY as u32, None)?;
+        let props = unsafe { &*(buf.as_mut_ptr() as *const EVENT_TRACE_PROPERTIES) };
+        Some(SessionCounters {
             events_lost: props.EventsLost,
             realtime_buffers_lost: props.RealTimeBuffersLost,
             log_buffers_lost: props.LogBuffersLost,
@@ -73,6 +60,34 @@ impl EtwSession {
             free_buffers: props.FreeBuffers,
         })
     }
+
+    /// Sets how many milliseconds ETW holds a buffer that is not full yet.
+    /// Everything else the session was started with stays.
+    pub fn set_flush_timer(&self, ms: u32) -> Result<()> {
+        let Some(mut current) = control(&self.name, EVENT_TRACE_CONTROL_QUERY as u32, None) else {
+            bail!("ETW session '{}' is gone", self.name);
+        };
+        let props = unsafe { &mut *(current.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES) };
+        props.FlushTimer = ms;
+        if control(&self.name, EVENT_TRACE_CONTROL_UPDATE as u32, Some(current)).is_none() {
+            bail!("ETW session '{}' kept its flush timer", self.name);
+        }
+        Ok(())
+    }
+}
+
+/// Runs `code` on the session of this name with `props`, or with blank
+/// ones, and answers what ETW wrote back; None when ETW refused.
+fn control(name: &str, code: u32, props: Option<AlignedBuf>) -> Option<AlignedBuf> {
+    let size = size_of::<EVENT_TRACE_PROPERTIES>() + 2048;
+    let mut buf = props.unwrap_or_else(|| AlignedBuf::zeroed(size));
+    let props = unsafe { &mut *(buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES) };
+    props.Wnode.BufferSize = buf.len() as u32;
+    props.LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+    props.LogFileNameOffset = (size_of::<EVENT_TRACE_PROPERTIES>() + 1024) as u32;
+    let name = session_name_wide(name);
+    let status = unsafe { ControlTraceW(CONTROLTRACE_ID::default(), PCWSTR(name.as_ptr()), props, code) };
+    (status == ERROR_SUCCESS as u32).then_some(buf)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -226,24 +241,29 @@ mod tests {
         EVENT_TRACE_FLAG_DISK_IO, EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROFILE,
     };
 
+    fn queried(name: &str) -> EVENT_TRACE_PROPERTIES {
+        let mut buf = control(name, EVENT_TRACE_CONTROL_QUERY as u32, None).unwrap_or_else(|| panic!("query '{name}'"));
+        unsafe { *(buf.as_mut_ptr() as *const EVENT_TRACE_PROPERTIES) }
+    }
+
     fn enabled_flags(name: &str) -> u32 {
-        let w = session_name_wide(name);
-        let size = size_of::<EVENT_TRACE_PROPERTIES>() + 2048;
-        let mut buf = AlignedBuf::zeroed(size);
-        let props = unsafe { &mut *(buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES) };
-        props.Wnode.BufferSize = size as u32;
-        props.LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
-        props.LogFileNameOffset = (size_of::<EVENT_TRACE_PROPERTIES>() + 1024) as u32;
-        let status = unsafe {
-            ControlTraceW(
-                CONTROLTRACE_ID::default(),
-                PCWSTR(w.as_ptr()),
-                props,
-                EVENT_TRACE_CONTROL_QUERY as u32,
-            )
-        };
-        assert_eq!(status, ERROR_SUCCESS as u32, "query '{name}'");
-        props.EnableFlags
+        queried(name).EnableFlags
+    }
+
+    #[test]
+    #[ignore = "requires admin and a real ETW session"]
+    fn the_flush_timer_changes_and_the_kernel_flags_stay() {
+        crate::privileges::enable(windows::core::w!("SeSystemProfilePrivilege")).unwrap();
+        let flags = (EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_NETWORK_TCPIP) as u32;
+        let name = "Uniproc-FlushTest";
+        stop(name);
+        let session = EtwSession::start(name, flags, SessionMode::SystemLogger).unwrap();
+        assert_eq!(queried(name).FlushTimer, crate::etw::vars::FLUSH_TIMER_MS);
+        session.set_flush_timer(1000).unwrap();
+        let after = queried(name);
+        drop(session);
+        assert_eq!(after.FlushTimer, 1000);
+        assert_eq!(after.EnableFlags, flags, "the update cleared the kernel flags");
     }
 
     #[test]

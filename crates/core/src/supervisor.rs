@@ -6,6 +6,7 @@ use crossbeam_channel::Receiver;
 use windows::Win32::HANDLE;
 
 use crate::etw::router::KernelRouter;
+use crate::etw::vars::FLUSH_TIMER_MS;
 use crate::model::{ProcessPriority, ProcessState};
 use crate::probes::{self, Handles};
 use crate::providers::disk::KernelDiskProvider;
@@ -34,6 +35,9 @@ const FIRST_VERDICTS: Duration = Duration::from_secs(60);
 /// again when they do not.
 const SESSIONS_CHECKED: Duration = Duration::from_secs(30);
 
+/// The longest ETW holds a buffer that is not full yet.
+const SLOWEST_FLUSH_MS: u32 = 1000;
+
 /// What one running core names on the machine. Two cores with different
 /// configs do not touch each other; a second one with the same config takes
 /// the first one's sessions.
@@ -61,6 +65,8 @@ pub struct Supervisor {
     reader: Reader,
     demand: Demand,
     schedule: Schedule,
+    /// What the sessions' flush timer was last set to, in milliseconds.
+    flush_timer: u32,
     snapshot_error: Option<String>,
 }
 
@@ -141,6 +147,7 @@ impl Supervisor {
             reader,
             demand,
             schedule,
+            flush_timer: FLUSH_TIMER_MS,
             snapshot_error: None,
         };
         supervisor.reader.sample(&first, true).context("the first snapshot")?;
@@ -155,7 +162,15 @@ impl Supervisor {
     /// sample among it, and samples nothing more itself.
     pub fn tick(&mut self, diff: &mut Diff) {
         self.keep_sessions();
+        let specs = self.demand.get();
         if let Some(router) = &self.router {
+            let flush_timer = flush_timer_for(&specs);
+            if flush_timer != self.flush_timer {
+                if let Err(error) = router.set_flush_timer(flush_timer) {
+                    tracing::warn!(error = format!("{error:#}"), flush_timer, "the sessions keep their flush timer");
+                }
+                self.flush_timer = flush_timer;
+            }
             router.flush();
         }
         for change in self.rx.try_iter() {
@@ -166,7 +181,7 @@ impl Supervisor {
         }
 
         if self.reader.fresh.is_none()
-            && let Some(due) = self.schedule.take(&self.demand.get(), Instant::now())
+            && let Some(due) = self.schedule.take(&specs, Instant::now())
         {
             match self.reader.sample(&due.spec, due.reads_processes) {
                 Ok(()) => {
@@ -202,6 +217,7 @@ impl Supervisor {
             Ok(router) => {
                 tracing::info!("the sessions run again");
                 self.router = Some(router);
+                self.flush_timer = FLUSH_TIMER_MS;
             }
             Err(error) => tracing::warn!(error = format!("{error:#}"), "the sessions still do not start"),
         }
@@ -223,6 +239,19 @@ impl Supervisor {
     pub fn due(&self) -> Instant {
         self.schedule.due().unwrap_or_else(|| Instant::now() + MAX_INTERVAL)
     }
+}
+
+/// How many milliseconds ETW may hold a buffer that is not full yet: half
+/// the fastest interval, so a sample sees the events from before the last
+/// one, and never longer than [`SLOWEST_FLUSH_MS`]. A short timer costs a
+/// wake of the reading thread per processor per flush.
+fn flush_timer_for(specs: &[MetricSpec]) -> u32 {
+    specs
+        .iter()
+        .map(MetricSpec::period)
+        .min()
+        .map_or(SLOWEST_FLUSH_MS, |period| (period / 2).as_millis() as u32)
+        .clamp(FLUSH_TIMER_MS, SLOWEST_FLUSH_MS)
 }
 
 fn start_router(providers: &[Box<dyn Provider>], namespace: Option<&str>, sink: &Sink) -> Result<KernelRouter> {
@@ -438,6 +467,20 @@ mod tests {
         diff.passports.sort_unstable_by_key(|p| p.pid);
         diff.states.sort_unstable_by_key(|s| s.pid);
         diff
+    }
+
+    #[test]
+    fn the_flush_timer_follows_the_fastest_interval_within_its_bounds() {
+        let at = |intervals: &[u64]| {
+            let specs: Vec<MetricSpec> =
+                intervals.iter().map(|&ms| MetricSpec::idle(Duration::from_millis(ms))).collect();
+            flush_timer_for(&specs)
+        };
+        assert_eq!(at(&[]), SLOWEST_FLUSH_MS, "nobody subscribed");
+        assert_eq!(at(&[1000]), 500);
+        assert_eq!(at(&[5000, 1000]), 500, "the fastest decides");
+        assert_eq!(at(&[0]), FLUSH_TIMER_MS, "the shortest interval");
+        assert_eq!(at(&[60_000]), SLOWEST_FLUSH_MS);
     }
 
     #[test]

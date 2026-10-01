@@ -20,6 +20,8 @@ updates:
       - dependency-name: "windows-reactor*"
       - dependency-name: "windows-canvas*"
       - dependency-name: "windows"
+      - dependency-name: "compio*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     groups:
       cargo:
         patterns: ["*"]
