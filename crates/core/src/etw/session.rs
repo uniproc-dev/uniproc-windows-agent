@@ -45,7 +45,9 @@ impl EtwSession {
         &self.name
     }
 
-    /// What ETW says about the session now; None when ETW no longer has it.
+    /// What ETW says about the session of this name now; None when ETW no
+    /// longer has one. Asked by name: a logger id ETW freed may since name
+    /// someone else's session.
     pub fn query(&self) -> Option<SessionCounters> {
         let size = size_of::<EVENT_TRACE_PROPERTIES>() + 2048;
         let mut buf = AlignedBuf::zeroed(size);
@@ -53,8 +55,14 @@ impl EtwSession {
         props.Wnode.BufferSize = size as u32;
         props.LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
         props.LogFileNameOffset = (size_of::<EVENT_TRACE_PROPERTIES>() + 1024) as u32;
+        let name = session_name_wide(&self.name);
         let status = unsafe {
-            ControlTraceW(self.handle, PCWSTR::null(), props, EVENT_TRACE_CONTROL_QUERY as u32)
+            ControlTraceW(
+                CONTROLTRACE_ID::default(),
+                PCWSTR(name.as_ptr()),
+                props,
+                EVENT_TRACE_CONTROL_QUERY as u32,
+            )
         };
         (status == ERROR_SUCCESS as u32).then_some(SessionCounters {
             events_lost: props.EventsLost,
@@ -84,7 +92,7 @@ impl Drop for EtwSession {
         let props_size = size_of::<EVENT_TRACE_PROPERTIES>() + w.len() * 2 + 512;
         let mut buf = AlignedBuf::zeroed(props_size);
         let props = unsafe { build_props(&mut buf, None, 0, SessionMode::Normal) };
-        let _ = unsafe { StopTraceW(self.handle, name_ptr, props) };
+        let _ = unsafe { StopTraceW(CONTROLTRACE_ID::default(), name_ptr, props) };
         info!("ETW session '{}' stopped", self.name);
     }
 }

@@ -7,7 +7,7 @@ use tracing::error;
 use windows::Win32::{EVENT_RECORD, ProcessTrace};
 use windows::core::{GUID, w};
 
-use crate::etw::consumer::{EventSink, TraceConsumer};
+use crate::etw::consumer::{Events, TraceConsumer};
 use crate::etw::session::{EtwSession, SessionMode};
 use crate::etw::vars::{KERNEL_SESSION_NAME, SESSION_NAME_PREFIX};
 use crate::report::SessionHealth;
@@ -23,10 +23,16 @@ fn manifest_session_name_in(prefix: &str, guid: &GUID) -> String {
     format!("{prefix}{guid:?}").replace(['{', '}'], "")
 }
 
-fn qpc_ticks(d: std::time::Duration) -> i64 {
-    let mut per_second = 0i64;
-    let _ = unsafe { windows::Win32::QueryPerformanceFrequency(&mut per_second) };
-    (d.as_secs_f64() * per_second as f64) as i64
+/// `d` in the unit of an event's TimeStamp: the consumer is opened without
+/// PROCESS_TRACE_MODE_RAW_TIMESTAMP, so ETW hands system time, 100 ns a tick.
+fn timestamp_ticks(d: std::time::Duration) -> i64 {
+    (d.as_nanos() / 100) as i64
+}
+
+/// System time now, in the unit of an event's TimeStamp.
+fn timestamp_now() -> i64 {
+    let now = unsafe { windows::Win32::GetSystemTimePreciseAsFileTime() };
+    ((now.dwHighDateTime as i64) << 32) | now.dwLowDateTime as i64
 }
 
 type Handler = Box<dyn FnMut(&EVENT_RECORD, &[u8], &mut Vec<StateChange>) + Send>;
@@ -94,8 +100,8 @@ impl KernelRouterBuilder {
 
     /// Routes `providers` into `batch`, handed over once `window` has passed
     /// since its first event. The deadline is checked on every event any
-    /// session delivers, so a quiet provider's batch does not wait for its
-    /// own next event.
+    /// session delivers and on every [`KernelRouter::flush`], so a batch
+    /// does not wait for a next event that may not come.
     pub fn batched(
         &mut self,
         providers: &'static [GUID],
@@ -105,7 +111,7 @@ impl KernelRouterBuilder {
         let idx = self.batches.len();
         self.batches.push(BatchSlot {
             batch: Box::new(batch),
-            window: qpc_ticks(window),
+            window: timestamp_ticks(window),
             since: None,
         });
         self.route(providers, Target::Batch(idx));
@@ -156,63 +162,56 @@ impl KernelRouterBuilder {
             kernel_session,
         } = self;
 
-        let mut core = Box::new(parking_lot::Mutex::new(RouterCore {
-            routes,
-            handlers,
-            batches,
-            sink,
-            scratch: Vec::new(),
-        }));
-        let ptr: *mut parking_lot::Mutex<RouterCore> = &mut *core;
-
-        let mut sessions = Vec::new();
-        let mut consumers = Vec::new();
+        let mut router = KernelRouter {
+            sessions: Vec::new(),
+            consumers: Vec::new(),
+            pumps: Vec::new(),
+            core: Box::new(parking_lot::Mutex::new(RouterCore {
+                routes,
+                handlers,
+                batches,
+                sink,
+                scratch: Vec::new(),
+            })),
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let core: *const parking_lot::Mutex<RouterCore> = &*router.core;
 
         if flags != 0 {
             crate::privileges::enable(w!("SeSystemProfilePrivilege"))?;
-            let session = EtwSession::start(&kernel_session, flags, SessionMode::SystemLogger)?;
-            // SAFETY: ptr points at `core`, which KernelRouter owns and drops
-            // only after every pump thread has been joined; callbacks from
-            // different sessions serialize on the mutex inside.
-            let consumer = unsafe { TraceConsumer::open(&kernel_session, ptr)? };
-            sessions.push(session);
-            consumers.push(consumer);
+            router
+                .sessions
+                .push(EtwSession::start(&kernel_session, flags, SessionMode::SystemLogger)?);
+            // SAFETY: `core` lives in `router`, whose Drop closes every
+            // consumer and joins every pump before the box is freed, on
+            // this path's errors too.
+            router.consumers.push(unsafe { TraceConsumer::open(&kernel_session, core)? });
         }
 
         for guid in &manifest {
             let name = manifest_session_name_in(&prefix, guid);
             let session = EtwSession::start(&name, 0, SessionMode::Normal)?;
             session.enable(guid)?;
-            // SAFETY: same as above.
-            let consumer = unsafe { TraceConsumer::open(&name, ptr)? };
-            sessions.push(session);
-            consumers.push(consumer);
+            router.sessions.push(session);
+            // SAFETY: as above.
+            router.consumers.push(unsafe { TraceConsumer::open(&name, core)? });
         }
 
-        let running = Arc::new(AtomicBool::new(true));
-        let mut pumps = Vec::with_capacity(consumers.len());
-        for consumer in &consumers {
-            let handle = consumer.handle();
-            let running_pump = running.clone();
-            pumps.push(
-                std::thread::Builder::new()
-                    .name("etw-pump".into())
-                    .spawn(move || {
-                        let status = unsafe { ProcessTrace(&[handle], None, None) };
-                        if running_pump.load(Ordering::SeqCst) {
-                            error!("ProcessTrace exited unexpectedly: {status:?}");
-                        }
-                    })?,
-            );
+        for index in 0..router.consumers.len() {
+            let handle = router.consumers[index].handle();
+            let running = router.running.clone();
+            let pump = std::thread::Builder::new()
+                .name("etw-pump".into())
+                .spawn(move || {
+                    let status = unsafe { ProcessTrace(&[handle], None, None) };
+                    if running.load(Ordering::SeqCst) {
+                        error!("ProcessTrace exited unexpectedly: {status:?}");
+                    }
+                })?;
+            router.pumps.push(pump);
         }
 
-        Ok(KernelRouter {
-            sessions,
-            consumers,
-            pumps,
-            core,
-            running,
-        })
+        Ok(router)
     }
 }
 
@@ -265,7 +264,7 @@ impl RouterCore {
     }
 }
 
-impl EventSink for RouterCore {
+impl Events for RouterCore {
     fn on_event(&mut self, record: &EVENT_RECORD) {
         let now = record.EventHeader.TimeStamp;
         self.deliver(record, now);
@@ -277,7 +276,6 @@ pub struct KernelRouter {
     sessions: Vec<EtwSession>,
     consumers: Vec<TraceConsumer>,
     pumps: Vec<JoinHandle<()>>,
-    #[allow(dead_code)] // pump callbacks dereference this via UserContext
     core: Box<parking_lot::Mutex<RouterCore>>,
     running: Arc<AtomicBool>,
 }
@@ -293,6 +291,17 @@ impl KernelRouter {
             prefix: SESSION_NAME_PREFIX.to_string(),
             kernel_session: KERNEL_SESSION_NAME.to_string(),
         }
+    }
+
+    /// Hands over every batch whose window has passed, whether or not
+    /// another event came to close it.
+    pub fn flush(&self) {
+        self.core.lock().hand_over_due(timestamp_now());
+    }
+
+    /// Whether every session still runs and is still read.
+    pub fn healthy(&self) -> bool {
+        self.health().iter().all(SessionHealth::is_healthy)
     }
 
     /// Each session as ETW sees it and whether its pump still reads it.
@@ -431,6 +440,34 @@ pub(crate) mod tests {
 
         core.on_event(&event_at(CHATTY, 5_000, &payload));
         assert!(rx.try_recv().is_err(), "an empty batch sends nothing");
+    }
+
+    #[test]
+    fn a_window_is_counted_in_the_unit_of_an_event_timestamp() {
+        assert_eq!(timestamp_ticks(std::time::Duration::from_millis(10)), 100_000);
+        let event = timestamp_now();
+        let from_std = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64
+            / 100
+            + 116_444_736_000_000_000;
+        assert!((event - from_std).abs() < 10_000_000, "both are 100 ns since 1601");
+    }
+
+    #[test]
+    fn the_last_batch_is_handed_over_without_another_event() {
+        let (sink, rx) = Sink::bounded(16, || {});
+        let mut builder = KernelRouter::builder();
+        builder.batched(&[QUIET], std::time::Duration::from_millis(1), Counting(0));
+        let router = builder.start(sink).expect("a router with no session starts anywhere");
+        let payload = [0u8; 4];
+        router.core.lock().on_event(&event_at(QUIET, timestamp_now(), &payload));
+        assert!(rx.try_recv().is_err());
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        router.flush();
+        assert!(matches!(rx.try_recv(), Ok(StateChange::Network(d)) if d.contains_key(&1)));
     }
 
     #[test]

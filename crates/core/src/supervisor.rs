@@ -30,6 +30,10 @@ use crate::state::process::Sighted;
 /// The longest the first snapshot waits for its images' verdicts.
 const FIRST_VERDICTS: Duration = Duration::from_secs(60);
 
+/// How often the core looks whether its sessions still run, and starts them
+/// again when they do not.
+const SESSIONS_CHECKED: Duration = Duration::from_secs(30);
+
 /// What one running core names on the machine. Two cores with different
 /// configs do not touch each other; a second one with the same config takes
 /// the first one's sessions.
@@ -46,7 +50,11 @@ pub struct SupervisorConfig {
 /// that is due for a sample reads what the due intervals want: the machine,
 /// and every process unless they want the machine alone.
 pub struct Supervisor {
-    router: KernelRouter,
+    /// None while the sessions could not be started; disk and network stay
+    /// silent then and everything else goes on.
+    router: Option<KernelRouter>,
+    sessions_checked: Instant,
+    session_namespace: Option<String>,
     sink: Sink,
     rx: Receiver<StateChange>,
     providers: Vec<Box<dyn Provider>>,
@@ -91,15 +99,13 @@ impl Supervisor {
         ];
         let (sink, rx) = Sink::bounded(crate::sink::DEFAULT_CAPACITY, move || wake());
 
-        let mut builder = KernelRouter::builder();
-        if let Some(prefix) = &config.session_namespace {
-            builder.session_namespace(prefix);
-        }
-        for p in &providers {
-            p.register(&mut builder)?;
-        }
-
-        let router = builder.start(sink.clone())?;
+        let router = match start_router(&providers, config.session_namespace.as_deref(), &sink) {
+            Ok(router) => Some(router),
+            Err(error) => {
+                tracing::warn!(error = format!("{error:#}"), "disk and network stay silent until the sessions start");
+                None
+            }
+        };
 
         for (started, p) in providers.iter().enumerate() {
             if let Err(e) = p.start(sink.clone()) {
@@ -127,6 +133,8 @@ impl Supervisor {
         let first = schedule.take(&demand.get(), sampled).map_or_else(MetricSpec::default, |due| due.spec);
         let mut supervisor = Self {
             router,
+            sessions_checked: sampled,
+            session_namespace: config.session_namespace,
             sink,
             rx,
             providers,
@@ -146,6 +154,10 @@ impl Supervisor {
     /// before the next tick. The first tick hands on everything, the first
     /// sample among it, and samples nothing more itself.
     pub fn tick(&mut self, diff: &mut Diff) {
+        self.keep_sessions();
+        if let Some(router) = &self.router {
+            router.flush();
+        }
         for change in self.rx.try_iter() {
             self.reader.state.apply(change);
         }
@@ -175,11 +187,31 @@ impl Supervisor {
         diff.sample = self.reader.fresh.take();
     }
 
+    /// Every [`SESSIONS_CHECKED`], starts the sessions again when one was
+    /// stopped from outside, taken by another core or never came up.
+    fn keep_sessions(&mut self) {
+        if self.sessions_checked.elapsed() < SESSIONS_CHECKED {
+            return;
+        }
+        self.sessions_checked = Instant::now();
+        if self.router.as_ref().is_some_and(KernelRouter::healthy) {
+            return;
+        }
+        self.router = None;
+        match start_router(&self.providers, self.session_namespace.as_deref(), &self.sink) {
+            Ok(router) => {
+                tracing::info!("the sessions run again");
+                self.router = Some(router);
+            }
+            Err(error) => tracing::warn!(error = format!("{error:#}"), "the sessions still do not start"),
+        }
+    }
+
     /// What the core says about itself now.
     pub fn health(&self) -> Health {
         Health {
             dropped_by_sink: self.sink.dropped(),
-            sessions: self.router.health(),
+            sessions: self.router.as_ref().map_or_else(Vec::new, KernelRouter::health),
             snapshot_error: self.snapshot_error.clone(),
             taken_at: Instant::now(),
         }
@@ -191,6 +223,17 @@ impl Supervisor {
     pub fn due(&self) -> Instant {
         self.schedule.due().unwrap_or_else(|| Instant::now() + MAX_INTERVAL)
     }
+}
+
+fn start_router(providers: &[Box<dyn Provider>], namespace: Option<&str>, sink: &Sink) -> Result<KernelRouter> {
+    let mut builder = KernelRouter::builder();
+    if let Some(prefix) = namespace {
+        builder.session_namespace(prefix);
+    }
+    for p in providers {
+        p.register(&mut builder)?;
+    }
+    builder.start(sink.clone())
 }
 
 impl Reader {
@@ -434,6 +477,37 @@ mod tests {
         assert!(columns.private_working_set.as_ref().unwrap()[me] > 0);
         assert!(columns.handles.as_ref().unwrap()[me] > 0);
         assert!(next.machine.cpu.is_some() && next.machine.memory.is_some());
+    }
+
+    #[test]
+    #[ignore = "requires admin and a real ETW session"]
+    fn a_session_stopped_from_outside_is_started_again() {
+        let _guard = crate::etw::router::tests::ETW_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let demand = Demand::new([MetricSpec {
+            interval: Duration::from_secs(60),
+            processes: ProcessMetrics::empty(),
+            machine: MachineMetric::Disk.into(),
+        }]);
+        let mut supervisor = Supervisor::start(config(), demand, || {}).expect("elevated");
+        let name = supervisor.health().sessions[0].name.clone();
+        let stopped = std::process::Command::new("logman")
+            .args(["stop", &name, "-ets"])
+            .output()
+            .expect("logman stop");
+        assert!(stopped.status.success(), "{stopped:?}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while supervisor.health().sessions[0].is_healthy() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!supervisor.health().sessions[0].is_healthy());
+
+        supervisor.sessions_checked = Instant::now() - SESSIONS_CHECKED;
+        tick(&mut supervisor);
+        let sessions = supervisor.health().sessions;
+        assert!(sessions.iter().all(|s| s.is_healthy()), "{sessions:?}");
+        assert_eq!(sessions[0].name, name);
     }
 
     #[test]
