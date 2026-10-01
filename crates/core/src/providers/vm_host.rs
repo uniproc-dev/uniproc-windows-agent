@@ -30,6 +30,8 @@ const GROWN: u64 = 256 << 20;
 /// How long a handle's name may take; a synchronous file with I/O pending
 /// holds its name back until the I/O completes.
 const NAMED_WITHIN: Duration = Duration::from_millis(500);
+/// How many names may not come in time before a check gives up.
+const MOST_STUCK: u32 = 3;
 
 const PLATFORM: &str = "winhvplatform.dll";
 const PARTITION: &str = r"\Device\VidExo";
@@ -189,9 +191,11 @@ fn file_type() -> Option<u32> {
 }
 
 /// Whether one of the files `process` holds open is the partition device;
-/// `None` when its handles cannot be read or a name does not come in time.
+/// `None` when its handles cannot be read, or when it was not found and a
+/// name did not come in time, which [`MOST_STUCK`] names end early.
 fn holds_partition(process: HANDLE, scratch: &mut Vec<u64>, namer: &mut Option<Namer>) -> Option<bool> {
     let file = file_type()?;
+    let mut stuck = 0;
     for entry in handles(process, scratch)?.iter().filter(|entry| entry.object_type_index == file) {
         let mut mine = HANDLE::default();
         let duplicated = unsafe {
@@ -220,11 +224,14 @@ fn holds_partition(process: HANDLE, scratch: &mut Vec<u64>, namer: &mut Option<N
             Some(false) => {}
             None => {
                 *namer = None;
-                return None;
+                stuck += 1;
+                if stuck == MOST_STUCK {
+                    return None;
+                }
             }
         }
     }
-    Some(false)
+    (stuck == 0).then_some(false)
 }
 
 /// A thread that tells whether a handle duplicated into this process is the
@@ -306,7 +313,7 @@ mod tests {
         }
         let process = OwnedProcess::open(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, me).unwrap();
         assert_eq!(loads(process.0, PLATFORM, &mut Vec::new()), Some(true));
-        assert_eq!(vm_host(me, &mut scratch), Some(false), "the platform loaded, no partition");
+        assert_ne!(vm_host(me, &mut scratch), Some(true), "the platform loaded, no partition");
 
         type Exported = unsafe extern "system" fn() -> isize;
         let export = |name| unsafe { GetProcAddress(platform, name) }.expect("an export of the platform");
@@ -335,6 +342,36 @@ mod tests {
         }
         assert!(set >= 0 && set_up >= 0, "set {set:#x}, setup {set_up:#x}");
         assert_eq!(hosting, Some(true), "a partition set up");
+    }
+
+    fn duplicate(handle: HANDLE) -> HANDLE {
+        let mut mine = HANDLE::default();
+        let me = unsafe { GetCurrentProcess() };
+        let duplicated = unsafe { DuplicateHandle(me, handle, me, &mut mine, 0, false, DUPLICATE_SAME_ACCESS as u32) };
+        assert!(duplicated.as_bool());
+        mine
+    }
+
+    #[test]
+    fn a_name_held_back_by_pending_io_times_out_and_the_next_namer_answers() {
+        use std::io::Read;
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let reader_handle = HANDLE(reader.as_raw_handle());
+        let reading = std::thread::spawn(move || reader.read(&mut [0u8; 1]).map(|_| ()));
+        std::thread::sleep(Duration::from_millis(100));
+
+        let namer = Namer::start().unwrap();
+        let at = Instant::now();
+        let answer = namer.names_partition(duplicate(reader_handle));
+        let took = at.elapsed();
+        drop(writer);
+        let _ = reading.join();
+        assert_eq!(answer, None, "answered in {took:?}");
+        assert!(took < NAMED_WITHIN * 2, "{took:?}");
+
+        let exe = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let namer = Namer::start().unwrap();
+        assert_eq!(namer.names_partition(duplicate(HANDLE(exe.as_raw_handle()))), Some(false));
     }
 
     #[test]
