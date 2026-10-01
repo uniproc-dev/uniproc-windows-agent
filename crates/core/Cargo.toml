@@ -2,6 +2,7 @@
 name = "uniproc-windows-core"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", features = [
