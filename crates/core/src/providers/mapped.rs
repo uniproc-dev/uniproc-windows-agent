@@ -18,7 +18,9 @@ use crate::win::OwnedProcess;
 const SHARE_COUNT_SHIFT: usize = 5;
 const SHARE_COUNT_MASK: usize = 0b111;
 const SHARED: usize = 1 << 8;
-const FIRST_BLOCKS: usize = 1 << 16;
+const FIRST_BLOCKS: usize = 1 << 14;
+/// The most of the blocks buffer kept between walks: a working set of 64 MB.
+const KEPT_BLOCKS: usize = FIRST_BLOCKS;
 
 /// How far the shared working set moves before the process is probed again:
 /// this many bytes, or one part in [`MOVED_PARTS`].
@@ -78,9 +80,10 @@ fn page_size() -> u64 {
 fn share_counts_visible() -> bool {
     static VISIBLE: OnceLock<bool> = OnceLock::new();
     *VISIBLE.get_or_init(|| {
-        let mut blocks = Vec::new();
-        working_set(std::process::id(), &mut blocks)
-            .is_some_and(|blocks| blocks.iter().any(|&block| block & SHARED != 0 && share_count(block) < SHARE_COUNT_MASK))
+        walk(std::process::id(), &mut Vec::new(), |blocks| {
+            blocks.iter().any(|&block| block & SHARED != 0 && share_count(block) < SHARE_COUNT_MASK)
+        })
+        .unwrap_or(false)
     })
 }
 
@@ -94,10 +97,23 @@ fn exclusive_mapped(pid: u32, blocks: &mut Vec<usize>) -> u64 {
     if !share_counts_visible() {
         return NO_DATA_U64;
     }
-    working_set(pid, blocks).map_or(NO_DATA_U64, |blocks| {
+    walk(pid, blocks, |blocks| {
         let alone = blocks.iter().filter(|&&block| block & SHARED != 0 && share_count(block) == 1).count();
         alone as u64 * page_size()
     })
+    .unwrap_or(NO_DATA_U64)
+}
+
+/// Hands `count` the working set blocks of `pid`, read into `blocks`; keeps
+/// no more of `blocks` afterwards than [`KEPT_BLOCKS`], so one large process
+/// does not hold its size for good.
+fn walk<T>(pid: u32, blocks: &mut Vec<usize>, count: impl FnOnce(&[usize]) -> T) -> Option<T> {
+    let counted = working_set(pid, blocks).map(count);
+    if blocks.capacity() > KEPT_BLOCKS {
+        blocks.truncate(KEPT_BLOCKS);
+        blocks.shrink_to(KEPT_BLOCKS);
+    }
+    counted
 }
 
 /// The working set blocks of `pid`, read into `blocks`, which grows as needed.
@@ -186,6 +202,28 @@ mod tests {
         drop(file);
         let _ = std::fs::remove_file(&path);
         holds_it_alone(counted);
+    }
+
+    #[test]
+    fn a_large_working_set_is_not_kept_after_its_walk() {
+        let size = 128usize << 20;
+        let mapping = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE as u32, 0, size as u32, None) };
+        assert!(!mapping.0.is_null(), "a mapping");
+        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_WRITE as u32, 0, 0, size) };
+        assert!(!view.is_null(), "a view of the mapping");
+        let bytes = unsafe { std::slice::from_raw_parts_mut(view as *mut u8, size) };
+        for page in bytes.chunks_mut(page_size() as usize) {
+            page[0] = 7;
+        }
+        let mut blocks = Vec::new();
+        let walked = walk(std::process::id(), &mut blocks, |blocks| blocks.len());
+        unsafe {
+            let _ = UnmapViewOfFile(view);
+            let _ = windows::Win32::CloseHandle(mapping);
+        }
+        let pages = size / page_size() as usize;
+        assert!(walked.is_some_and(|walked| walked >= pages), "walked {walked:?} blocks with {pages} pages written");
+        assert!(blocks.capacity() <= KEPT_BLOCKS, "kept {} blocks", blocks.capacity());
     }
 
     #[test]

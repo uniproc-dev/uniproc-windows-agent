@@ -41,6 +41,8 @@ const OBJECT_NAME_INFORMATION: OBJECT_INFORMATION_CLASS = 1;
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
 const HANDLES_HEADER: usize = 2 * size_of::<usize>();
 const FIRST_HANDLE_WORDS: usize = 4096;
+/// The most of the handle buffer kept between checks: some 800 handles.
+const KEPT_HANDLE_WORDS: usize = FIRST_HANDLE_WORDS;
 const FIRST_MODULES: usize = 256;
 const NAME_WORDS: usize = 128;
 
@@ -184,10 +186,21 @@ fn file_type() -> Option<u32> {
     *FILE.get_or_init(|| {
         let file = std::fs::File::open(std::env::current_exe().ok()?).ok()?;
         let mine = file.as_raw_handle() as usize;
-        let mut scratch = Vec::new();
-        let entries = handles(unsafe { GetCurrentProcess() }, &mut scratch)?;
-        entries.iter().find(|entry| entry.handle == mine).map(|entry| entry.object_type_index)
+        with_handles(unsafe { GetCurrentProcess() }, &mut Vec::new(), |entries| {
+            entries.iter().find(|entry| entry.handle == mine).map(|entry| entry.object_type_index)
+        })?
     })
+}
+
+/// Hands `read` the handles `process` holds, read into `scratch`; keeps no
+/// more of `scratch` afterwards than [`KEPT_HANDLE_WORDS`].
+fn with_handles<T>(process: HANDLE, scratch: &mut Vec<u64>, read: impl FnOnce(&[HandleEntry]) -> T) -> Option<T> {
+    let read = handles(process, scratch).map(read);
+    if scratch.capacity() > KEPT_HANDLE_WORDS {
+        scratch.truncate(KEPT_HANDLE_WORDS);
+        scratch.shrink_to(KEPT_HANDLE_WORDS);
+    }
+    read
 }
 
 /// Whether one of the files `process` holds open is the partition device;
@@ -195,13 +208,16 @@ fn file_type() -> Option<u32> {
 /// name did not come in time, which [`MOST_STUCK`] names end early.
 fn holds_partition(process: HANDLE, scratch: &mut Vec<u64>, namer: &mut Option<Namer>) -> Option<bool> {
     let file = file_type()?;
+    let files: Vec<usize> = with_handles(process, scratch, |entries| {
+        entries.iter().filter(|entry| entry.object_type_index == file).map(|entry| entry.handle).collect()
+    })?;
     let mut stuck = 0;
-    for entry in handles(process, scratch)?.iter().filter(|entry| entry.object_type_index == file) {
+    for handle in files {
         let mut mine = HANDLE::default();
         let duplicated = unsafe {
             DuplicateHandle(
                 process,
-                HANDLE(entry.handle as *mut c_void),
+                HANDLE(handle as *mut c_void),
                 GetCurrentProcess(),
                 &mut mine,
                 0,
@@ -372,6 +388,17 @@ mod tests {
         let exe = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
         let namer = Namer::start().unwrap();
         assert_eq!(namer.names_partition(duplicate(HANDLE(exe.as_raw_handle()))), Some(false));
+    }
+
+    #[test]
+    fn a_large_handle_table_is_not_kept_after_its_read() {
+        let exe = std::env::current_exe().unwrap();
+        let opened: Vec<std::fs::File> = (0..3000).map(|_| std::fs::File::open(&exe).unwrap()).collect();
+        let mut scratch = Vec::new();
+        let read = with_handles(unsafe { GetCurrentProcess() }, &mut scratch, |entries| entries.len());
+        drop(opened);
+        assert!(read.is_some_and(|read| read >= 3000), "read {read:?} handles with 3000 files open");
+        assert!(scratch.capacity() <= KEPT_HANDLE_WORDS, "kept {} words", scratch.capacity());
     }
 
     #[test]
