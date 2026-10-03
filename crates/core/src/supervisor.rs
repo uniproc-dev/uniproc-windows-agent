@@ -40,6 +40,9 @@ const SESSIONS_CHECKED: Duration = Duration::from_secs(30);
 /// The longest ETW holds a buffer that is not full yet.
 const SLOWEST_FLUSH_MS: u32 = 1000;
 
+/// How often the providers hear how the sessions do.
+const HEALTH_TOLD_EVERY: Duration = Duration::from_secs(1);
+
 /// What one running core names on the machine. Two cores with different
 /// configs do not touch each other; a second one with the same config takes
 /// the first one's sessions.
@@ -69,6 +72,8 @@ pub struct Supervisor {
     schedule: Schedule,
     /// What the sessions' flush timer was last set to, in milliseconds.
     flush_timer: u32,
+    /// When the providers were last told how the sessions do.
+    health_told: Instant,
     snapshot_error: Option<String>,
 }
 
@@ -92,8 +97,14 @@ impl Supervisor {
     /// waits for the verdicts on its images (up to [`FIRST_VERDICTS`]).
     /// `demand` says what to sample and how often; whoever keeps the
     /// subscribers changes it. `wake` asks whoever ticks for a tick now:
-    /// a verdict came in, or events pile up.
-    pub fn start(config: SupervisorConfig, demand: Demand, wake: impl Fn() + Send + Sync + 'static) -> Result<Self> {
+    /// a verdict came in, or events pile up. `extra` are providers beside
+    /// disk and network, fed from the same sessions.
+    pub fn start(
+        config: SupervisorConfig,
+        demand: Demand,
+        extra: Vec<Box<dyn Provider>>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self> {
         if let Err(error) = crate::privileges::enable(windows::core::w!("SeDebugPrivilege")) {
             tracing::warn!(%error, "running without SeDebugPrivilege: other accounts' processes stay opaque");
         }
@@ -103,10 +114,11 @@ impl Supervisor {
             let wake = wake.clone();
             move || wake()
         })?;
-        let providers: Vec<Box<dyn Provider>> = vec![
+        let mut providers: Vec<Box<dyn Provider>> = vec![
             Box::new(KernelDiskProvider::new()),
             Box::new(KernelNetworkProvider::new()),
         ];
+        providers.extend(extra);
         let (sink, rx) = Sink::bounded(crate::sink::DEFAULT_CAPACITY, move || wake());
 
         let router = match start_router(&providers, config.session_namespace.as_deref(), &sink) {
@@ -154,6 +166,7 @@ impl Supervisor {
             demand,
             schedule,
             flush_timer: FLUSH_TIMER_MS,
+            health_told: sampled,
             snapshot_error: None,
         };
         supervisor.reader.sample(&first, true).context("the first snapshot")?;
@@ -178,6 +191,13 @@ impl Supervisor {
                 self.flush_timer = flush_timer;
             }
             router.flush();
+            if self.health_told.elapsed() >= HEALTH_TOLD_EVERY {
+                self.health_told = Instant::now();
+                let sessions = router.health();
+                for provider in &self.providers {
+                    provider.health(&sessions);
+                }
+            }
         }
         for change in self.rx.try_iter() {
             self.reader.state.apply(change);
@@ -511,7 +531,7 @@ mod tests {
             processes: ProcessMetrics::all(),
             machine: MachineMetrics::all(),
         }]);
-        let mut supervisor = Supervisor::start(config(), demand, || {}).expect("elevated");
+        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}).expect("elevated");
 
         let first = tick(&mut supervisor);
         let sample = first.sample.as_ref().expect("the first sample");
@@ -550,7 +570,7 @@ mod tests {
             processes: ProcessMetrics::empty(),
             machine: MachineMetric::Disk.into(),
         }]);
-        let mut supervisor = Supervisor::start(config(), demand, || {}).expect("elevated");
+        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}).expect("elevated");
         let name = supervisor.health().sessions[0].name.clone();
         let stopped = std::process::Command::new("logman")
             .args(["stop", &name, "-ets"])
@@ -582,7 +602,7 @@ mod tests {
             machine: MachineMetric::Cpu.into(),
         }]);
         let before = Instant::now();
-        let mut supervisor = Supervisor::start(config(), demand, || {}).expect("elevated");
+        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}).expect("elevated");
         let first = tick(&mut supervisor);
         let again = tick(&mut supervisor);
         assert!(again.sample.is_none());
@@ -608,7 +628,7 @@ mod tests {
                 machine: MachineMetrics::empty(),
             },
         ]);
-        let mut supervisor = Supervisor::start(config(), demand, || {}).expect("elevated");
+        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}).expect("elevated");
         let first = tick(&mut supervisor);
         assert!(!first.sample.unwrap().pids.is_empty());
 

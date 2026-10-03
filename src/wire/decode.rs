@@ -9,13 +9,15 @@ use uniproc_protocol::windows_capnp::{
     MachineMetric as WireMachineMetric, ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority,
     ServiceState as WireServiceState, SignatureStatus as WireSignature, StackProtection as WireStackProtection,
     Toggle, UacVirtualization as WireUac, gpu_adapter, lists_update, machine_sample, metric_spec,
-    process_columns, process_info, process_state, service_stats, service_status,
+    process_columns, process_event, process_event_batch, process_info, process_state, service_stats,
+    service_status,
 };
 
 use crate::api::{
     Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, GpuAdapter, GpuEngine, GpuEngineKind, IoPriority,
     Isolation, MachineCpu, MachineDisk, MachineMemory, MachineMetric, MachineNetwork, MachineProcessor,
-    MachineSample, MetricSpec, Mitigations, NetworkAdapter, ProcessGpuEngine, ProcessInfo, ProcessMetric, ProcessPriority,
+    MachineSample, MetricSpec, Mitigations, NetworkAdapter, ProcessEvent, ProcessEventBatch, ProcessEventKind,
+    ProcessExited, ProcessGpuEngine, ProcessInfo, ProcessMetric, ProcessPriority, ProcessStarted,
     ProcessState, ProcessStates, Sample,
     ServiceState, ServiceStats, ServiceStatus, SignatureStatus, Snapshot, StackProtection, Tagged,
     UacVirtualization,
@@ -197,6 +199,62 @@ fn machine_metric(m: WireMachineMetric) -> MachineMetric {
         WireMachineMetric::Gpu => MachineMetric::Gpu,
         WireMachineMetric::NetworkAdapters => MachineMetric::NetworkAdapters,
     }
+}
+
+pub fn process_event_batch(batch: process_event_batch::Reader<'_>) -> capnp::Result<ProcessEventBatch> {
+    let events = batch
+        .get_events()?
+        .iter()
+        .map(|e| {
+            let kind = match e.which()? {
+                process_event::Started(s) => {
+                    let s = s?;
+                    ProcessEventKind::Started(ProcessStarted {
+                        parent_pid: s.get_parent_pid(),
+                        parent_sequence_number: s.get_parent_sequence_number(),
+                        session_id: s.get_session_id(),
+                        image_path: text(s.get_image_path())?,
+                        command_line: text(s.get_command_line())?,
+                        user: text(s.get_user())?,
+                        elevated: toggle(s.get_elevated()),
+                        package_full_name: text(s.get_package_full_name())?,
+                        working_directory: text(s.get_working_directory())?,
+                        scheduled_task: text(s.get_scheduled_task())?,
+                        parent_services: s
+                            .get_parent_services()?
+                            .iter()
+                            .map(text)
+                            .collect::<capnp::Result<_>>()?,
+                    })
+                }
+                process_event::Exited(x) => {
+                    let x = x?;
+                    ProcessEventKind::Exited(ProcessExited {
+                        exit_code: x.get_exit_code(),
+                        cpu_cycles: x.get_cpu_cycles(),
+                        io_read_ops: x.get_io_read_ops(),
+                        io_write_ops: x.get_io_write_ops(),
+                        io_read_bytes: x.get_io_read_bytes(),
+                        io_write_bytes: x.get_io_write_bytes(),
+                        peak_commit: x.get_peak_commit(),
+                        handles: x.get_handles(),
+                        hard_faults: x.get_hard_faults(),
+                    })
+                }
+            };
+            Ok(Arc::new(ProcessEvent {
+                pid: e.get_pid(),
+                sequence_number: e.get_sequence_number(),
+                time: e.get_time(),
+                kind,
+            }))
+        })
+        .collect::<capnp::Result<_>>()?;
+    Ok(ProcessEventBatch {
+        history_from: batch.get_history_from(),
+        events,
+        lost: batch.get_lost(),
+    })
 }
 
 pub fn service_status(s: service_status::Reader<'_>) -> ServiceStatus {

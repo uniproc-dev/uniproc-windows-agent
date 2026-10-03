@@ -2387,8 +2387,8 @@ dependencies = [
 
 [[package]]
 name = "uniproc-protocol"
-version = "0.16.0"
-source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.16.0#2bdcef41583c7129cbb14648680b2015c5312800"
+version = "0.17.0"
+source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.17.0#19aabadee1a0d178353bf7b24510a3e790750637"
 dependencies = [
  "capnp",
  "capnp-rpc",
@@ -2397,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-agent"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2418,13 +2418,14 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-core"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "amethystate",
  "anyhow",
  "binrw",
  "crossbeam-channel",
  "enumset",
+ "futures",
  "ntapi",
  "parking_lot",
  "roxmltree",
@@ -2439,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-http"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -2453,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-rpc"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "capnp",
@@ -2468,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-service"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "clap",

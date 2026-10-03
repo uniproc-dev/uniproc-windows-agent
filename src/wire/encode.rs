@@ -5,12 +5,13 @@ use uniproc_protocol::windows_capnp::{
     ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority, ServiceState as WireServiceState,
     SignatureStatus as WireSignature, StackProtection as WireStackProtection, Toggle,
     UacVirtualization as WireUac, agent_listener, machine_sample, metric_spec, process_columns,
-    process_info, process_state, sampler, service_stats, service_status, windows_agent,
+    process_event_batch, process_info, process_state, sampler, service_stats, service_status, windows_agent,
 };
 
 use crate::api::{
     Architecture, DpiAwareness, ExtendedCfg, GpuEngineKind, IoPriority, Isolation, MachineMetric, MachineSample,
-    MetricSpec, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState, ProcessStates, Sample,
+    MetricSpec, ProcessEventBatch, ProcessEventKind, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState,
+    ProcessStates, Sample,
     ServiceState, ServiceStats, ServiceStatus, SignatureStatus, Snapshot, StackProtection,
     UacVirtualization, Update,
 };
@@ -361,6 +362,49 @@ fn sequence_numbers(keys: &[(u32, u64)], mut out: capnp::primitive_list::Builder
 fn find<T>(rows: &[T], key: (u32, u64), of: impl Fn(&T) -> (u32, u64)) -> Option<&T> {
     let at = rows.binary_search_by_key(&key.0, |row| of(row).0).ok()?;
     rows.get(at).filter(|row| of(row) == key)
+}
+
+pub fn process_event_batch(batch: &ProcessEventBatch, mut out: process_event_batch::Builder) {
+    out.set_history_from(batch.history_from);
+    out.set_lost(batch.lost);
+    let mut events = out.init_events(batch.events.len() as u32);
+    for (i, event) in batch.events.iter().enumerate() {
+        let mut e = events.reborrow().get(i as u32);
+        e.set_pid(event.pid);
+        e.set_sequence_number(event.sequence_number);
+        e.set_time(event.time);
+        match &event.kind {
+            ProcessEventKind::Started(s) => {
+                let mut out = e.init_started();
+                out.set_parent_pid(s.parent_pid);
+                out.set_parent_sequence_number(s.parent_sequence_number);
+                out.set_session_id(s.session_id);
+                out.set_image_path(&s.image_path);
+                out.set_command_line(&s.command_line);
+                out.set_user(&s.user);
+                out.set_elevated(toggle(s.elevated));
+                out.set_package_full_name(&s.package_full_name);
+                out.set_working_directory(&s.working_directory);
+                out.set_scheduled_task(&s.scheduled_task);
+                let mut services = out.init_parent_services(s.parent_services.len() as u32);
+                for (j, name) in s.parent_services.iter().enumerate() {
+                    services.set(j as u32, name);
+                }
+            }
+            ProcessEventKind::Exited(x) => {
+                let mut out = e.init_exited();
+                out.set_exit_code(x.exit_code);
+                out.set_cpu_cycles(x.cpu_cycles);
+                out.set_io_read_ops(x.io_read_ops);
+                out.set_io_write_ops(x.io_write_ops);
+                out.set_io_read_bytes(x.io_read_bytes);
+                out.set_io_write_bytes(x.io_write_bytes);
+                out.set_peak_commit(x.peak_commit);
+                out.set_handles(x.handles);
+                out.set_hard_faults(x.hard_faults);
+            }
+        }
+    }
 }
 
 pub fn service_status(s: &ServiceStatus, mut out: service_status::Builder) {

@@ -26,6 +26,11 @@ pub fn takes_watch(agent: Version) -> bool {
     (agent.major, agent.minor) >= (2, 2)
 }
 
+/// Whether an agent has `watchProcessEvents`, which came in windows 2.8.
+pub fn takes_process_events(agent: Version) -> bool {
+    (agent.major, agent.minor) >= (2, 8)
+}
+
 /// `spec` without the metrics `agent` has no name for: an agent older than
 /// windows 2.6 refuses a spec that asks for exclusiveMapped.
 pub fn known_to(agent: Version, mut spec: MetricSpec) -> MetricSpec {
@@ -87,6 +92,63 @@ mod tests {
             }),
             publisher: "Publisher".into(),
         }
+    }
+
+    #[test]
+    fn a_batch_of_process_events_survives_the_wire() {
+        use uniproc_protocol::windows_capnp::process_event_batch;
+
+        use crate::api::{ProcessEvent, ProcessEventBatch, ProcessEventKind, ProcessExited, ProcessStarted};
+
+        let started = ProcessEvent {
+            pid: 100,
+            sequence_number: 300,
+            time: 134_000_000_000_000_000,
+            kind: ProcessEventKind::Started(ProcessStarted {
+                parent_pid: 4,
+                parent_sequence_number: 12,
+                session_id: 1,
+                image_path: r"C:\Windows\System32\cmd.exe".into(),
+                command_line: r#"cmd /c "exit 7""#.into(),
+                user: r"HOST\user".into(),
+                elevated: Some(true),
+                package_full_name: "Pkg_1.0_x64__abc".into(),
+                working_directory: r"C:\Users\user\".into(),
+                scheduled_task: r"\Microsoft\Windows\Defrag\ScheduledDefrag".into(),
+                parent_services: vec!["Schedule".into(), "Themes".into()],
+            }),
+        };
+        let exited = ProcessEvent {
+            pid: 100,
+            sequence_number: 300,
+            time: 134_000_000_000_100_000,
+            kind: ProcessEventKind::Exited(ProcessExited {
+                exit_code: 7,
+                cpu_cycles: 1,
+                io_read_ops: 2,
+                io_write_ops: 3,
+                io_read_bytes: 4096,
+                io_write_bytes: 5120,
+                peak_commit: 6,
+                handles: 7,
+                hard_faults: 8,
+            }),
+        };
+        let unknown = ProcessEvent {
+            pid: 200,
+            sequence_number: 600,
+            time: 134_000_000_000_200_000,
+            kind: ProcessEventKind::Started(ProcessStarted::default()),
+        };
+        let sent = ProcessEventBatch {
+            history_from: 133_999_000_000_000_000,
+            events: vec![Arc::new(started), Arc::new(exited), Arc::new(unknown)],
+            lost: 9,
+        };
+        let mut message = capnp::message::Builder::new_default();
+        encode::process_event_batch(&sent, message.init_root::<process_event_batch::Builder>());
+        let reader = message.get_root_as_reader::<process_event_batch::Reader>().unwrap();
+        assert_eq!(decode::process_event_batch(reader).unwrap(), sent);
     }
 
     #[test]
@@ -532,6 +594,14 @@ mod tests {
         encode::service_status(&sent, message.init_root::<service_status::Builder>());
         let reader = message.get_root_as_reader::<service_status::Reader>().unwrap();
         assert_eq!(decode::service_status(reader), sent);
+    }
+
+    #[test]
+    fn only_a_2_8_agent_takes_process_events() {
+        let v = |major, minor| ogurpchik::auth::handshake::Version { major, minor, patch: 0 };
+        assert!(!super::takes_process_events(v(2, 7)));
+        assert!(super::takes_process_events(v(2, 8)));
+        assert!(super::takes_process_events(v(3, 0)));
     }
 
     #[test]

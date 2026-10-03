@@ -7,11 +7,12 @@ use windows::Win32::{
     ERROR_ALREADY_EXISTS, ERROR_MORE_DATA, ERROR_SUCCESS, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
     EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_UPDATE, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
     EVENT_TRACE_SYSTEM_LOGGER_MODE, EnableTraceEx2, QueryAllTracesW, StartTraceW, StopTraceW,
-    TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
+    WNODE_FLAG_TRACED_GUID,
 };
 use windows::core::{GUID, PCWSTR};
 
 use crate::aligned::AlignedBuf;
+use crate::etw::router::Enable;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionMode {
@@ -37,8 +38,8 @@ impl EtwSession {
         })
     }
 
-    pub fn enable(&self, guid: &GUID) -> Result<()> {
-        enable_provider(self.handle, guid)
+    pub fn enable(&self, guid: &GUID, enable: Enable) -> Result<()> {
+        enable_provider(self.handle, guid, enable)
     }
 
     pub fn name(&self) -> &str {
@@ -211,7 +212,7 @@ unsafe fn build_props(
     props
 }
 
-fn enable_provider(handle: CONTROLTRACE_ID, guid: &GUID) -> Result<()> {
+fn enable_provider(handle: CONTROLTRACE_ID, guid: &GUID, enable: Enable) -> Result<()> {
     let params = ENABLE_TRACE_PARAMETERS {
         Version: ENABLE_TRACE_PARAMETERS_VERSION_2 as u32,
         ..Default::default()
@@ -221,8 +222,8 @@ fn enable_provider(handle: CONTROLTRACE_ID, guid: &GUID) -> Result<()> {
             handle,
             guid,
             EVENT_CONTROL_CODE_ENABLE_PROVIDER as u32,
-            TRACE_LEVEL_INFORMATION as u8,
-            0xFFFF_FFFF_FFFF_FFFF,
+            enable.level,
+            enable.keywords,
             0,
             0,
             Some(&params),

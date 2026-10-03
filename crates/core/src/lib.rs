@@ -7,6 +7,7 @@ mod etw;
 mod model;
 mod privileges;
 mod probes;
+mod process_events;
 mod providers;
 mod report;
 mod sample;
@@ -29,6 +30,11 @@ pub use sample::{
     NO_DATA_U64, ProcessMetric, ProcessMetrics, Sample,
 };
 pub use etw::router::stop_leftover_sessions;
+pub use process_events::{
+    ProcessEvent, ProcessEventBatch, ProcessEventKind, ProcessEvents, ProcessEventsProvider, ProcessEventsWatch,
+    ProcessExited, ProcessStarted,
+};
+pub use providers::provider::Provider;
 pub use smol_str::SmolStr;
 pub use supervisor::{Supervisor, SupervisorConfig};
 pub use uniproc_agent_kit::{Epoch, Tagged};

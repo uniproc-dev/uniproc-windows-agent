@@ -1,6 +1,6 @@
 [package]
 name = "uniproc-windows-core"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -14,7 +14,7 @@ windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", 
     "profileapi", "pdh", "powerbase", "sysinfoapi",
     "winver", "fileapi", "appmodel", "shellapi", "shlwapi",
     "mscat", "mssip", "wincrypt", "wintrust", "ntsecapi", "winuser", "wow64apiset", "netioapi",
-    "aclapi", "accctrl", "sddl", "ioapiset", "winioctl", "psapi", "libloaderapi"] }
+    "aclapi", "accctrl", "sddl", "ioapiset", "winioctl", "psapi", "libloaderapi", "tdh"] }
 ntapi = "0.4.3"
 rustc-hash = "2"
 binrw = "0.15.0"
@@ -31,3 +31,4 @@ smol_str = { version = "0.3", features = ["serde"] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"

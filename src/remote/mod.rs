@@ -13,12 +13,14 @@ use ogurpchik::auth::handshake::{HandshakeMode, authenticate_client};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::{RpcSession, Side, spawn_session};
 use uniproc_protocol::meta_capnp::{ResponseStatus, response_meta};
-use uniproc_protocol::windows_capnp::{agent_listener, sampler, service_watcher, windows_agent};
+use uniproc_protocol::windows_capnp::{
+    agent_listener, process_event_listener, sampler, service_watcher, windows_agent,
+};
 use uniproc_protocol::{APP_NAME, WINDOWS_AGENT_SERVICE};
 
 use crate::api::{
-    Changes, Command, CommandResult, MetricSpec, ProcessInfo, ProcessStates, Sample, ServiceStats,
-    ServiceStatus, Snapshot, Tagged, Update,
+    Changes, Command, CommandResult, MetricSpec, ProcessEventBatch, ProcessInfo, ProcessStates, Sample,
+    ServiceStats, ServiceStatus, Snapshot, Tagged, Update,
 };
 use crate::wire::{self, PROTOCOL, decode, encode};
 
@@ -42,15 +44,36 @@ enum Request {
     },
     WatchAgent {
         spec: MetricSpec,
-        updates: mpsc::UnboundedSender<Delivery>,
+        updates: mpsc::UnboundedSender<Delivery<Update>>,
+        released: oneshot::Receiver<()>,
+    },
+    WatchProcessEvents {
+        batches: mpsc::UnboundedSender<Delivery<ProcessEventBatch>>,
         released: oneshot::Receiver<()>,
     },
 }
 
-/// One update for the watch's reader; the agent hears back once it is taken.
-struct Delivery {
-    update: Result<Update>,
+/// One push for a watch's reader; the agent hears back once it is taken.
+struct Delivery<T> {
+    pushed: Result<T>,
     taken: oneshot::Sender<()>,
+}
+
+/// What a watch's reader takes next: the push the agent made, or why the watch is over.
+async fn take<T>(rx: &mut mpsc::UnboundedReceiver<Delivery<T>>) -> Result<T> {
+    let delivery = rx.next().await.ok_or_else(|| anyhow!("the agent watch ended"))?;
+    let _ = delivery.taken.send(());
+    delivery.pushed
+}
+
+/// Hands `pushed` to the watch's reader and waits until it is taken.
+async fn deliver<T>(rx: &mpsc::UnboundedSender<Delivery<T>>, pushed: Result<T>) -> Result<(), capnp::Error> {
+    let (taken, answer) = oneshot::channel();
+    rx.unbounded_send(Delivery { pushed, taken })
+        .map_err(|_| capnp::Error::failed("nobody watches the agent any more".into()))?;
+    answer
+        .await
+        .map_err(|_| capnp::Error::failed("nobody watches the agent any more".into()))
 }
 
 enum Reply {
@@ -193,11 +216,31 @@ impl Remote {
             _ => bail!("a watch answered with something else"),
         }
     }
+
+    /// Whether the agent has `watchProcessEvents`, which came in windows 2.8.
+    pub fn can_watch_process_events(&self) -> bool {
+        wire::takes_process_events(self.agent)
+    }
+
+    /// The process starts and exits the agent holds, about the last hour,
+    /// then each one as it happens, until the watch is dropped. An agent
+    /// that cannot tell them is refused here, before anything is sent.
+    pub async fn watch_process_events(&self) -> Result<RemoteProcessEvents> {
+        if !self.can_watch_process_events() {
+            bail!("the agent speaks windows {}; watchProcessEvents needs 2.8", self.agent);
+        }
+        let (batches, rx) = mpsc::unbounded();
+        let (release, released) = oneshot::channel();
+        match self.call(Request::WatchProcessEvents { batches, released }).await? {
+            Reply::Watching => Ok(RemoteProcessEvents { rx, _release: release }),
+            _ => bail!("a watch answered with something else"),
+        }
+    }
 }
 
 /// A watch over the pipe; the agent stops pushing when this is dropped.
 pub struct RemoteWatch {
-    rx: mpsc::UnboundedReceiver<Delivery>,
+    rx: mpsc::UnboundedReceiver<Delivery<Update>>,
     _release: oneshot::Sender<()>,
 }
 
@@ -205,13 +248,21 @@ impl RemoteWatch {
     /// The next update the agent pushed; the first carries everything. An
     /// error means the watch is over: the agent stopped or the session ended.
     pub async fn next(&mut self) -> Result<Update> {
-        let delivery = self
-            .rx
-            .next()
-            .await
-            .ok_or_else(|| anyhow!("the agent watch ended"))?;
-        let _ = delivery.taken.send(());
-        delivery.update
+        take(&mut self.rx).await
+    }
+}
+
+/// The process starts and exits over the pipe; the agent stops telling them when this is dropped.
+pub struct RemoteProcessEvents {
+    rx: mpsc::UnboundedReceiver<Delivery<ProcessEventBatch>>,
+    _release: oneshot::Sender<()>,
+}
+
+impl RemoteProcessEvents {
+    /// The next batch the agent told; the first carries `history_from`. An
+    /// error means the watch is over: the agent stopped or the session ended.
+    pub async fn next(&mut self) -> Result<ProcessEventBatch> {
+        take(&mut self.rx).await
     }
 }
 
@@ -373,7 +424,7 @@ impl service_watcher::Server for WatcherImpl {
 struct ListenerImpl {
     spec: MetricSpec,
     snapshot: RefCell<Option<Snapshot>>,
-    updates: mpsc::UnboundedSender<Delivery>,
+    updates: mpsc::UnboundedSender<Delivery<Update>>,
     session: Weak<Session>,
 }
 
@@ -417,13 +468,7 @@ impl ListenerImpl {
     }
 
     async fn deliver(&self, update: Result<Update>) -> Result<(), capnp::Error> {
-        let (taken, answer) = oneshot::channel();
-        self.updates
-            .unbounded_send(Delivery { update, taken })
-            .map_err(|_| capnp::Error::failed("nobody watches the agent any more".into()))?;
-        answer
-            .await
-            .map_err(|_| capnp::Error::failed("nobody watches the agent any more".into()))
+        deliver(&self.updates, update).await
     }
 }
 
@@ -449,6 +494,32 @@ impl agent_listener::Server for ListenerImpl {
         _: agent_listener::EndedResults,
     ) -> Result<(), capnp::Error> {
         let _ = self.deliver(Err(anyhow!("the agent stopped"))).await;
+        Ok(())
+    }
+}
+
+struct ProcessEventListenerImpl {
+    batches: mpsc::UnboundedSender<Delivery<ProcessEventBatch>>,
+}
+
+impl process_event_listener::Server for ProcessEventListenerImpl {
+    async fn events(
+        self: Rc<Self>,
+        params: process_event_listener::EventsParams,
+        _: process_event_listener::EventsResults,
+    ) -> Result<(), capnp::Error> {
+        let batch = decode::process_event_batch(params.get()?.get_batch()?).map_err(anyhow::Error::from);
+        let failed = batch.as_ref().err().map(|e| capnp::Error::failed(format!("{e:#}")));
+        deliver(&self.batches, batch).await?;
+        failed.map_or(Ok(()), Err)
+    }
+
+    async fn ended(
+        self: Rc<Self>,
+        _: process_event_listener::EndedParams,
+        _: process_event_listener::EndedResults,
+    ) -> Result<(), capnp::Error> {
+        let _ = deliver(&self.batches, Err(anyhow!("the agent stopped"))).await;
         Ok(())
     }
 }
@@ -545,6 +616,19 @@ impl Session {
                 let mut request = self.client().watch_request();
                 encode::metric_spec(&spec, request.get().init_spec());
                 request.get().set_listener(capnp_rpc::new_client(listener));
+                let handle = request.send().promise.await?.get()?.get_handle()?;
+                compio::runtime::spawn(async move {
+                    let _handle = handle;
+                    let _ = released.await;
+                })
+                .detach();
+                Ok(Reply::Watching)
+            }
+            Request::WatchProcessEvents { batches, released } => {
+                let mut request = self.client().watch_process_events_request();
+                request
+                    .get()
+                    .set_listener(capnp_rpc::new_client(ProcessEventListenerImpl { batches }));
                 let handle = request.send().promise.await?.get()?.get_handle()?;
                 compio::runtime::spawn(async move {
                     let _handle = handle;
@@ -723,6 +807,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uniproc_protocol::windows_capnp::watch_handle;
 
     fn io_thread() -> std::thread::ThreadId {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -775,13 +860,86 @@ mod tests {
         assert!(read(2).is_err_and(|e| e.contains("status 2")));
     }
 
+    #[derive(Clone)]
     struct Answering;
 
     impl windows_agent::Server for Answering {}
 
+    /// Tells its one batch to whoever watches process events, then that it stopped.
+    #[derive(Clone)]
+    struct Telling(ProcessEventBatch);
+
+    struct Released;
+
+    impl watch_handle::Server for Released {}
+
+    impl windows_agent::Server for Telling {
+        async fn watch_process_events(
+            self: Rc<Self>,
+            params: windows_agent::WatchProcessEventsParams,
+            mut results: windows_agent::WatchProcessEventsResults,
+        ) -> Result<(), capnp::Error> {
+            let listener = params.get()?.get_listener()?;
+            let batch = self.0.clone();
+            compio::runtime::spawn(async move {
+                let mut request = listener.events_request();
+                request.get().init_meta();
+                encode::process_event_batch(&batch, request.get().init_batch());
+                if request.send().promise.await.is_ok() {
+                    let mut request = listener.ended_request();
+                    request.get().init_meta();
+                    let _ = request.send().promise.await;
+                }
+            })
+            .detach();
+            results.get().init_meta();
+            results.get().set_handle(capnp_rpc::new_client(Released));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_batch_the_agent_tells_comes_out_of_the_watch_then_its_end() {
+        use crate::api::{ProcessEvent, ProcessEventKind, ProcessExited};
+
+        let batch = ProcessEventBatch {
+            history_from: 5,
+            events: vec![Arc::new(ProcessEvent {
+                pid: 4,
+                sequence_number: 9,
+                time: 7,
+                kind: ProcessEventKind::Exited(ProcessExited {
+                    exit_code: 1,
+                    ..Default::default()
+                }),
+            })],
+            lost: 2,
+        };
+        serve_as("uniproc-test-agent-process-events", PROTOCOL.version.minor, Telling(batch.clone()));
+        let told = futures::executor::block_on(async {
+            let remote = Remote::connect_to("uniproc-test-agent-process-events", Duration::from_secs(5)).await?;
+            let mut events = remote.watch_process_events().await?;
+            let first = events.next().await?;
+            let after = events.next().await.map_err(|e| e.to_string());
+            anyhow::Ok((first, after))
+        })
+        .map_err(|e| format!("{e:#}"));
+        assert_eq!(told, Ok((batch, Err("the agent stopped".to_string()))));
+    }
+
+    #[test]
+    fn an_agent_older_than_2_8_is_not_asked_for_process_events() {
+        serve_as("uniproc-test-agent-2-7", 7, Answering);
+        let remote = futures::executor::block_on(Remote::connect_to("uniproc-test-agent-2-7", Duration::from_secs(5)))
+            .expect("connect");
+        assert!(!remote.can_watch_process_events());
+        let refused = futures::executor::block_on(remote.watch_process_events()).err().expect("refused");
+        assert!(refused.to_string().contains("watchProcessEvents needs 2.8"), "{refused:#}");
+    }
+
     /// Serves `name` on the I/O thread as an agent of windows 2.`minor`
-    /// that answers no method.
-    fn serve_as(name: &'static str, minor: u32) {
+    /// that answers with `server`.
+    fn serve_as<S: windows_agent::Server + Clone + Send + 'static>(name: &'static str, minor: u32, server: S) {
         use ogurpchik::auth::handshake::Protocol;
         use ogurpchik::rpc::SessionAcceptor;
 
@@ -793,7 +951,7 @@ mod tests {
                 let _ = up.send(());
                 let protocol = Protocol::new(PROTOCOL.id, PROTOCOL.version.major, minor, 0);
                 let mut acceptor = SessionAcceptor::new(&listener, HandshakeMode::version_only(), protocol);
-                while let Ok(session) = acceptor.next::<windows_agent::Client, _>(Answering).await {
+                while let Ok(session) = acceptor.next::<windows_agent::Client, _>(server.clone()).await {
                     compio::runtime::spawn(async move {
                         let _ = session.wait().await;
                     })
@@ -808,7 +966,7 @@ mod tests {
 
     #[test]
     fn an_agent_older_than_2_2_says_so_and_is_not_asked_to_watch() {
-        serve_as("uniproc-test-agent-2-1", 1);
+        serve_as("uniproc-test-agent-2-1", 1, Answering);
         let remote = futures::executor::block_on(Remote::connect_to("uniproc-test-agent-2-1", Duration::from_secs(5)))
             .expect("connect");
         let agent = remote.agent_version();
@@ -820,12 +978,13 @@ mod tests {
 
     #[test]
     fn this_agent_can_watch() {
-        serve_as("uniproc-test-agent-current", PROTOCOL.version.minor);
+        serve_as("uniproc-test-agent-current", PROTOCOL.version.minor, Answering);
         let remote =
             futures::executor::block_on(Remote::connect_to("uniproc-test-agent-current", Duration::from_secs(5)))
                 .expect("connect");
         let agent = remote.agent_version();
         assert_eq!((agent.major, agent.minor), (PROTOCOL.version.major, PROTOCOL.version.minor));
         assert!(remote.can_watch());
+        assert!(remote.can_watch_process_events());
     }
 }

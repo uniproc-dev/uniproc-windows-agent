@@ -4,8 +4,9 @@ pub use uniproc_windows_core::{
     Architecture, Columns, DpiAwareness, ExtendedCfg, GpuAdapter, GpuEngine, GpuEngineKind, IoPriority, Isolation,
     MachineCpu, NetworkAdapter, ProcessGpuEngine,
     MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample,
-    MetricSpec, Mitigations, NO_DATA_U32, NO_DATA_U64, ProcessMetric, ProcessMetrics, ProcessPriority, ProcessState,
-    Sample, SignatureStatus, SmolStr, StackProtection, Tagged, UacVirtualization,
+    MetricSpec, Mitigations, NO_DATA_U32, NO_DATA_U64, ProcessEvent, ProcessEventBatch, ProcessEventKind, ProcessExited,
+    ProcessMetric, ProcessMetrics, ProcessPriority, ProcessStarted, ProcessState, Sample, SignatureStatus, SmolStr,
+    StackProtection, Tagged, UacVirtualization,
 };
 
 /// Name the agent's Windows service is registered under.

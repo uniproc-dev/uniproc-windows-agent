@@ -63,7 +63,7 @@ impl Drop for Owned {
 pub struct SidNames(HashMap<Box<[u8]>, SmolStr>);
 
 impl SidNames {
-    fn name(&mut self, sid: &[u8]) -> SmolStr {
+    pub(crate) fn name(&mut self, sid: &[u8]) -> SmolStr {
         if let Some(name) = self.0.get(sid) {
             return name.clone();
         }

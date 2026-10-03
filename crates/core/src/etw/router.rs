@@ -82,6 +82,21 @@ enum Target {
     Batch(usize),
 }
 
+/// What a manifest provider is enabled for.
+#[derive(Clone, Copy, Debug)]
+pub struct Enable {
+    pub keywords: u64,
+    pub level: u8,
+}
+
+impl Enable {
+    /// Every keyword, up to informational events.
+    pub const ALL: Self = Self {
+        keywords: u64::MAX,
+        level: windows::Win32::TRACE_LEVEL_INFORMATION as u8,
+    };
+}
+
 pub struct EnableFlags(pub u32);
 
 impl From<i32> for EnableFlags {
@@ -98,7 +113,7 @@ impl From<u32> for EnableFlags {
 
 pub struct KernelRouterBuilder {
     flags: u32,
-    manifest: Vec<GUID>,
+    manifest: Vec<(GUID, Enable)>,
     handlers: Vec<Handler>,
     batches: Vec<BatchSlot>,
     routes: Vec<(u128, Vec<Target>)>,
@@ -163,11 +178,11 @@ impl KernelRouterBuilder {
         self
     }
 
-    /// Manifest providers: own session per GUID, enabled via EnableTraceEx2.
-    /// Events are matched by EventDescriptor.Id inside the handler.
-    #[allow(dead_code)]
-    pub fn manifest(&mut self, provider: GUID) -> &mut Self {
-        self.manifest.push(provider);
+    /// Manifest providers: own session per GUID, enabled via EnableTraceEx2
+    /// for `enable`. Events are matched by EventDescriptor.Id inside the
+    /// handler.
+    pub fn manifest(&mut self, provider: GUID, enable: Enable) -> &mut Self {
+        self.manifest.push((provider, enable));
         self
     }
 
@@ -211,10 +226,10 @@ impl KernelRouterBuilder {
             router.consumers.push(unsafe { TraceConsumer::open(&kernel_session, core)? });
         }
 
-        for guid in &manifest {
+        for (guid, enable) in &manifest {
             let name = manifest_session_name_in(&prefix, guid);
             let session = EtwSession::start(&name, 0, SessionMode::Normal)?;
-            session.enable(guid)?;
+            session.enable(guid, *enable)?;
             router.sessions.push(session);
             // SAFETY: as above.
             router.consumers.push(unsafe { TraceConsumer::open(&name, core)? });
@@ -522,7 +537,7 @@ pub(crate) mod tests {
         let mut builder = KernelRouter::builder();
         builder
             .session_namespace("Uniproc-HealthTest-")
-            .manifest(KERNEL_PROCESS_PROVIDER)
+            .manifest(KERNEL_PROCESS_PROVIDER, Enable::ALL)
             .on(&[KERNEL_PROCESS_PROVIDER], |_, _| None);
         let router = builder.start(sink).expect("router start");
 
@@ -558,7 +573,7 @@ pub(crate) mod tests {
         let mut builder = KernelRouter::builder();
         builder
             .kernel_flags(EVENT_TRACE_FLAG_NETWORK_TCPIP)
-            .manifest(KERNEL_PROCESS_PROVIDER)
+            .manifest(KERNEL_PROCESS_PROVIDER, Enable::ALL)
             .on(&[TEST_GUID], |_, _| None)
             .on(&[KERNEL_PROCESS_PROVIDER], |_, _| None);
         let router = builder.start(sink).expect("router start");
@@ -682,7 +697,7 @@ pub(crate) mod tests {
         crate::providers::network::KernelNetworkProvider::new()
             .register(&mut builder)
             .unwrap();
-        builder.manifest(KERNEL_PROCESS_PROVIDER).on(&[KERNEL_PROCESS_PROVIDER], {
+        builder.manifest(KERNEL_PROCESS_PROVIDER, Enable::ALL).on(&[KERNEL_PROCESS_PROVIDER], {
             let started = started.clone();
             move |record, _| {
                 if record.EventHeader.EventDescriptor.Id == EVENT_ID_PROCESS_START {
@@ -713,5 +728,45 @@ pub(crate) mod tests {
 
         assert!(network, "no StateChange::Network on the merged router");
         assert!(started.load(Ordering::SeqCst), "no process start on the merged router");
+    }
+
+    #[test]
+    #[ignore = "requires admin and a real ETW session"]
+    fn a_manifest_provider_tells_only_the_keywords_it_was_enabled_for() {
+        const PROCESS_KEYWORD: u64 = 0x10;
+        const EVENT_ID_PROCESS_STOP: u16 = 2;
+        const EVENT_ID_IMAGE_LOAD: u16 = 5;
+        let (sink, _rx) = Sink::bounded(16, || {});
+        let seen = Arc::new(parking_lot::Mutex::new(std::collections::BTreeSet::new()));
+        let mut builder = KernelRouter::builder();
+        builder
+            .session_namespace("Uniproc-KeywordTest-")
+            .manifest(
+                KERNEL_PROCESS_PROVIDER,
+                Enable {
+                    keywords: PROCESS_KEYWORD,
+                    level: windows::Win32::TRACE_LEVEL_INFORMATION as u8,
+                },
+            )
+            .on(&[KERNEL_PROCESS_PROVIDER], {
+                let seen = seen.clone();
+                move |record, _| {
+                    seen.lock().insert(record.EventHeader.EventDescriptor.Id);
+                    None
+                }
+            });
+        let router = builder.start(sink).expect("router start");
+        router.set_flush_timer(50).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !seen.lock().contains(&EVENT_ID_PROCESS_STOP) {
+            let _ = std::process::Command::new("cmd").args(["/c", "exit", "0"]).status();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        drop(router);
+
+        let seen = seen.lock().clone();
+        assert!(seen.contains(&EVENT_ID_PROCESS_START) && seen.contains(&EVENT_ID_PROCESS_STOP), "{seen:?}");
+        assert!(!seen.contains(&EVENT_ID_IMAGE_LOAD), "image loads came without their keyword: {seen:?}");
     }
 }

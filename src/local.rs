@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use parking_lot::Mutex;
 use uniproc_agent_kit::monitor;
-use uniproc_windows_core::SupervisorConfig;
+use uniproc_windows_core::{ProcessEvents, SmolStr, SupervisorConfig};
 
 use crate::api::{
     Command, CommandResult, MetricSpec, ProcessInfo, ProcessStates, ServiceStats, Snapshot, Tagged,
@@ -22,7 +22,7 @@ pub use crate::feed::Published;
 pub use crate::sampler::LocalSampler;
 pub use crate::scm::ServiceWatch;
 pub use crate::watch::LocalWatch;
-pub use uniproc_windows_core::SessionHealth;
+pub use uniproc_windows_core::{ProcessEventsWatch, SessionHealth};
 
 /// Passports and states are read this often while a client is attached and nobody subscribes.
 pub const ATTACHED_PERIOD: Duration = Duration::from_millis(1000);
@@ -55,6 +55,7 @@ impl std::error::Error for StartError {}
 /// last holder drops it, or at [`stop`](Self::stop).
 pub struct Local {
     feed: Feed,
+    process_events: ProcessEvents,
     commands: Commands,
     services: ServiceControl,
     running: Mutex<Option<Running>>,
@@ -90,10 +91,15 @@ impl Local {
         let demand = subscriptions.demand();
         let (spare, spares) = crossbeam_channel::unbounded();
         let (painter, changes, feed) = Painter::start(subscriptions, spare)?;
-        let sources = Sources::start(config, demand, (waker, wakes), changes, spares)?;
+        let (process_events, provider) = ProcessEvents::start({
+            let feed = feed.clone();
+            move |pid| hosted_by(&feed.latest().snapshot.services.value, pid)
+        })?;
+        let sources = Sources::start(config, demand, (waker, wakes), changes, spares, vec![Box::new(provider)])?;
         let services = sources.control();
         Ok(Self {
             feed,
+            process_events,
             commands: Commands::start(services.clone())?,
             services,
             running: Mutex::new(Some(Running {
@@ -168,12 +174,43 @@ impl Local {
     pub fn watch_service(&self, name: &str) -> ServiceWatch {
         self.services.watch(name)
     }
+
+    /// The process starts and exits held, about the last hour, then each one
+    /// as it happens. Ends when monitoring stops.
+    pub fn watch_process_events(&self) -> ProcessEventsWatch {
+        self.process_events.watch()
+    }
+}
+
+/// The names of the services `pid` hosts.
+fn hosted_by(services: &[ServiceStats], pid: u32) -> Vec<SmolStr> {
+    if pid == 0 {
+        return Vec::new();
+    }
+    services
+        .iter()
+        .filter(|service| service.pid == pid)
+        .map(|service| SmolStr::from(&service.name))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::{MachineMetric, ProcessMetric};
+
+    #[test]
+    fn a_process_hosts_the_services_listed_under_its_pid() {
+        let service = |name: &str, pid| ServiceStats {
+            name: name.into(),
+            pid,
+            ..Default::default()
+        };
+        let listed = [service("Dnscache", 10), service("NlaSvc", 10), service("Spooler", 0), service("W32Time", 20)];
+        assert_eq!(hosted_by(&listed, 10), ["Dnscache", "NlaSvc"]);
+        assert!(hosted_by(&listed, 0).is_empty(), "a stopped service hosts nothing");
+        assert!(hosted_by(&listed, 30).is_empty());
+    }
 
     #[test]
     fn the_agent_can_be_shared_between_threads() {

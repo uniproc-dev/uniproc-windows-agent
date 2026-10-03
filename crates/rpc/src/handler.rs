@@ -2,14 +2,16 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use futures::StreamExt;
 use futures::channel::oneshot;
 use futures::future::{Either, select};
+use futures::{Stream, StreamExt};
 use ogurpchik::auth::handshake::Version;
 use uniproc_protocol::meta_capnp::{self, ResponseStatus};
-use uniproc_protocol::windows_capnp::{agent_listener, sampler, service_watcher, watch_handle, windows_agent};
+use uniproc_protocol::windows_capnp::{
+    agent_listener, process_event_listener, sampler, service_watcher, watch_handle, windows_agent,
+};
 
-use uniproc_windows_agent::api::{Command, CommandResult, Snapshot};
+use uniproc_windows_agent::api::{Command, CommandResult, ProcessEventBatch, Snapshot};
 use uniproc_windows_agent::local::{Local, LocalSampler, LocalWatch, ServiceWatch};
 use uniproc_windows_agent::wire::{self, decode, encode};
 
@@ -144,6 +146,29 @@ async fn push(mut watch: LocalWatch, listener: agent_listener::Client, mut relea
         }
         before = Some(update.snapshot);
     }
+}
+
+async fn tell(
+    mut batches: impl Stream<Item = ProcessEventBatch> + Unpin,
+    listener: process_event_listener::Client,
+    mut released: oneshot::Receiver<()>,
+) {
+    loop {
+        let batch = match select(&mut released, batches.next()).await {
+            Either::Left(_) => return,
+            Either::Right((Some(batch), _)) => batch,
+            Either::Right((None, _)) => break,
+        };
+        let mut request = listener.events_request();
+        request.get().init_meta();
+        encode::process_event_batch(&batch, request.get().init_batch());
+        if request.send().promise.await.is_err() {
+            return;
+        }
+    }
+    let mut request = listener.ended_request();
+    request.get().init_meta();
+    let _ = request.send().promise.await;
 }
 
 fn code(outcome: CommandResult) -> u32 {
@@ -358,7 +383,27 @@ impl windows_agent::Server for AgentImpl {
         Ok(())
     }
 
-    service_method!(service_start, ServiceStartParams, ServiceStartResults, ServiceStart);
+    async fn watch_process_events(
+        self: Rc<Self>,
+        params: windows_agent::WatchProcessEventsParams,
+        mut results: windows_agent::WatchProcessEventsResults,
+    ) -> Result<(), capnp::Error> {
+        let listener = params.get()?.get_listener()?;
+        let hold = self.hold()?;
+        let (release, released) = oneshot::channel();
+        let batches = futures::stream::unfold(self.agent.watch_process_events(), |mut watch| async move {
+            watch.next().await.map(|batch| (batch, watch))
+        });
+        compio::runtime::spawn(tell(Box::pin(batches), listener, released)).detach();
+        unconditional(results.get().init_meta());
+        results.get().set_handle(capnp_rpc::new_client(WatchHandleImpl {
+            _release: release,
+            _hold: hold,
+        }));
+        Ok(())
+    }
+
+    service_method!(service_start,ServiceStartParams, ServiceStartResults, ServiceStart);
     service_method!(service_stop, ServiceStopParams, ServiceStopResults, ServiceStop);
     service_method!(service_pause, ServicePauseParams, ServicePauseResults, ServicePause);
     service_method!(service_resume, ServiceResumeParams, ServiceResumeResults, ServiceResume);
@@ -368,6 +413,75 @@ impl windows_agent::Server for AgentImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use uniproc_windows_agent::api::{ProcessEvent, ProcessEventKind, ProcessExited};
+
+    #[derive(Debug, PartialEq)]
+    enum Heard {
+        Batch(ProcessEventBatch),
+        Ended,
+    }
+
+    struct Hearing(Rc<RefCell<Vec<Heard>>>);
+
+    impl process_event_listener::Server for Hearing {
+        async fn events(
+            self: Rc<Self>,
+            params: process_event_listener::EventsParams,
+            _: process_event_listener::EventsResults,
+        ) -> Result<(), capnp::Error> {
+            let batch = decode::process_event_batch(params.get()?.get_batch()?)?;
+            self.0.borrow_mut().push(Heard::Batch(batch));
+            Ok(())
+        }
+
+        async fn ended(
+            self: Rc<Self>,
+            _: process_event_listener::EndedParams,
+            _: process_event_listener::EndedResults,
+        ) -> Result<(), capnp::Error> {
+            self.0.borrow_mut().push(Heard::Ended);
+            Ok(())
+        }
+    }
+
+    fn batch(pid: u32) -> ProcessEventBatch {
+        ProcessEventBatch {
+            history_from: 3,
+            events: vec![Arc::new(ProcessEvent {
+                pid,
+                sequence_number: 1,
+                time: 5,
+                kind: ProcessEventKind::Exited(ProcessExited::default()),
+            })],
+            lost: 0,
+        }
+    }
+
+    #[test]
+    fn every_batch_is_told_in_order_then_that_the_events_ended() {
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let listener: process_event_listener::Client = capnp_rpc::new_client(Hearing(heard.clone()));
+        let (_release, released) = oneshot::channel();
+        let batches = futures::stream::iter([batch(1), batch(2)]);
+        compio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tell(batches, listener, released));
+        assert_eq!(*heard.borrow(), [Heard::Batch(batch(1)), Heard::Batch(batch(2)), Heard::Ended]);
+    }
+
+    #[test]
+    fn a_released_watch_tells_nothing_more() {
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let listener: process_event_listener::Client = capnp_rpc::new_client(Hearing(heard.clone()));
+        let (release, released) = oneshot::channel();
+        drop(release);
+        let batches = futures::stream::pending();
+        compio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tell(batches, listener, released));
+        assert_eq!(*heard.borrow(), []);
+    }
 
     #[test]
     fn a_session_holds_up_to_the_limit_and_a_release_makes_room() {
