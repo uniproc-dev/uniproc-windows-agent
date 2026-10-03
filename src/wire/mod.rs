@@ -123,6 +123,9 @@ mod tests {
             sequence_number: 300,
             time: 134_000_000_000_100_000,
             kind: ProcessEventKind::Exited(ProcessExited {
+                image_path: r"C:\Windows\System32\cmd.exe".into(),
+                image_name: "cmd.exe".into(),
+                start_time: 134_000_000_000_000_000,
                 exit_code: 7,
                 cpu_cycles: 1,
                 io_read_ops: 2,

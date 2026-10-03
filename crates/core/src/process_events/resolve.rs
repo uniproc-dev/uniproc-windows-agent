@@ -23,16 +23,27 @@ pub(crate) struct Machine {
     sids: SidNames,
     drives: Drives,
     services: Box<dyn FnMut(u32) -> Vec<SmolStr> + Send>,
+    images: Box<dyn FnMut(u32, u64) -> SmolStr + Send>,
 }
 
 impl Machine {
-    /// `services` names the services a process hosts.
-    pub fn new(services: impl FnMut(u32) -> Vec<SmolStr> + Send + 'static) -> Self {
+    /// `services` names the services a process hosts; `images` the image of
+    /// a listed process by pid and sequence number.
+    pub fn new(
+        services: impl FnMut(u32) -> Vec<SmolStr> + Send + 'static,
+        images: impl FnMut(u32, u64) -> SmolStr + Send + 'static,
+    ) -> Self {
         Self {
             sids: SidNames::default(),
             drives: Drives::default(),
             services: Box::new(services),
+            images: Box::new(images),
         }
+    }
+
+    /// The Win32 image path of the listed process; empty when none is listed.
+    pub fn listed_image(&mut self, pid: u32, sequence_number: u64) -> SmolStr {
+        (self.images)(pid, sequence_number)
     }
 }
 
@@ -188,7 +199,7 @@ mod tests {
 
     #[test]
     fn a_path_on_no_drive_stays_as_it_is() {
-        let mut machine = Machine::new(|_| Vec::new());
+        let mut machine = Machine::new(|_| Vec::new(), |_, _| SmolStr::default());
         assert_eq!(machine.image_path(r"\Device\Nowhere\x.exe"), r"\Device\Nowhere\x.exe");
         assert_eq!(Drives::default().win32(r"\Device\Nowhere\x.exe"), None);
     }

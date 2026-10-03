@@ -239,6 +239,9 @@ pub fn process_event_batch(batch: process_event_batch::Reader<'_>) -> capnp::Res
                         peak_commit: x.get_peak_commit(),
                         handles: x.get_handles(),
                         hard_faults: x.get_hard_faults(),
+                        image_path: text(x.get_image_path())?,
+                        image_name: text(x.get_image_name())?,
+                        start_time: x.get_start_time(),
                     })
                 }
             };

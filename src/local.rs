@@ -92,10 +92,16 @@ impl Local {
         let demand = subscriptions.demand();
         let (spare, spares) = crossbeam_channel::unbounded();
         let (painter, changes, feed) = Painter::start(subscriptions, spare)?;
-        let (process_events, provider) = ProcessEvents::start({
-            let feed = feed.clone();
-            move |pid| hosted_by(&feed.latest().snapshot.services.value, pid)
-        })?;
+        let (process_events, provider) = ProcessEvents::start(
+            {
+                let feed = feed.clone();
+                move |pid| hosted_by(&feed.latest().snapshot.services.value, pid)
+            },
+            {
+                let feed = feed.clone();
+                move |pid, sequence_number| listed_image(&feed.latest().snapshot.processes.value, pid, sequence_number)
+            },
+        )?;
         let sources = Sources::start(config, demand, (waker, wakes), changes, spares, vec![Box::new(provider)])?;
         let services = sources.control();
         Ok(Self {
@@ -195,10 +201,33 @@ fn hosted_by(services: &[ServiceStats], pid: u32) -> Vec<SmolStr> {
         .collect()
 }
 
+/// The image of the process listed as `pid` with `sequence_number`; empty when none is.
+fn listed_image(processes: &[ProcessInfo], pid: u32, sequence_number: u64) -> SmolStr {
+    processes
+        .iter()
+        .find(|process| process.pid == pid && process.sequence_number == sequence_number)
+        .map(|process| process.image_path.clone())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::{MachineMetric, ProcessMetric};
+
+    #[test]
+    fn an_instance_s_image_is_the_one_listed_under_its_pid_and_sequence_number() {
+        let process = |pid, sequence_number, image: &str| ProcessInfo {
+            pid,
+            sequence_number,
+            image_path: image.into(),
+            ..Default::default()
+        };
+        let listed = [process(4, 40, r"C:\a.exe"), process(5, 51, r"C:\b.exe")];
+        assert_eq!(listed_image(&listed, 5, 51), r"C:\b.exe");
+        assert_eq!(listed_image(&listed, 5, 50), "", "the pid reused by another instance");
+        assert_eq!(listed_image(&listed, 6, 60), "");
+    }
 
     #[test]
     fn a_process_hosts_the_services_listed_under_its_pid() {

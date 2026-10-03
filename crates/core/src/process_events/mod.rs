@@ -10,7 +10,7 @@ mod resolve;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
@@ -27,16 +27,13 @@ use decode::{KERNEL_PROCESS, KERNEL_PROCESS_KEYWORD, PROCESS, Record, TASK_SCHED
 use history::{Cursor, History};
 use resolve::Machine;
 
-/// How long an event waits for the halves told in other sessions: longer
-/// than the slowest flush timer.
-const HOLD: u64 = 3 * SECOND;
 /// How long events are held for watchers that come later.
 const KEPT_FOR: u64 = 3600 * SECOND;
 /// The most memory the held events take.
 const KEPT_BYTES: usize = 4 << 20;
 /// The most one batch carries, well under a reader's traversal limit.
 const BATCH_BYTES: usize = 1 << 20;
-/// How often the held events are let out.
+/// How often what waited too long is let out while nothing comes.
 const TICK: Duration = Duration::from_millis(250);
 /// Events copied out of ETW and not read yet, at most.
 const QUEUED: usize = 1 << 14;
@@ -57,17 +54,22 @@ struct Shared {
 
 impl ProcessEvents {
     /// Starts the thread that reads the events. `services` names the
-    /// services a process hosts. The provider feeds the thread from the ETW
-    /// sessions it registers; the thread ends once the provider and every
-    /// router it registered with are gone.
-    pub fn start(services: impl FnMut(u32) -> Vec<SmolStr> + Send + 'static) -> Result<(Self, ProcessEventsProvider)> {
+    /// services a process hosts; `images` the Win32 image path of a listed
+    /// process by pid and sequence number, empty when none is listed. The
+    /// provider feeds the thread from the ETW sessions it registers; the
+    /// thread ends once the provider and every router it registered with are
+    /// gone.
+    pub fn start(
+        services: impl FnMut(u32) -> Vec<SmolStr> + Send + 'static,
+        images: impl FnMut(u32, u64) -> SmolStr + Send + 'static,
+    ) -> Result<(Self, ProcessEventsProvider)> {
         let events = Self::new(now());
         let (input, inbox) = crossbeam_channel::bounded(QUEUED);
         let dropped = Arc::new(AtomicU64::new(0));
         std::thread::Builder::new().name("process-events".into()).spawn({
             let shared = events.shared.clone();
             let dropped = dropped.clone();
-            let machine = Machine::new(services);
+            let machine = Machine::new(services, images);
             move || run(inbox, shared, dropped, machine)
         })?;
         Ok((events, ProcessEventsProvider { input, dropped }))
@@ -168,43 +170,53 @@ impl Provider for ProcessEventsProvider {
 fn run(inbox: Receiver<Input>, shared: Arc<Shared>, dropped: Arc<AtomicU64>, mut machine: Machine) {
     let mut assembler = Assembler::default();
     let (mut kernel_lost, mut dropped_seen, mut lost) = (0u64, 0u64, 0u64);
-    let mut released = Instant::now();
+    let mut take = |input: Input, assembler: &mut Assembler, lost: &mut u64| match input {
+        Input::Record(record) => {
+            if let Some(raw) = decode::decode(&record, resolve::working_directory) {
+                assembler.add(raw);
+            }
+        }
+        Input::KernelLost(total) => {
+            *lost += total.checked_sub(kernel_lost).unwrap_or(total);
+            kernel_lost = total;
+        }
+    };
     loop {
         match inbox.recv_timeout(TICK) {
-            Ok(Input::Record(record)) => {
-                if let Some(raw) = decode::decode(&record, resolve::working_directory) {
-                    assembler.add(raw);
+            Ok(input) => {
+                take(input, &mut assembler, &mut lost);
+                while let Ok(input) = inbox.try_recv() {
+                    take(input, &mut assembler, &mut lost);
                 }
-            }
-            Ok(Input::KernelLost(total)) => {
-                lost += total.checked_sub(kernel_lost).unwrap_or(total);
-                kernel_lost = total;
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        if released.elapsed() >= TICK {
-            released = Instant::now();
-            let dropped_now = dropped.load(Ordering::Relaxed);
-            lost += dropped_now - dropped_seen;
-            dropped_seen = dropped_now;
-            let now = now();
-            release(&mut assembler, &mut machine, &shared, now.saturating_sub(HOLD), now, std::mem::take(&mut lost));
-        }
+        let dropped_now = dropped.load(Ordering::Relaxed);
+        lost += dropped_now - dropped_seen;
+        dropped_seen = dropped_now;
+        let now = now();
+        release(&mut assembler, &mut machine, &shared, now, now, std::mem::take(&mut lost));
     }
     release(&mut assembler, &mut machine, &shared, u64::MAX, now(), lost);
     shared.closed.store(true, Ordering::SeqCst);
     shared.told.notify();
 }
 
-fn release(assembler: &mut Assembler, machine: &mut Machine, shared: &Shared, watermark: u64, now: u64, lost: u64) {
-    let events = assembler.release(watermark, machine);
+/// Lets out what is ready at `ready_at` and holds it as of `now`.
+fn release(assembler: &mut Assembler, machine: &mut Machine, shared: &Shared, ready_at: u64, now: u64, lost: u64) {
+    let events = assembler.release(ready_at, machine);
     if events.is_empty() && lost == 0 {
         return;
     }
     let mut history = shared.history.lock();
     history.kernel_lost(u32::try_from(lost).unwrap_or(u32::MAX));
-    for event in events {
+    for mut event in events {
+        if let ProcessEventKind::Exited(exited) = &mut event.kind {
+            exited.image_path = history
+                .image_of(event.pid, event.sequence_number)
+                .unwrap_or_else(|| machine.listed_image(event.pid, event.sequence_number));
+        }
         history.push(event, now);
     }
     drop(history);
@@ -221,6 +233,7 @@ fn now() -> u64 {
 mod tests {
     use super::*;
     use futures::executor::block_on;
+    use std::time::Instant;
 
     const T: u64 = 134_000_000_000_000_000;
 
@@ -273,7 +286,7 @@ mod tests {
         use crate::etw::router::KernelRouter;
         use crate::sink::Sink;
 
-        let (events, provider) = ProcessEvents::start(|_| vec!["Parent".into()]).unwrap();
+        let (events, provider) = ProcessEvents::start(|_| vec!["Parent".into()], |_, _| SmolStr::default()).unwrap();
         let mut watch = events.watch();
         let (sink, _changes) = Sink::bounded(1 << 16, || {});
         let mut builder = KernelRouter::builder();
@@ -290,6 +303,7 @@ mod tests {
             .unwrap();
         let pid = child.id();
         child.wait().unwrap();
+        let exited_at = Instant::now();
 
         let mut told = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -297,8 +311,9 @@ mod tests {
             while let Some(batch) = watch.try_next() {
                 told.extend(batch.events);
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(10));
         }
+        let took = exited_at.elapsed();
         drop(router);
         drop(provider);
 
@@ -308,7 +323,7 @@ mod tests {
             ProcessEventKind::Exited(_) => None,
         });
         let exited = mine.iter().find_map(|e| match &e.kind {
-            ProcessEventKind::Exited(exited) => Some(*exited),
+            ProcessEventKind::Exited(exited) => Some(exited.clone()),
             ProcessEventKind::Started(_) => None,
         });
         let me = unsafe { crate::providers::utils::query_sequence_number(windows::Win32::GetCurrentProcess()) };
@@ -318,9 +333,14 @@ mod tests {
         assert!(started.image_path.to_lowercase().ends_with(r"\cmd.exe") && started.image_path.get(1..2) == Some(":"), "{started:?}");
         assert!(started.user.contains('\\'), "{started:?}");
         assert_eq!(started.parent_services, ["Parent"]);
-        assert_eq!(exited.map(|e| e.exit_code), Some(7), "{mine:?}");
-        assert!(exited.is_some_and(|e| e.cpu_cycles > 0 && e.peak_commit > 0), "{mine:?}");
+        let exited = exited.unwrap_or_else(|| panic!("no exit of {pid} among {mine:?}"));
+        assert_eq!(exited.exit_code, 7, "{mine:?}");
+        assert!(exited.cpu_cycles > 0 && exited.peak_commit > 0, "{mine:?}");
+        assert_eq!(exited.image_name.to_lowercase(), "cmd.exe", "{exited:?}");
+        assert_eq!(exited.image_path, started.image_path, "{exited:?}");
+        assert_eq!(exited.start_time, mine[0].time, "{mine:?}");
         assert!(mine[0].sequence_number != 0 && mine.iter().all(|e| e.sequence_number == mine[0].sequence_number));
+        assert!(took < Duration::from_millis(500), "told {took:?} after the exit at a 50 ms flush timer");
     }
 }
 
@@ -363,9 +383,16 @@ pub struct ProcessStarted {
     pub parent_services: Vec<SmolStr>,
 }
 
-/// Totals over the process's whole life, as the kernel reports them at exit.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Who exited, and the totals over its whole life as the kernel reports them at exit.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProcessExited {
+    /// Win32 path, from the start held or the process list; empty when the
+    /// agent never knew the process whole.
+    pub image_path: SmolStr,
+    /// The kernel's own name for the image, cut to its first 14 characters.
+    pub image_name: SmolStr,
+    /// FILETIME of the creation; 0 when unknown.
+    pub start_time: u64,
     pub exit_code: u32,
     pub cpu_cycles: u64,
     pub io_read_ops: u64,
@@ -384,7 +411,8 @@ pub struct ProcessEventBatch {
     /// In the first batch only, 0 after it: the FILETIME from which on
     /// nothing is missing.
     pub history_from: u64,
-    /// In order of time.
+    /// In order of time within the batch; a start always before its exit,
+    /// but a later batch may carry an earlier event.
     pub events: Vec<Arc<ProcessEvent>>,
     /// Events missing since the previous batch: dropped by the kernel, or
     /// gone from the hold before this watcher was sent them.

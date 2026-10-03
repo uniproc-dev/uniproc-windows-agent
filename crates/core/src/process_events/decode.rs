@@ -93,6 +93,9 @@ pub(crate) fn decode(record: &Record, working_directory: impl FnOnce(u32) -> Smo
             sequence_number: event.number("ProcessSequenceNumber").filter(|&n| n != 0)?,
             time: event.number("ExitTime").unwrap_or(time),
             exited: ProcessExited {
+                image_path: SmolStr::default(),
+                image_name: event.ansi("ImageName"),
+                start_time: event.number("CreateTime").unwrap_or(0),
                 exit_code: event.number("ExitCode").unwrap_or(0) as u32,
                 cpu_cycles: event.number("CPUCycleCount").unwrap_or(0),
                 io_read_ops: event.number("ReadOperationCount").unwrap_or(0),
@@ -158,6 +161,14 @@ impl Fields {
             .take_while(|&unit| unit != 0)
             .collect();
         String::from_utf16_lossy(&units).into()
+    }
+
+    fn ansi(&self, name: &str) -> SmolStr {
+        let Some(bytes) = self.bytes(name) else {
+            return SmolStr::default();
+        };
+        let end = bytes.iter().position(|&byte| byte == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into()
     }
 
     /// The SID of a kernel event's TOKEN_USER: the SID follows the

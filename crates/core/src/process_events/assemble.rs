@@ -11,6 +11,10 @@ pub(crate) const SECOND: u64 = 10_000_000;
 /// How far apart in time the halves of one start may be.
 const PAIRED_WITHIN: u64 = SECOND;
 
+/// How long an event waits for what is told in other sessions: longer than
+/// the slowest flush timer.
+pub(crate) const WAITS_AT_MOST: u64 = SECOND + SECOND / 4;
+
 /// Kernel-Process's start: the instance and its parent.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Created {
@@ -72,6 +76,8 @@ pub(crate) struct Assembler {
     pending: Vec<Pending>,
     launched: Vec<Launched>,
     scheduled: Vec<Scheduled>,
+    /// The starts let out lately, as pid, sequence number and creation time.
+    went: Vec<(u32, u64, u64)>,
 }
 
 enum Pending {
@@ -79,6 +85,7 @@ enum Pending {
         created: Created,
         launched: Option<Launched>,
         task: SmolStr,
+        services: Option<Vec<SmolStr>>,
     },
     Exit(Ended),
 }
@@ -93,7 +100,12 @@ impl Pending {
 
     fn into_event(self, resolve: &mut impl Resolve) -> ProcessEvent {
         match self {
-            Self::Start { created, launched, task } => ProcessEvent {
+            Self::Start {
+                created,
+                launched,
+                task,
+                services,
+            } => ProcessEvent {
                 pid: created.pid,
                 sequence_number: created.sequence_number,
                 time: created.time,
@@ -108,7 +120,7 @@ impl Pending {
                     package_full_name: created.package_full_name,
                     working_directory: created.working_directory,
                     scheduled_task: task,
-                    parent_services: resolve.parent_services(created.parent_pid),
+                    parent_services: services.unwrap_or_else(|| resolve.parent_services(created.parent_pid)),
                 }),
             },
             Self::Exit(ended) => ProcessEvent {
@@ -171,6 +183,7 @@ impl Assembler {
                     created,
                     launched,
                     task: task.unwrap_or_default(),
+                    services: None,
                 });
             }
             Raw::Launched(half) => {
@@ -201,8 +214,9 @@ impl Assembler {
         self.pending
             .iter_mut()
             .filter_map(|pending| match pending {
-                Pending::Start { created, launched, task }
-                    if created.pid == pid && near(created.time, time) && open(launched, task) =>
+                Pending::Start {
+                    created, launched, task, ..
+                } if created.pid == pid && near(created.time, time) && open(launched, task) =>
                 {
                     Some((created.time.abs_diff(time), launched, task))
                 }
@@ -212,13 +226,51 @@ impl Assembler {
             .map(|(_, launched, task)| (launched, task))
     }
 
-    /// The events up to `watermark`, in order of time; a start goes out with
-    /// whatever of its halves came by then.
-    pub fn release(&mut self, watermark: u64, resolve: &mut impl Resolve) -> Vec<ProcessEvent> {
+    /// The events ready at `now`, in order of time. A start is ready once its
+    /// command line joined, and its task too when the Task Scheduler is its
+    /// parent; an exit once its start went out. What waited
+    /// [`WAITS_AT_MOST`] goes out with whatever of its halves came by then.
+    pub fn release(&mut self, now: u64, resolve: &mut impl Resolve) -> Vec<ProcessEvent> {
+        let waited = |time: u64| time.saturating_add(WAITS_AT_MOST) <= now;
         self.pending.sort_by_key(Pending::order);
-        let due = self.pending.partition_point(|pending| pending.order().0 <= watermark);
-        let events = self.pending.drain(..due).map(|pending| pending.into_event(resolve)).collect();
-        let open = |half: &dyn Half| half.time() + PAIRED_WITHIN > watermark;
+        let mut held = Vec::new();
+        let mut events = Vec::new();
+        for mut pending in std::mem::take(&mut self.pending) {
+            let due = match &mut pending {
+                Pending::Start {
+                    created,
+                    launched,
+                    task,
+                    services,
+                } => {
+                    let mut scheduler = || {
+                        services
+                            .get_or_insert_with(|| resolve.parent_services(created.parent_pid))
+                            .iter()
+                            .any(|name| name == "Schedule")
+                    };
+                    let due = waited(created.time) || launched.is_some() && (!task.is_empty() || !scheduler());
+                    if due {
+                        self.went.push((created.pid, created.sequence_number, created.time));
+                    } else {
+                        held.push((created.pid, created.sequence_number));
+                    }
+                    due
+                }
+                Pending::Exit(ended) => {
+                    let instance = (ended.pid, ended.sequence_number);
+                    !held.contains(&instance)
+                        && (waited(ended.exited.start_time) || self.went.iter().any(|&(pid, n, _)| (pid, n) == instance))
+                }
+            };
+            if due {
+                events.push(pending.into_event(resolve));
+            } else {
+                self.pending.push(pending);
+            }
+        }
+        self.went.retain(|&(_, _, created)| !waited(created));
+        let open = |half: &dyn Half| half.time() + PAIRED_WITHIN + WAITS_AT_MOST > now;
         self.launched.retain(|half| open(half));
         self.scheduled.retain(|half| open(half));
         events
@@ -248,23 +300,41 @@ mod tests {
 
         fn parent_services(&mut self, pid: u32) -> Vec<SmolStr> {
             match pid {
+                600 => vec!["Dnscache".into()],
                 700 => vec!["Schedule".into()],
                 _ => Vec::new(),
             }
         }
     }
 
-    fn created(pid: u32, sequence_number: u64, time: u64) -> Raw {
-        Raw::Created(Created {
+    fn created_by(pid: u32, sequence_number: u64, time: u64) -> Created {
+        Created {
             pid,
             sequence_number,
             time,
-            parent_pid: 700,
-            parent_sequence_number: 70,
+            parent_pid: 600,
+            parent_sequence_number: 60,
             session_id: 1,
             image: r"\Device\HarddiskVolume3\Windows\System32\cmd.exe".into(),
             elevated: Some(false),
             ..Default::default()
+        }
+    }
+
+    fn created(pid: u32, sequence_number: u64, time: u64) -> Raw {
+        Raw::Created(created_by(pid, sequence_number, time))
+    }
+
+    fn ended_since(pid: u32, sequence_number: u64, created: u64, time: u64, exit_code: u32) -> Raw {
+        Raw::Ended(Ended {
+            pid,
+            sequence_number,
+            time,
+            exited: ProcessExited {
+                exit_code,
+                start_time: created,
+                ..Default::default()
+            },
         })
     }
 
@@ -278,15 +348,7 @@ mod tests {
     }
 
     fn ended(pid: u32, sequence_number: u64, time: u64, exit_code: u32) -> Raw {
-        Raw::Ended(Ended {
-            pid,
-            sequence_number,
-            time,
-            exited: ProcessExited {
-                exit_code,
-                ..Default::default()
-            },
-        })
+        ended_since(pid, sequence_number, time, time, exit_code)
     }
 
     fn started(event: &ProcessEvent) -> &ProcessStarted {
@@ -322,21 +384,25 @@ mod tests {
         assert_eq!(first.command_line, "cmd /c \"exit 3\"");
         assert_eq!(first.user, r"HOST\me");
         assert_eq!(first.image_path, r"C:\Windows\System32\cmd.exe");
-        assert_eq!((first.parent_pid, first.parent_sequence_number, first.session_id), (700, 70, 1));
+        assert_eq!((first.parent_pid, first.parent_sequence_number, first.session_id), (600, 60, 1));
         assert_eq!(first.elevated, Some(false));
-        assert_eq!(first.parent_services, ["Schedule"]);
+        assert_eq!(first.parent_services, ["Dnscache"]);
         assert_eq!(started(&events[1]).command_line, "git status");
     }
 
     #[test]
-    fn nothing_goes_out_past_the_watermark_and_the_rest_in_order_of_time() {
+    fn what_goes_out_together_goes_out_in_order_of_time() {
         let mut assembler = Assembler::default();
-        assembler.add(ended(1, 10, T + 5 * MS, 0));
+        assembler.add(ended_since(1, 10, T - 3600 * SECOND, T + 5 * MS, 0));
         assembler.add(created(3, 30, T + 3 * MS));
+        assembler.add(launched(3, T + 3 * MS, "c"));
         assembler.add(created(2, 20, T));
-        assert_eq!(told(&assembler.release(T + 4 * MS, &mut Machine)), [(2, 20, "started"), (3, 30, "started")]);
-        assert_eq!(told(&assembler.release(T + 4 * MS, &mut Machine)), []);
-        assert_eq!(told(&assembler.release(T + 5 * MS, &mut Machine)), [(1, 10, "exited")]);
+        assembler.add(launched(2, T, "b"));
+        assert_eq!(
+            told(&assembler.release(T + 6 * MS, &mut Machine)),
+            [(2, 20, "started"), (3, 30, "started"), (1, 10, "exited")]
+        );
+        assert_eq!(told(&assembler.release(T + 7 * MS, &mut Machine)), []);
     }
 
     #[test]
@@ -344,7 +410,7 @@ mod tests {
         let mut assembler = Assembler::default();
         assembler.add(ended(4, 40, T, 7));
         assembler.add(created(4, 40, T));
-        let events = assembler.release(T, &mut Machine);
+        let events = assembler.release(T + WAITS_AT_MOST, &mut Machine);
         assert_eq!(told(&events), [(4, 40, "started"), (4, 40, "exited")]);
         assert!(matches!(events[1].kind, ProcessEventKind::Exited(ProcessExited { exit_code: 7, .. })));
     }
@@ -353,7 +419,7 @@ mod tests {
     fn a_start_whose_command_line_never_came_goes_out_without_one() {
         let mut assembler = Assembler::default();
         assembler.add(created(5, 50, T));
-        let events = assembler.release(T + SECOND, &mut Machine);
+        let events = assembler.release(T + WAITS_AT_MOST, &mut Machine);
         assert_eq!(told(&events), [(5, 50, "started")]);
         assert_eq!(started(&events[0]).command_line, "");
         assert_eq!(started(&events[0]).user, "");
@@ -392,9 +458,74 @@ mod tests {
             time: T + 30 * MS,
             task: r"\Microsoft\Windows\Defrag\ScheduledDefrag".into(),
         }));
-        let events = assembler.release(T + SECOND, &mut Machine);
+        let events = assembler.release(T + WAITS_AT_MOST, &mut Machine);
         assert_eq!(told(&events), [(11, 110, "started")]);
         assert_eq!(started(&events[0]).scheduled_task, r"\Microsoft\Windows\Defrag\ScheduledDefrag");
+    }
+
+    #[test]
+    fn a_start_waits_for_its_command_line_and_goes_out_as_soon_as_it_joins() {
+        let mut assembler = Assembler::default();
+        assembler.add(created(13, 130, T));
+        assert_eq!(told(&assembler.release(T + 10 * MS, &mut Machine)), []);
+        assembler.add(launched(13, T + MS, "late"));
+        let events = assembler.release(T + 20 * MS, &mut Machine);
+        assert_eq!(told(&events), [(13, 130, "started")]);
+        assert_eq!(started(&events[0]).command_line, "late");
+    }
+
+    #[test]
+    fn a_start_the_scheduler_made_waits_for_its_task_too() {
+        let mut assembler = Assembler::default();
+        assembler.add(Raw::Created(Created {
+            parent_pid: 700,
+            ..created_by(14, 140, T)
+        }));
+        assembler.add(launched(14, T, "task.exe"));
+        assert_eq!(told(&assembler.release(T + 10 * MS, &mut Machine)), []);
+        assembler.add(Raw::Scheduled(Scheduled {
+            pid: 14,
+            time: T + 5 * MS,
+            task: r"\Nightly".into(),
+        }));
+        let events = assembler.release(T + 20 * MS, &mut Machine);
+        assert_eq!(told(&events), [(14, 140, "started")]);
+        assert_eq!(started(&events[0]).scheduled_task, r"\Nightly");
+    }
+
+    #[test]
+    fn what_never_joins_goes_out_after_the_bound() {
+        let mut assembler = Assembler::default();
+        assembler.add(created(15, 150, T));
+        assert_eq!(told(&assembler.release(T + WAITS_AT_MOST - MS, &mut Machine)), []);
+        assert_eq!(told(&assembler.release(T + WAITS_AT_MOST, &mut Machine)), [(15, 150, "started")]);
+    }
+
+    #[test]
+    fn an_exit_waits_for_its_start() {
+        let mut assembler = Assembler::default();
+        assembler.add(ended_since(16, 160, T, T + 5 * MS, 1));
+        assert_eq!(told(&assembler.release(T + 10 * MS, &mut Machine)), []);
+        assembler.add(created(16, 160, T));
+        assembler.add(launched(16, T, "short"));
+        assert_eq!(
+            told(&assembler.release(T + 20 * MS, &mut Machine)),
+            [(16, 160, "started"), (16, 160, "exited")]
+        );
+    }
+
+    #[test]
+    fn an_exit_goes_out_at_once_after_its_start_went_or_when_it_started_long_ago() {
+        let mut assembler = Assembler::default();
+        assembler.add(created(17, 170, T));
+        assembler.add(launched(17, T, "a"));
+        assert_eq!(told(&assembler.release(T + MS, &mut Machine)), [(17, 170, "started")]);
+        assembler.add(ended_since(17, 170, T, T + 2 * MS, 0));
+        assembler.add(ended_since(18, 180, T - 3600 * SECOND, T + 2 * MS, 0));
+        assert_eq!(
+            told(&assembler.release(T + 3 * MS, &mut Machine)),
+            [(17, 170, "exited"), (18, 180, "exited")]
+        );
     }
 
     #[test]

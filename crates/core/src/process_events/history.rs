@@ -86,8 +86,20 @@ impl History {
             let gone = self.entries.pop_front().expect("the oldest entry");
             self.bytes -= gone.bytes;
             self.first += 1;
-            self.history_from = gone.event.time + 1;
+            self.history_from = self.history_from.max(gone.event.time + 1);
         }
+    }
+
+    /// The image of the instance whose start is held.
+    pub fn image_of(&self, pid: u32, sequence_number: u64) -> Option<SmolStr> {
+        self.entries.iter().rev().find_map(|entry| match &entry.event.kind {
+            ProcessEventKind::Started(started)
+                if entry.event.pid == pid && entry.event.sequence_number == sequence_number =>
+            {
+                Some(started.image_path.clone())
+            }
+            _ => None,
+        })
     }
 
     /// The kernel dropped `count` events; the next one held carries that.
@@ -197,6 +209,36 @@ mod tests {
             history.push(exit(pid, T + pid as u64), T + pid as u64);
         }
         assert_eq!(read(&history, &mut Cursor::default()), Some((T + 8, vec![8, 9, 10], 0)));
+    }
+
+    #[test]
+    fn a_start_held_names_the_image_of_its_exit() {
+        let mut history = History::new(T, HOUR, ROOMY);
+        let start = |pid: u32, sequence_number: u64, image: &str| ProcessEvent {
+            pid,
+            sequence_number,
+            time: T,
+            kind: ProcessEventKind::Started(crate::process_events::ProcessStarted {
+                image_path: image.into(),
+                ..Default::default()
+            }),
+        };
+        history.push(start(5, 50, r"C:\old.exe"), T);
+        history.push(start(5, 51, r"C:\new.exe"), T);
+        history.push(exit(6, T), T);
+        assert_eq!(history.image_of(5, 51).as_deref(), Some(r"C:\new.exe"));
+        assert_eq!(history.image_of(5, 50).as_deref(), Some(r"C:\old.exe"));
+        assert_eq!(history.image_of(6, 60), None, "an exit names no image");
+        assert_eq!(history.image_of(7, 70), None);
+    }
+
+    #[test]
+    fn the_history_never_begins_earlier_for_events_held_out_of_order() {
+        let mut history = History::new(T, HOUR, 1);
+        history.push(exit(1, T + 10), T + 10);
+        history.push(exit(2, T + 5), T + 10);
+        history.push(exit(3, T + 20), T + 20);
+        assert_eq!(read(&history, &mut Cursor::default()), Some((T + 11, vec![3], 0)));
     }
 
     #[test]

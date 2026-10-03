@@ -402,6 +402,9 @@ pub fn process_event_batch(batch: &ProcessEventBatch, mut out: process_event_bat
                 out.set_peak_commit(x.peak_commit);
                 out.set_handles(x.handles);
                 out.set_hard_faults(x.hard_faults);
+                out.set_image_path(&x.image_path);
+                out.set_image_name(&x.image_name);
+                out.set_start_time(x.start_time);
             }
         }
     }
