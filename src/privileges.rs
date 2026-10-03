@@ -1,5 +1,5 @@
 use anyhow::Result;
-use windows::Win32::{
+use crate::bindings::{
     CloseHandle, GetCurrentProcess, GetTokenInformation, HANDLE, OpenProcessToken,
     TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };

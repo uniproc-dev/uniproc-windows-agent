@@ -1,11 +1,11 @@
 //! The agent's own service as a client sees it through the SCM: whether it
 //! runs, how far a start or a stop has come, and starting or stopping it.
 
-use windows::Win32::{
+use crate::bindings::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, DACL_SECURITY_INFORMATION, GetLastError, HANDLE, LocalFree,
     PSECURITY_DESCRIPTOR, READ_CONTROL, SECURITY_INFORMATION, SERVICE_QUERY_STATUS, SetServiceObjectSecurity, WRITE_DAC,
 };
-use windows::core::w;
+use windows_core::w;
 
 use super::control::{self, ServiceAction};
 use super::{Connection, Service};
@@ -14,7 +14,7 @@ use crate::win::win32_code;
 
 /// Windows' default DACL for a service, but for interactive users, who may
 /// also start (RP) and stop (WP) it.
-const INTERACTIVE_USERS_CONTROL: windows::core::PCWSTR = w!(
+const INTERACTIVE_USERS_CONTROL: windows_core::PCWSTR = w!(
     "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)"
 );
 

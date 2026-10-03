@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/http", "crates/rpc", "crates/service"]
+members = ["crates/core", "crates/http", "crates/rpc", "crates/service", "crates/xtask"]
 default-members = [".", "crates/core", "crates/http", "crates/rpc", "crates/service"]
 
 [package]
@@ -14,9 +14,7 @@ publish = false
 uniproc-windows-core = { path = "crates/core" }
 uniproc-agent-kit = { git = "https://github.com/uniproc-dev/uniproc-agent-kit", tag = "v0.3.0" }
 
-windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", features = [
-    "winerror", "minwindef", "winnt", "windef", "handleapi", "errhandlingapi",
-    "processthreadsapi", "winbase", "minwinbase", "securitybaseapi", "synchapi", "winsvc", "sddl"] }
+windows-core = "0.100"
 ntapi = "0.4.3"
 
 ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", tag = "v0.7.1" }

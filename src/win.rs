@@ -1,5 +1,5 @@
-use windows::Win32::{HANDLE, OpenProcess};
-use windows::core::{Error, Result};
+use crate::bindings::{HANDLE, OpenProcess};
+use windows_core::{Error, Result};
 
 pub fn open_process(access: i32, pid: u32) -> Result<HANDLE> {
     let handle = unsafe { OpenProcess(access as u32, false, pid) };

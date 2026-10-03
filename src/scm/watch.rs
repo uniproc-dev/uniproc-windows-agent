@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use uniproc_agent_kit::{Board, Following, Hold, Watch};
-use windows::Win32::{
+use crate::bindings::{
     CloseHandle, CreateEventW, ERROR_SERVICE_NOTIFY_CLIENT_LAGGING, ERROR_SUCCESS, HANDLE,
     INFINITE, NotifyServiceStatusChangeW, SERVICE_NOTIFY_2W, SERVICE_NOTIFY_CONTINUE_PENDING,
     SERVICE_NOTIFY_DELETE_PENDING, SERVICE_NOTIFY_PAUSE_PENDING, SERVICE_NOTIFY_PAUSED,
@@ -15,7 +15,7 @@ use windows::Win32::{
     SERVICE_NOTIFY_STOP_PENDING, SERVICE_NOTIFY_STOPPED, SERVICE_QUERY_STATUS, SetEvent, SleepEx,
     WaitForSingleObjectEx,
 };
-use windows::core::PCWSTR;
+use windows_core::PCWSTR;
 
 use crate::api::{ServiceState, ServiceStatus};
 use crate::scm::{Scm, Service, status};

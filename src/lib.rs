@@ -10,6 +10,8 @@ pub mod wire;
 pub use scm::own as agent_service;
 pub use uniproc_windows_core::{data, stop_leftover_sessions};
 
+#[allow(dead_code, non_upper_case_globals, clippy::all)]
+mod bindings;
 mod commands;
 mod feed;
 mod privileges;

@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use windows::Win32::{
+use crate::bindings::{
     CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_HANDLE,
     SC_MANAGER_CONNECT, SC_MANAGER_ENUMERATE_SERVICE, SC_STATUS_PROCESS_INFO,
     SERVICE_CONTINUE_PENDING, SERVICE_PAUSE_PENDING, SERVICE_PAUSED, SERVICE_RUNNING,
     SERVICE_START_PENDING, SERVICE_STATUS_PROCESS, SERVICE_STOP_PENDING, SERVICE_STOPPED,
 };
-use windows::core::{Error, PCWSTR};
+use windows_core::{Error, PCWSTR};
 
 use crate::api::{ServiceState, ServiceStatus};
 use crate::win::win32_code;
@@ -160,7 +160,7 @@ impl Drop for Connection {
 struct Service(SC_HANDLE);
 
 impl Service {
-    fn open(scm: ScHandle, name: &str, access: i32) -> windows::core::Result<Self> {
+    fn open(scm: ScHandle, name: &str, access: i32) -> windows_core::Result<Self> {
         let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         checked(unsafe { OpenServiceW(scm.0, PCWSTR(name.as_ptr()), access as u32) }).map(Self)
     }
@@ -215,7 +215,7 @@ fn status(raw: &SERVICE_STATUS_PROCESS) -> ServiceStatus {
     }
 }
 
-fn checked(handle: SC_HANDLE) -> windows::core::Result<SC_HANDLE> {
+fn checked(handle: SC_HANDLE) -> windows_core::Result<SC_HANDLE> {
     if handle.0.is_null() {
         Err(Error::from_thread())
     } else {

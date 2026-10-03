@@ -25,10 +25,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # The same toolchain as rust-toolchain.toml: windows-rs needs 1.95.
+      # The same toolchain as rust-toolchain.toml: windows-rs needs 1.95, and
+      # windows-bindgen formats the bindings xtask checks with rustfmt.
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: "1.95.0"
+          components: rustfmt
 
       # `uniproc-protocol`'s build.rs runs `capnpc`, which shells out to the
       # `capnp` compiler binary. It is not on the runner image, so install it

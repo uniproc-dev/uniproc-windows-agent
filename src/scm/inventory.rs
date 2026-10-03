@@ -3,12 +3,12 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossbeam_channel::{RecvTimeoutError, Sender};
-use windows::Win32::{
+use crate::bindings::{
     ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, QUERY_SERVICE_CONFIGW,
     QueryServiceConfig2W, QueryServiceConfigW, SC_ENUM_PROCESS_INFO, SERVICE_CONFIG_DESCRIPTION,
     SERVICE_DESCRIPTIONW, SERVICE_QUERY_CONFIG, SERVICE_STATE_ALL, SERVICE_WIN32,
 };
-use windows::core::PCWSTR;
+use windows_core::PCWSTR;
 
 use crate::api::ServiceStats;
 use crate::scm::{ScHandle, Scm, Service, state};
