@@ -43,12 +43,12 @@ async fn run() -> anyhow::Result<()> {
     let mut events = remote.watch_process_events().await?;
 
     let first = events.next().await?;
-    let (started, exited) = first.events.iter().fold((0, 0), |(s, x), e| match e.kind {
-        ProcessEventKind::Started(_) => (s + 1, x),
-        ProcessEventKind::Exited(_) => (s, x + 1),
+    let (started, exited, pathless) = first.events.iter().fold((0, 0, 0), |(s, x, p), e| match &e.kind {
+        ProcessEventKind::Started(_) => (s + 1, x, p),
+        ProcessEventKind::Exited(exited) => (s, x + 1, p + exited.image_path.is_empty() as usize),
     });
     println!(
-        "replay: history_from={} events={} ({started} starts, {exited} exits) lost={}",
+        "replay: history_from={} events={} ({started} starts, {exited} exits, {pathless} of them without a path) lost={}",
         first.history_from,
         first.events.len(),
         first.lost
