@@ -23,8 +23,12 @@ const SDDL_REVISION_1: u32 = 1;
 /// The service's status now; Err with the Win32 code when it cannot be
 /// read, 1060 when the service is not installed.
 pub fn status() -> Result<ServiceStatus, u32> {
+    status_of(SERVICE_NAME)
+}
+
+fn status_of(name: &str) -> Result<ServiceStatus, u32> {
     let scm = Connection::open()?;
-    let service = Service::open(scm.handle(), SERVICE_NAME, SERVICE_QUERY_STATUS).map_err(|e| win32_code(&e))?;
+    let service = Service::open(scm.handle(), name, SERVICE_QUERY_STATUS).map_err(|e| win32_code(&e))?;
     service.status().ok_or_else(|| unsafe { GetLastError() })
 }
 
@@ -126,8 +130,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "reads the installed agent service"]
-    fn the_installed_service_reads_as_running() {
-        assert_eq!(status().map(|s| s.state), Ok(ServiceState::Running));
+    fn any_user_reads_a_service_s_status_and_a_missing_one_is_1060() {
+        let event_log = status_of("EventLog");
+        assert_eq!(event_log.map(|s| s.state), Ok(ServiceState::Running));
+        assert!(event_log.is_ok_and(|s| s.pid != 0));
+        assert_eq!(status_of("UniprocNoSuchService").map(|s| s.state), Err(1060));
     }
 }
