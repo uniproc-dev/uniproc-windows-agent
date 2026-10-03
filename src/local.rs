@@ -22,7 +22,8 @@ pub use crate::feed::Published;
 pub use crate::sampler::LocalSampler;
 pub use crate::scm::ServiceWatch;
 pub use crate::watch::LocalWatch;
-pub use uniproc_windows_core::{ProcessEventsWatch, SessionHealth};
+pub use uniproc_windows_core::ProcessEventsWatch as LocalProcessEvents;
+pub use uniproc_windows_core::SessionHealth;
 
 /// Passports and states are read this often while a client is attached and nobody subscribes.
 pub const ATTACHED_PERIOD: Duration = Duration::from_millis(1000);
@@ -177,7 +178,7 @@ impl Local {
 
     /// The process starts and exits held, about the last hour, then each one
     /// as it happens. Ends when monitoring stops.
-    pub fn watch_process_events(&self) -> ProcessEventsWatch {
+    pub fn watch_process_events(&self) -> LocalProcessEvents {
         self.process_events.watch()
     }
 }
