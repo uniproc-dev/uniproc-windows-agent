@@ -340,7 +340,8 @@ mod tests {
         assert_eq!(exited.image_path, started.image_path, "{exited:?}");
         assert_eq!(exited.start_time, mine[0].time, "{mine:?}");
         assert!(mine[0].sequence_number != 0 && mine.iter().all(|e| e.sequence_number == mine[0].sequence_number));
-        assert!(took < Duration::from_millis(500), "told {took:?} after the exit at a 50 ms flush timer");
+        let bound = Duration::from_nanos(assemble::WAITS_AT_MOST * 100);
+        assert!(took < bound, "told {took:?} after the exit: it waited for the bound, not for its halves");
     }
 }
 
