@@ -57,7 +57,7 @@ fn wait_for_status(scm: ScHandle, name: &str, desired: u32) -> CommandResult {
     let mut status = SERVICE_STATUS_PROCESS::default();
     let mut bytes_needed = 0;
 
-    for _ in 0..60 {
+    for _ in 0..300 {
         unsafe {
             QueryServiceStatusEx(
                 service.0,
@@ -74,7 +74,7 @@ fn wait_for_status(scm: ScHandle, name: &str, desired: u32) -> CommandResult {
             return Ok(());
         }
 
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     Err(ERROR_TIMEOUT)

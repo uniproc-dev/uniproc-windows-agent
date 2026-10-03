@@ -15,6 +15,15 @@ pub const SERVICE_NAME: &str = "UniprocProcessMonitor";
 /// Name the service shows in the Services console.
 pub const SERVICE_DISPLAY_NAME: &str = "Uniproc Process Monitor";
 
+/// The steps of the service's start: while it is StartPending, its
+/// checkpoint counts the steps behind it, so `checkpoint / START_STEPS` is
+/// how far it is; Running is all of them.
+pub const START_STEPS: u32 = 5;
+
+/// The steps of the service's stop, counted the same way while it is
+/// StopPending; Stopped is all of them.
+pub const STOP_STEPS: u32 = 2;
+
 /// Ok, or the Win32 error code; an NTSTATUS for suspend and resume.
 pub type CommandResult = Result<(), u32>;
 

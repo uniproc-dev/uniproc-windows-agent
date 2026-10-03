@@ -92,18 +92,29 @@ struct Reader {
     fresh: Option<Arc<Sample>>,
 }
 
+/// A step of the start that is behind it, told as it ends, in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Started {
+    SignatureCache,
+    Sessions,
+    FirstSnapshot,
+    Verdicts,
+}
+
 impl Supervisor {
     /// Starts the sessions and providers and takes the first sample, which
     /// waits for the verdicts on its images (up to [`FIRST_VERDICTS`]).
     /// `demand` says what to sample and how often; whoever keeps the
     /// subscribers changes it. `wake` asks whoever ticks for a tick now:
     /// a verdict came in, or events pile up. `extra` are providers beside
-    /// disk and network, fed from the same sessions.
+    /// disk and network, fed from the same sessions. `progress` hears each
+    /// step as it ends.
     pub fn start(
         config: SupervisorConfig,
         demand: Demand,
         extra: Vec<Box<dyn Provider>>,
         wake: impl Fn() + Send + Sync + 'static,
+        progress: &mut dyn FnMut(Started),
     ) -> Result<Self> {
         if let Err(error) = crate::privileges::enable(windows::core::w!("SeDebugPrivilege")) {
             tracing::warn!(%error, "running without SeDebugPrivilege: other accounts' processes stay opaque");
@@ -114,6 +125,7 @@ impl Supervisor {
             let wake = wake.clone();
             move || wake()
         })?;
+        progress(Started::SignatureCache);
         let mut providers: Vec<Box<dyn Provider>> = vec![
             Box::new(KernelDiskProvider::new()),
             Box::new(KernelNetworkProvider::new()),
@@ -137,6 +149,7 @@ impl Supervisor {
                 return Err(e);
             }
         }
+        progress(Started::Sessions);
 
         let reader = Reader {
             images,
@@ -170,7 +183,9 @@ impl Supervisor {
             snapshot_error: None,
         };
         supervisor.reader.sample(&first, true).context("the first snapshot")?;
+        progress(Started::FirstSnapshot);
         supervisor.reader.await_verdicts(sampled + FIRST_VERDICTS);
+        progress(Started::Verdicts);
         Ok(supervisor)
     }
 
@@ -531,7 +546,10 @@ mod tests {
             processes: ProcessMetrics::all(),
             machine: MachineMetrics::all(),
         }]);
-        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}).expect("elevated");
+        let mut told = Vec::new();
+        let mut supervisor =
+            Supervisor::start(config(), demand, Vec::new(), || {}, &mut |step| told.push(step)).expect("elevated");
+        assert_eq!(told, [Started::SignatureCache, Started::Sessions, Started::FirstSnapshot, Started::Verdicts]);
 
         let first = tick(&mut supervisor);
         let sample = first.sample.as_ref().expect("the first sample");
@@ -570,7 +588,7 @@ mod tests {
             processes: ProcessMetrics::empty(),
             machine: MachineMetric::Disk.into(),
         }]);
-        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}).expect("elevated");
+        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}, &mut |_| {}).expect("elevated");
         let name = supervisor.health().sessions[0].name.clone();
         let stopped = std::process::Command::new("logman")
             .args(["stop", &name, "-ets"])
@@ -602,7 +620,7 @@ mod tests {
             machine: MachineMetric::Cpu.into(),
         }]);
         let before = Instant::now();
-        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}).expect("elevated");
+        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}, &mut |_| {}).expect("elevated");
         let first = tick(&mut supervisor);
         let again = tick(&mut supervisor);
         assert!(again.sample.is_none());
@@ -628,7 +646,7 @@ mod tests {
                 machine: MachineMetrics::empty(),
             },
         ]);
-        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}).expect("elevated");
+        let mut supervisor = Supervisor::start(config(), demand, Vec::new(), || {}, &mut |_| {}).expect("elevated");
         let first = tick(&mut supervisor);
         assert!(!first.sample.unwrap().pids.is_empty());
 

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use uniproc_agent_kit::{Collector, Monitor, Waker, Wakes, Why};
-use uniproc_windows_core::{Demand, Diff, Provider, Supervisor, SupervisorConfig};
+use uniproc_windows_core::{Demand, Diff, Provider, Started, Supervisor, SupervisorConfig};
 
 use crate::feed::Change;
 use crate::scm::{ServiceControl, Services};
@@ -36,7 +36,8 @@ impl Collector for Core {
 impl Sources {
     /// The core samples what `demand` asks for and ticks when `wakes` says
     /// so; `spares` hands back the diffs the picture emptied. `extra` are
-    /// providers fed from the core's sessions beside its own.
+    /// providers fed from the core's sessions beside its own; `progress`
+    /// hears each step of the core's start as it ends.
     pub fn start(
         config: SupervisorConfig,
         demand: Demand,
@@ -44,8 +45,9 @@ impl Sources {
         changes: Sender<Change>,
         spares: Receiver<Diff>,
         extra: Vec<Box<dyn Provider>>,
+        progress: &mut dyn FnMut(Started),
     ) -> anyhow::Result<Self> {
-        let supervisor = Supervisor::start(config, demand, extra, move || waker.wake())?;
+        let supervisor = Supervisor::start(config, demand, extra, move || waker.wake(), progress)?;
         let services = Services::start({
             let changes = changes.clone();
             move |event| {

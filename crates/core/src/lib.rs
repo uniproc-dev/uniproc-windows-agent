@@ -36,5 +36,5 @@ pub use process_events::{
 };
 pub use providers::provider::Provider;
 pub use smol_str::SmolStr;
-pub use supervisor::{Supervisor, SupervisorConfig};
+pub use supervisor::{Started, Supervisor, SupervisorConfig};
 pub use uniproc_agent_kit::{Epoch, Tagged};

@@ -10,7 +10,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
 use uniproc_windows_agent::api::SERVICE_NAME;
-use uniproc_windows_agent::local::Local;
+use uniproc_windows_agent::local::{Local, Started};
 use uniproc_windows_http::Telemetry;
 
 use crate::logger;
@@ -19,9 +19,9 @@ define_windows_service!(ffi_service_main, service_main);
 
 /// Starts the agent and binds its pipe, then calls `stop`, which returns
 /// when the agent is to stop. Fails before calling `stop` when either
-/// cannot start.
-fn run(telemetry: Telemetry, stop: impl FnOnce()) -> Result<()> {
-    let agent = std::sync::Arc::new(Local::start_as_service()?);
+/// cannot start. `tell` hears each step as it is reached.
+fn run(telemetry: Telemetry, tell: &mut dyn FnMut(Step), stop: impl FnOnce()) -> Result<()> {
+    let agent = std::sync::Arc::new(Local::start_as_service(&mut |started| tell(Step::Core(started)))?);
 
     match uniproc_windows_http::serve(agent.clone(), telemetry) {
         Ok(access) => info!(
@@ -62,11 +62,14 @@ fn run(telemetry: Telemetry, stop: impl FnOnce()) -> Result<()> {
     }
 
     info!("Uniproc monitor running");
+    tell(Step::Running);
 
     stop();
 
+    tell(Step::Stopping);
     info!("Shutting down…");
     agent.stop();
+    tell(Step::CoreStopped);
     Ok(())
 }
 
@@ -99,48 +102,81 @@ fn run_service(service_name: &str, telemetry: Telemetry) -> Result<()> {
             _ => ServiceControlHandlerResult::NotImplemented,
         })?;
 
-    set_status(&status_handle, ServiceState::StartPending, ServiceExitCode::Win32(0))?;
+    let mut tell = |step| {
+        info!(?step, "the service is at");
+        let (state, checkpoint, next_within) = told(step);
+        if let Err(error) = set_status(&status_handle, state, checkpoint, next_within, ServiceExitCode::Win32(0)) {
+            tracing::warn!(error = format!("{error:#}"), ?step, "the SCM was not told");
+        }
+    };
+    tell(Step::Registered);
+    if let Err(error) = uniproc_windows_agent::agent_service::let_interactive_users_control() {
+        tracing::warn!(error, "only administrators can start and stop the service");
+    }
 
-    let ran = run(telemetry, || {
-        set_status(&status_handle, ServiceState::Running, ServiceExitCode::Win32(0)).ok();
+    let ran = run(telemetry, &mut tell, || {
         stop_rx.recv().ok();
     });
     let exit_code = match &ran {
         Ok(()) => ServiceExitCode::Win32(0),
         Err(_) => ServiceExitCode::ServiceSpecific(START_FAILED),
     };
-    set_status(&status_handle, ServiceState::Stopped, exit_code)?;
+    set_status(&status_handle, ServiceState::Stopped, 0, Duration::ZERO, exit_code)?;
     ran
 }
 
 fn set_status(
     handle: &windows_service::service_control_handler::ServiceStatusHandle,
     state: ServiceState,
+    checkpoint: u32,
+    wait_hint: Duration,
     exit_code: ServiceExitCode,
 ) -> Result<()> {
-    let (controls, wait_hint) = match state {
-        ServiceState::Running => (
-            ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-            Duration::ZERO,
-        ),
-        ServiceState::StartPending => (ServiceControlAccept::empty(), Duration::from_secs(90)),
-        _ => (ServiceControlAccept::empty(), Duration::ZERO),
+    let controls = match state {
+        ServiceState::Running => ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        _ => ServiceControlAccept::empty(),
     };
     handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: state,
         controls_accepted: controls,
         exit_code,
-        checkpoint: 0,
+        checkpoint,
         wait_hint,
         process_id: None,
     })?;
     Ok(())
 }
 
+/// Where the service is, as the SCM is told it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Registered,
+    Core(Started),
+    Running,
+    Stopping,
+    CoreStopped,
+}
+
+/// The state, the checkpoint and how long until the next step that the
+/// SCM is told at `step`.
+fn told(step: Step) -> (ServiceState, u32, Duration) {
+    let seconds = Duration::from_secs;
+    match step {
+        Step::Registered => (ServiceState::StartPending, 0, seconds(10)),
+        Step::Core(Started::SignatureCache) => (ServiceState::StartPending, 1, seconds(30)),
+        Step::Core(Started::Sessions) => (ServiceState::StartPending, 2, seconds(30)),
+        Step::Core(Started::FirstSnapshot) => (ServiceState::StartPending, 3, seconds(60)),
+        Step::Core(Started::Verdicts) => (ServiceState::StartPending, 4, seconds(10)),
+        Step::Running => (ServiceState::Running, 0, Duration::ZERO),
+        Step::Stopping => (ServiceState::StopPending, 0, seconds(30)),
+        Step::CoreStopped => (ServiceState::StopPending, 1, seconds(5)),
+    }
+}
+
 pub fn run_direct(telemetry: Telemetry) -> Result<()> {
     info!("Starting monitoring (press Ctrl+C to stop).");
-    run(telemetry, || {
+    run(telemetry, &mut |_| {}, || {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_handler = stop.clone();
         let main_thread = std::thread::current();
@@ -191,6 +227,8 @@ pub fn install(service_name: &str, display_name: &str, description: &str) -> Res
         }]),
     })?;
     service.set_failure_actions_on_non_crash_failures(true)?;
+    uniproc_windows_agent::agent_service::let_interactive_users_control()
+        .map_err(|code| anyhow::anyhow!("interactive users were not let start and stop the service: Win32 {code}"))?;
     Ok(())
 }
 
@@ -212,4 +250,36 @@ pub fn uninstall(service_name: &str) -> Result<Vec<String>> {
     }
     service.delete()?;
     Ok(uniproc_windows_agent::stop_leftover_sessions())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uniproc_windows_agent::api::{START_STEPS, STOP_STEPS};
+
+    #[test]
+    fn the_scm_hears_every_step_counted_up_to_its_total() {
+        let count = |steps: &[Step], state: ServiceState| {
+            steps
+                .iter()
+                .map(|&step| {
+                    let (told_state, checkpoint, next_within) = told(step);
+                    assert_eq!(told_state, state, "{step:?}");
+                    assert!(!next_within.is_zero(), "{step:?} says how long the next step may take");
+                    checkpoint
+                })
+                .collect::<Vec<_>>()
+        };
+        let start = [
+            Step::Registered,
+            Step::Core(Started::SignatureCache),
+            Step::Core(Started::Sessions),
+            Step::Core(Started::FirstSnapshot),
+            Step::Core(Started::Verdicts),
+        ];
+        assert_eq!(count(&start, ServiceState::StartPending), (0..START_STEPS).collect::<Vec<_>>());
+        assert_eq!(told(Step::Running), (ServiceState::Running, 0, Duration::ZERO));
+        let stop = [Step::Stopping, Step::CoreStopped];
+        assert_eq!(count(&stop, ServiceState::StopPending), (0..STOP_STEPS).collect::<Vec<_>>());
+    }
 }

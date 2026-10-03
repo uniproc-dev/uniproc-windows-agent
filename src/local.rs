@@ -23,7 +23,7 @@ pub use crate::sampler::LocalSampler;
 pub use crate::scm::ServiceWatch;
 pub use crate::watch::LocalWatch;
 pub use uniproc_windows_core::ProcessEventsWatch as LocalProcessEvents;
-pub use uniproc_windows_core::SessionHealth;
+pub use uniproc_windows_core::{SessionHealth, Started};
 
 /// Passports and states are read this often while a client is attached and nobody subscribes.
 pub const ATTACHED_PERIOD: Duration = Duration::from_millis(1000);
@@ -75,15 +75,16 @@ impl Local {
         if !crate::privileges::is_elevated().map_err(StartError::Failed)? {
             return Err(StartError::NotElevated);
         }
-        Self::launch(profile::in_app(), ATTACHED_PERIOD).map_err(StartError::Failed)
+        Self::launch(profile::in_app(), ATTACHED_PERIOD, &mut |_| {}).map_err(StartError::Failed)
     }
 
-    /// Starts monitoring under the service's own session names and store, at the idle rate.
-    pub fn start_as_service() -> anyhow::Result<Self> {
-        Self::launch(profile::service(), IDLE_PERIOD)
+    /// Starts monitoring under the service's own session names and store,
+    /// at the idle rate. `progress` hears each step of the start as it ends.
+    pub fn start_as_service(progress: &mut dyn FnMut(Started)) -> anyhow::Result<Self> {
+        Self::launch(profile::service(), IDLE_PERIOD, progress)
     }
 
-    fn launch(config: SupervisorConfig, idle: Duration) -> anyhow::Result<Self> {
+    fn launch(config: SupervisorConfig, idle: Duration, progress: &mut dyn FnMut(Started)) -> anyhow::Result<Self> {
         let (waker, wakes) = monitor::channel();
         let subscriptions = Subscriptions::new(idle, {
             let waker = waker.clone();
@@ -102,7 +103,15 @@ impl Local {
                 move |pid, sequence_number| listed_image(&feed.latest().snapshot.processes.value, pid, sequence_number)
             },
         )?;
-        let sources = Sources::start(config, demand, (waker, wakes), changes, spares, vec![Box::new(provider)])?;
+        let sources = Sources::start(
+            config,
+            demand,
+            (waker, wakes),
+            changes,
+            spares,
+            vec![Box::new(provider)],
+            progress,
+        )?;
         let services = sources.control();
         Ok(Self {
             feed,
