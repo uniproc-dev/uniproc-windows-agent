@@ -1,5 +1,5 @@
 use ntapi::ntpoapi::PROCESSOR_POWER_INFORMATION;
-use windows::Win32::{
+use crate::bindings::{
     ALL_PROCESSOR_GROUPS, CallNtPowerInformation, GetActiveProcessorCount, GlobalMemoryStatusEx, MEMORYSTATUSEX, PDH_FMT_COUNTERVALUE,
     PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery,
     PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW, ProcessorInformation,
@@ -7,7 +7,7 @@ use windows::Win32::{
 };
 use std::time::{Duration, Instant};
 
-use windows::core::PCWSTR;
+use windows_core::PCWSTR;
 
 use crate::providers::machine::vars::{PDH_CSTATUS_VALID_DATA, PDH_PROCESSOR_PERFORMANCE};
 use crate::sample::MachineMemory;

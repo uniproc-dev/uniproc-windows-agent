@@ -7,7 +7,7 @@ use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::{
+use crate::bindings::{
     ACL, BY_HANDLE_FILE_INFORMATION, ConvertStringSecurityDescriptorToSecurityDescriptorW, CreateDirectoryW,
     DACL_SECURITY_INFORMATION, ERROR_ALREADY_EXISTS, GetFileInformationByHandle, GetLastError,
     GetNamedSecurityInfoW, GetSecurityDescriptorDacl, HANDLE, IsWellKnownSid, LocalFree,
@@ -15,7 +15,7 @@ use windows::Win32::{
     SDDL_REVISION_1, SE_FILE_OBJECT, SECURITY_ATTRIBUTES, SECURITY_INFORMATION, SetNamedSecurityInfoW,
     WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
-use windows::core::{BOOL, PCWSTR};
+use windows_core::{BOOL, PCWSTR};
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossbeam_channel::Receiver;
-use windows::Win32::HANDLE;
+use crate::bindings::HANDLE;
 
 use crate::etw::router::KernelRouter;
 use crate::etw::vars::FLUSH_TIMER_MS;
@@ -116,7 +116,7 @@ impl Supervisor {
         wake: impl Fn() + Send + Sync + 'static,
         progress: &mut dyn FnMut(Started),
     ) -> Result<Self> {
-        if let Err(error) = crate::privileges::enable(windows::core::w!("SeDebugPrivilege")) {
+        if let Err(error) = crate::privileges::enable(windows_core::w!("SeDebugPrivilege")) {
             tracing::warn!(%error, "running without SeDebugPrivilege: other accounts' processes stay opaque");
         }
 

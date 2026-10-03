@@ -4,8 +4,8 @@ use std::thread::JoinHandle;
 
 use anyhow::Result;
 use tracing::error;
-use windows::Win32::{EVENT_RECORD, ProcessTrace};
-use windows::core::{GUID, w};
+use crate::bindings::{EVENT_RECORD, ProcessTrace};
+use windows_core::{GUID, w};
 
 use crate::etw::consumer::{Events, TraceConsumer};
 use crate::etw::session::{self, EtwSession, SessionMode};
@@ -54,7 +54,7 @@ fn timestamp_ticks(d: std::time::Duration) -> i64 {
 
 /// System time now, in the unit of an event's TimeStamp.
 fn timestamp_now() -> i64 {
-    let now = unsafe { windows::Win32::GetSystemTimePreciseAsFileTime() };
+    let now = unsafe { crate::bindings::GetSystemTimePreciseAsFileTime() };
     ((now.dwHighDateTime as i64) << 32) | now.dwLowDateTime as i64
 }
 
@@ -93,7 +93,7 @@ impl Enable {
     /// Every keyword, up to informational events.
     pub const ALL: Self = Self {
         keywords: u64::MAX,
-        level: windows::Win32::TRACE_LEVEL_INFORMATION as u8,
+        level: crate::bindings::TRACE_LEVEL_INFORMATION as u8,
     };
 }
 
@@ -398,7 +398,7 @@ pub(crate) mod tests {
     use crate::etw::vars::guid;
     use crate::providers::provider::Provider;
     use crate::state::events::{NetDelta, NetDeltas};
-    use windows::Win32::EVENT_TRACE_FLAG_NETWORK_TCPIP;
+    use crate::bindings::EVENT_TRACE_FLAG_NETWORK_TCPIP;
 
     const KERNEL_PROCESS_PROVIDER: GUID = guid!("22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716");
     const EVENT_ID_PROCESS_START: u16 = 1;
@@ -647,7 +647,7 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "requires admin; a measurement, run in release with --nocapture"]
     fn what_a_short_flush_timer_costs() {
-        use windows::Win32::{FILETIME, GetCurrentProcess, GetProcessTimes};
+        use crate::bindings::{FILETIME, GetCurrentProcess, GetProcessTimes};
         let cpu = || {
             let (mut created, mut exited, mut kernel, mut user) = Default::default();
             unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) }.unwrap();
@@ -745,7 +745,7 @@ pub(crate) mod tests {
                 KERNEL_PROCESS_PROVIDER,
                 Enable {
                     keywords: PROCESS_KEYWORD,
-                    level: windows::Win32::TRACE_LEVEL_INFORMATION as u8,
+                    level: crate::bindings::TRACE_LEVEL_INFORMATION as u8,
                 },
             )
             .on(&[KERNEL_PROCESS_PROVIDER], {

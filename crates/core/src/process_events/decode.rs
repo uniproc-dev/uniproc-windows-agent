@@ -2,10 +2,10 @@
 //! names, so a newer version of an event reads as well.
 
 use smol_str::SmolStr;
-use windows::Win32::{
+use crate::bindings::{
     EVENT_HEADER_FLAG_64_BIT_HEADER, EVENT_RECORD, PROPERTY_DATA_DESCRIPTOR, TdhGetProperty, TdhGetPropertySize,
 };
-use windows::core::GUID;
+use windows_core::GUID;
 
 use super::ProcessExited;
 use super::assemble::{Created, Ended, Launched, Raw, Scheduled};

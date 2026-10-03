@@ -8,11 +8,11 @@ use ntapi::ntpsapi::{NtQueryInformationProcess, PROCESS_BASIC_INFORMATION, Proce
 use ntapi::ntrtl::RTL_USER_PROCESS_PARAMETERS;
 use ntapi::winapi::shared::ntdef::UNICODE_STRING;
 use smol_str::SmolStr;
-use windows::Win32::{
+use crate::bindings::{
     ConvertSidToStringSidW, HANDLE, LocalFree, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, PSID,
     QueryDosDeviceW, ReadProcessMemory,
 };
-use windows::core::{PCWSTR, PWSTR};
+use windows_core::{PCWSTR, PWSTR};
 
 use super::assemble::Resolve;
 use crate::providers::process::passport::SidNames;
@@ -174,8 +174,8 @@ fn read_working_directory(pid: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::{GetCurrentProcess, QueryFullProcessImageNameW};
-    use windows::core::PWSTR;
+    use crate::bindings::{GetCurrentProcess, QueryFullProcessImageNameW};
+    use windows_core::PWSTR;
 
     const PROCESS_NAME_NATIVE: u32 = 1;
 

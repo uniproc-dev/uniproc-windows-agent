@@ -12,7 +12,7 @@ macro_rules! guid {
         const fn byte(hi: u8, lo: u8) -> u8 {
             hex(hi) << 4 | hex(lo)
         }
-        ::windows::core::GUID::from_values(
+        ::windows_core::GUID::from_values(
             u32::from_be_bytes([
                 byte(BYTES[0], BYTES[1]),
                 byte(BYTES[2], BYTES[3]),

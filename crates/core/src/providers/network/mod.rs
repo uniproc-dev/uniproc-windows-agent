@@ -4,7 +4,7 @@ mod vars;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::Result;
-use windows::Win32::{EVENT_RECORD, EVENT_TRACE_FLAG_NETWORK_TCPIP};
+use crate::bindings::{EVENT_RECORD, EVENT_TRACE_FLAG_NETWORK_TCPIP};
 
 use crate::etw::router::{Batch, KernelRouterBuilder};
 use crate::etw::vars::BATCH_WINDOW;
@@ -98,9 +98,9 @@ fn event(record: &EVENT_RECORD, data: &[u8]) -> Option<NetworkEvent> {
 mod tests {
     use super::*;
     use crate::providers::network::events::tests::{v4_dump, v6_dump};
-    use windows::Win32::{EVENT_DESCRIPTOR, EVENT_HEADER};
+    use crate::bindings::{EVENT_DESCRIPTOR, EVENT_HEADER};
 
-    fn record(provider: windows::core::GUID, opcode: u8) -> EVENT_RECORD {
+    fn record(provider: windows_core::GUID, opcode: u8) -> EVENT_RECORD {
         EVENT_RECORD {
             EventHeader: EVENT_HEADER {
                 ProviderId: provider,

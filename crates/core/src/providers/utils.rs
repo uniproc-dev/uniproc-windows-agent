@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
 use ntapi::winapi::shared::ntdef::UNICODE_STRING;
-use windows::Win32::{
+use crate::bindings::{
     CATALOG_INFO, LocalFree, CERT_CHAIN_POLICY_MICROSOFT_ROOT, CERT_CHAIN_POLICY_PARA,
     CERT_CHAIN_POLICY_STATUS, CERT_NAME_SIMPLE_DISPLAY_TYPE, CertVerifyCertificateChainPolicy,
     MICROSOFT_ROOT_CERT_CHAIN_POLICY_CHECK_APPLICATION_ROOT_FLAG, PCCERT_CHAIN_CONTEXT, CloseHandle, CommandLineToArgvW, CreateFileW,
@@ -17,7 +17,7 @@ use windows::Win32::{
     WTD_STATEACTION_VERIFY, WTD_UI_NONE, WTHelperGetProvSignerFromChain,
     WTHelperProvDataFromStateData, WinVerifyTrust,
 };
-use windows::core::{PCWSTR, PWSTR};
+use windows_core::{PCWSTR, PWSTR};
 
 use crate::state::events::ProcessSignature;
 use crate::win::{PROCESS_NAME_WIN32, WINTRUST_ACTION_GENERIC_VERIFY_V2};
@@ -345,7 +345,7 @@ impl CatalogAdmin {
     fn acquire() -> Option<Self> {
         let mut handle = HCATADMIN::default();
         unsafe {
-            CryptCATAdminAcquireContext2(&mut handle, None, windows::core::w!("SHA256"), None, None)
+            CryptCATAdminAcquireContext2(&mut handle, None, windows_core::w!("SHA256"), None, None)
                 .ok()
                 .ok()?;
         }
@@ -584,7 +584,7 @@ mod console_host_tests {
 
     #[test]
     fn a_test_run_from_a_console_sees_its_host() {
-        let host = unsafe { query_console_host_pid(windows::Win32::GetCurrentProcess()) };
+        let host = unsafe { query_console_host_pid(crate::bindings::GetCurrentProcess()) };
         if host != 0 {
             assert_ne!(host, std::process::id());
         }
@@ -596,7 +596,7 @@ mod command_line_tests {
     use std::mem::size_of;
 
     use ntapi::winapi::shared::ntdef::UNICODE_STRING;
-    use windows::Win32::{GetCurrentProcess, HANDLE};
+    use crate::bindings::{GetCurrentProcess, HANDLE};
 
     use super::{bytes_of, parse_cmd_line, query_command_line, query_sequence_number, unicode_string_in};
 
@@ -655,7 +655,7 @@ mod command_line_tests {
         use ntapi::ntpebteb::PEB;
         use ntapi::ntpsapi::{NtQueryInformationProcess, PROCESS_BASIC_INFORMATION, ProcessBasicInformation};
         use ntapi::ntrtl::RTL_USER_PROCESS_PARAMETERS;
-        use windows::Win32::{ReadProcessMemory, WriteProcessMemory};
+        use crate::bindings::{ReadProcessMemory, WriteProcessMemory};
 
         let mut child = std::process::Command::new("cmd.exe")
             .args(["/d", "/c", "ping", "-n", "30", "127.0.0.1"])

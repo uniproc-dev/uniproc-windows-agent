@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
-use windows::Win32::{
+use crate::bindings::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, EnumProcessModulesEx, GetCurrentProcess, GetMappedFileNameW,
     HANDLE, HMODULE, LIST_MODULES_ALL, NtQueryInformationProcess, NtQueryObject, OBJECT_INFORMATION_CLASS,
     PROCESS_DUP_HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, PROCESSINFOCLASS,
 };
-use windows::core::PWSTR;
+use windows_core::PWSTR;
 
 use crate::providers::prober::{self, FULL_ROUND, IsDue, Listed, Prober, Seen};
 use crate::providers::utils::{bytes_of, unicode_string_in};
@@ -307,8 +307,8 @@ fn names(handle: HANDLE, expected: &str, scratch: &mut [u64]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::{FreeLibrary, GetProcAddress, LoadLibraryW};
-    use windows::core::{s, w};
+    use crate::bindings::{FreeLibrary, GetProcAddress, LoadLibraryW};
+    use windows_core::{s, w};
 
     type CreatePartition = unsafe extern "system" fn(*mut isize) -> i32;
     type SetPartitionProperty = unsafe extern "system" fn(isize, i32, *const c_void, u32) -> i32;
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     #[ignore = "requires admin; a measurement, run in release with --nocapture"]
     fn what_checking_the_candidates_costs() {
-        crate::privileges::enable(windows::core::w!("SeDebugPrivilege")).unwrap();
+        crate::privileges::enable(windows_core::w!("SeDebugPrivilege")).unwrap();
         let mut processes = crate::snapshot::Processes::new();
         processes.read().unwrap();
         let mut scratch = Scratch::default();

@@ -1,10 +1,10 @@
 use anyhow::{Result, bail};
-use windows::Win32::{
+use crate::bindings::{
     AdjustTokenPrivileges, CloseHandle, ERROR_NOT_ALL_ASSIGNED, GetCurrentProcess, GetLastError,
     HANDLE, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, OpenProcessToken, SE_PRIVILEGE_ENABLED,
     TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
-use windows::core::PCWSTR;
+use windows_core::PCWSTR;
 
 /// Turns on a privilege the process token already holds.
 ///

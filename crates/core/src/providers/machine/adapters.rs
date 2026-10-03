@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use windows::Win32::{
+use crate::bindings::{
     FreeMibTable, GetIfEntry2, GetIfTable2Ex, IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL, IfOperStatusUp,
     MIB_IF_ROW2, MibIfTableNormalWithoutStatistics, PMIB_IF_TABLE2,
 };

@@ -3,7 +3,7 @@ use ntapi::ntexapi::{
     NtQuerySystemInformationEx, SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION,
     SystemProcessorPerformanceInformation,
 };
-use windows::Win32::GetActiveProcessorGroupCount;
+use crate::bindings::GetActiveProcessorGroupCount;
 
 use crate::aligned::AlignedBuf;
 use crate::sample::MachineProcessor;

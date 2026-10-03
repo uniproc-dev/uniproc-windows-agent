@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use anyhow::Result;
-use windows::Win32::{
+use crate::bindings::{
     ERROR_BAD_LENGTH, GetLastError, GetSystemInfo, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, QueryWorkingSet,
     SYSTEM_INFO,
 };
@@ -143,7 +143,7 @@ mod tests {
     use rustc_hash::FxHashMap;
     use std::os::windows::io::AsRawHandle;
     use std::time::Duration;
-    use windows::Win32::{
+    use crate::bindings::{
         CreateFileMappingW, FILE_MAP_WRITE, HANDLE, INVALID_HANDLE_VALUE, MapViewOfFile, PAGE_READWRITE,
         UnmapViewOfFile,
     };
@@ -176,7 +176,7 @@ mod tests {
         let after = exclusive_mapped(std::process::id(), &mut blocks);
         unsafe {
             let _ = UnmapViewOfFile(view);
-            let _ = windows::Win32::CloseHandle(mapping);
+            let _ = crate::bindings::CloseHandle(mapping);
         }
         (before, after)
     }
@@ -219,7 +219,7 @@ mod tests {
         let walked = walk(std::process::id(), &mut blocks, |blocks| blocks.len());
         unsafe {
             let _ = UnmapViewOfFile(view);
-            let _ = windows::Win32::CloseHandle(mapping);
+            let _ = crate::bindings::CloseHandle(mapping);
         }
         let pages = size / page_size() as usize;
         assert!(walked.is_some_and(|walked| walked >= pages), "walked {walked:?} blocks with {pages} pages written");
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     #[ignore = "requires admin; a measurement, run in release with --nocapture"]
     fn what_probing_only_a_moved_shared_set_costs() {
-        crate::privileges::enable(windows::core::w!("SeDebugPrivilege")).unwrap();
+        crate::privileges::enable(windows_core::w!("SeDebugPrivilege")).unwrap();
         let mut processes = crate::snapshot::Processes::new();
         let mut blocks = Vec::new();
         let mut last: FxHashMap<(u32, u64), u64> = FxHashMap::default();
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     #[ignore = "requires admin; a measurement, run in release with --nocapture"]
     fn what_a_round_over_every_process_costs() {
-        crate::privileges::enable(windows::core::w!("SeDebugPrivilege")).unwrap();
+        crate::privileges::enable(windows_core::w!("SeDebugPrivilege")).unwrap();
         let mut processes = crate::snapshot::Processes::new();
         processes.read().unwrap();
         let rows = processes.rows();

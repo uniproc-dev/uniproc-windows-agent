@@ -3,7 +3,7 @@ use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
-use windows::Win32::{
+use crate::bindings::{
     DeviceIoControl, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FSCTL_READ_FILE_USN_DATA, FileIdInfo, GetFileInformationByHandleEx, HANDLE,
 };

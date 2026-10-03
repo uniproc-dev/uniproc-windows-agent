@@ -1,4 +1,4 @@
-use windows::core::GUID;
+use windows_core::GUID;
 
 use crate::etw::vars::guid;
 

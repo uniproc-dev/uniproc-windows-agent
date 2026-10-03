@@ -17,7 +17,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use parking_lot::Mutex;
 use smol_str::SmolStr;
 use uniproc_agent_kit::Notify;
-use windows::Win32::{EVENT_TRACE_FLAG_PROCESS, TRACE_LEVEL_INFORMATION};
+use crate::bindings::{EVENT_TRACE_FLAG_PROCESS, TRACE_LEVEL_INFORMATION};
 
 use crate::etw::router::{Enable, KernelRouterBuilder};
 use crate::providers::provider::Provider;
@@ -38,7 +38,7 @@ const TICK: Duration = Duration::from_millis(250);
 /// Events copied out of ETW and not read yet, at most.
 const QUEUED: usize = 1 << 14;
 
-static PROVIDERS: [windows::core::GUID; 3] = [KERNEL_PROCESS, PROCESS, TASK_SCHEDULER];
+static PROVIDERS: [windows_core::GUID; 3] = [KERNEL_PROCESS, PROCESS, TASK_SCHEDULER];
 
 /// The process events as they come and the recent ones held; cheap to clone.
 #[derive(Clone)]
@@ -225,7 +225,7 @@ fn release(assembler: &mut Assembler, machine: &mut Machine, shared: &Shared, re
 
 /// System time now as a FILETIME.
 fn now() -> u64 {
-    let now = unsafe { windows::Win32::GetSystemTimePreciseAsFileTime() };
+    let now = unsafe { crate::bindings::GetSystemTimePreciseAsFileTime() };
     ((now.dwHighDateTime as u64) << 32) | now.dwLowDateTime as u64
 }
 
@@ -326,7 +326,7 @@ mod tests {
             ProcessEventKind::Exited(exited) => Some(exited.clone()),
             ProcessEventKind::Started(_) => None,
         });
-        let me = unsafe { crate::providers::utils::query_sequence_number(windows::Win32::GetCurrentProcess()) };
+        let me = unsafe { crate::providers::utils::query_sequence_number(crate::bindings::GetCurrentProcess()) };
         let started = started.unwrap_or_else(|| panic!("no start of {pid} among {} events", told.len()));
         assert_eq!((started.parent_pid, Some(started.parent_sequence_number)), (std::process::id(), me));
         assert!(started.command_line.contains("exit 7"), "{started:?}");

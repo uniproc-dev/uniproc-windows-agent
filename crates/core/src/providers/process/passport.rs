@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use smol_str::SmolStr;
 
-use windows::Win32::{
+use crate::bindings::{
     AreDpiAwarenessContextsEqual, CloseHandle, DPI_AWARENESS_CONTEXT,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, DPI_AWARENESS_CONTEXT_UNAWARE,
@@ -14,7 +14,7 @@ use windows::Win32::{
     ProcessDEPPolicy, ProcessMachineTypeInfo, ProcessUserShadowStackPolicy, TOKEN_QUERY,
     TokenElevation, TokenUser,
 };
-use windows::core::PWSTR;
+use windows_core::PWSTR;
 
 use crate::model::{
     Architecture, DpiAwareness, ExtendedCfg, Isolation, Mitigations, StackProtection,
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn this_process_reads_back_as_itself() {
         let mut names = SidNames::default();
-        let passport = probe(Some(unsafe { windows::Win32::GetCurrentProcess() }), None, false, &mut names);
+        let passport = probe(Some(unsafe { crate::bindings::GetCurrentProcess() }), None, false, &mut names);
         let expected = if cfg!(target_arch = "x86_64") { Architecture::X64 } else { passport.architecture };
         assert_eq!(passport.architecture, expected);
         assert!(passport.user.contains('\\'), "{:?}", passport.user);

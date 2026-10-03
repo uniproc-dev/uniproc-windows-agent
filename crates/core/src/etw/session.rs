@@ -2,14 +2,14 @@ use std::mem::size_of;
 
 use anyhow::{Result, bail};
 use tracing::{info, warn};
-use windows::Win32::{
+use crate::bindings::{
     CONTROLTRACE_ID, ControlTraceW, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION_2,
     ERROR_ALREADY_EXISTS, ERROR_MORE_DATA, ERROR_SUCCESS, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
     EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_UPDATE, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
     EVENT_TRACE_SYSTEM_LOGGER_MODE, EnableTraceEx2, QueryAllTracesW, StartTraceW, StopTraceW,
     WNODE_FLAG_TRACED_GUID,
 };
-use windows::core::{GUID, PCWSTR};
+use windows_core::{GUID, PCWSTR};
 
 use crate::aligned::AlignedBuf;
 use crate::etw::router::Enable;
@@ -238,7 +238,7 @@ fn enable_provider(handle: CONTROLTRACE_ID, guid: &GUID, enable: Enable) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::{
+    use crate::bindings::{
         EVENT_TRACE_FLAG_DISK_IO, EVENT_TRACE_FLAG_NETWORK_TCPIP, EVENT_TRACE_FLAG_PROFILE,
     };
 
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     #[ignore = "requires admin and a real ETW session"]
     fn the_flush_timer_changes_and_the_kernel_flags_stay() {
-        crate::privileges::enable(windows::core::w!("SeSystemProfilePrivilege")).unwrap();
+        crate::privileges::enable(windows_core::w!("SeSystemProfilePrivilege")).unwrap();
         let flags = (EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_NETWORK_TCPIP) as u32;
         let name = "Uniproc-FlushTest";
         stop(name);
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     #[ignore = "requires admin and a real ETW session"]
     fn a_leftover_session_is_restarted_with_its_flags() {
-        crate::privileges::enable(windows::core::w!("SeSystemProfilePrivilege")).unwrap();
+        crate::privileges::enable(windows_core::w!("SeSystemProfilePrivilege")).unwrap();
         let flags = (EVENT_TRACE_FLAG_DISK_IO | EVENT_TRACE_FLAG_PROFILE | EVENT_TRACE_FLAG_NETWORK_TCPIP) as u32;
         let name = "Uniproc-RestartTest";
         stop(name);

@@ -1,9 +1,9 @@
 use anyhow::{Result, bail};
-use windows::Win32::{
+use crate::bindings::{
     CloseTrace, EVENT_RECORD, EVENT_TRACE_LOGFILEW, EVENT_TRACE_LOGFILEW_0, EVENT_TRACE_LOGFILEW_1,
     OpenTraceW, PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, PROCESSTRACE_HANDLE,
 };
-use windows::core::PWSTR;
+use windows_core::PWSTR;
 
 use crate::etw::session::session_name_wide;
 

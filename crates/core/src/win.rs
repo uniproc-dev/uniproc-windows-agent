@@ -1,5 +1,5 @@
-use windows::Win32::{CloseHandle, HANDLE, OpenProcess};
-use windows::core::{Error, GUID, Result};
+use crate::bindings::{CloseHandle, HANDLE, OpenProcess};
+use windows_core::{Error, GUID, Result};
 
 pub const PROCESS_NAME_WIN32: u32 = 0;
 

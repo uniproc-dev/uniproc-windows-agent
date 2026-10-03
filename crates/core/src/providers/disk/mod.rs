@@ -2,7 +2,7 @@ mod events;
 mod vars;
 
 use anyhow::Result;
-use windows::Win32::{EVENT_RECORD, EVENT_TRACE_FLAG_DISK_IO};
+use crate::bindings::{EVENT_RECORD, EVENT_TRACE_FLAG_DISK_IO};
 
 use crate::etw::router::{Batch, KernelRouterBuilder};
 use crate::etw::vars::BATCH_WINDOW;
@@ -74,7 +74,7 @@ impl Provider for KernelDiskProvider {
 mod tests {
     use super::*;
     use crate::providers::disk::events::tests::group1_dump;
-    use windows::Win32::{EVENT_DESCRIPTOR, EVENT_HEADER};
+    use crate::bindings::{EVENT_DESCRIPTOR, EVENT_HEADER};
 
     fn record(opcode: u8) -> EVENT_RECORD {
         EVENT_RECORD {

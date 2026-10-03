@@ -478,8 +478,8 @@ impl Sample {
 pub fn now_100ns() -> u64 {
     let (mut count, mut frequency) = (0i64, 0i64);
     unsafe {
-        let _ = windows::Win32::QueryPerformanceCounter(&mut count);
-        let _ = windows::Win32::QueryPerformanceFrequency(&mut frequency);
+        let _ = crate::bindings::QueryPerformanceCounter(&mut count);
+        let _ = crate::bindings::QueryPerformanceFrequency(&mut frequency);
     }
     if frequency <= 0 {
         return 0;

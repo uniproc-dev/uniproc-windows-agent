@@ -21,14 +21,14 @@
 //! before this moved behind the RPC boundary.
 
 use std::ptr::addr_of;
-use windows::Win32::{
+use crate::bindings::{
     ERROR_SUCCESS, FILE_ATTRIBUTE_NORMAL, GetFileVersionInfoSizeW, GetFileVersionInfoW,
     GetPackagePathByFullName, GetStagedPackagePathByFullName, PACKAGE_ID, PACKAGE_INFORMATION_BASIC,
     PACKAGE_INFORMATION_FULL, PackageIdFromFullName, PackageOrigin, PackageOrigin_Inbox,
     PackageOrigin_Store, GetStagedPackageOrigin, SHFILEINFOW, SHGFI_DISPLAYNAME,
     SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHLoadIndirectString, VerQueryValueW,
 };
-use windows::core::{HSTRING, PCWSTR, PWSTR};
+use windows_core::{HSTRING, PCWSTR, PWSTR};
 
 use crate::aligned::AlignedBuf;
 
@@ -369,7 +369,7 @@ fn file_description(image_path: &str) -> Option<String> {
         let mut translate_len = 0u32;
         if !VerQueryValueW(
             buffer.as_ptr() as *const _,
-            windows::core::w!("\\VarFileInfo\\Translation"),
+            windows_core::w!("\\VarFileInfo\\Translation"),
             &mut translate,
             &mut translate_len,
         )

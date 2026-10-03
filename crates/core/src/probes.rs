@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
-use windows::Win32::{
+use crate::bindings::{
     CloseHandle, GetCurrentProcessId, GetGuiResources, HANDLE, NtQueryInformationProcess,
     PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, ProcessIdToSessionId,
 };

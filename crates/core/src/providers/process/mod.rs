@@ -18,8 +18,8 @@ use crate::providers::utils::{
 };
 use crate::state::events::{Image, ImageVerdict, ProcessSignature};
 use crate::win::OwnedProcess;
-use windows::Win32::{DRIVE_REMOTE, GetDriveTypeW, PROCESS_QUERY_LIMITED_INFORMATION};
-use windows::core::PCWSTR;
+use crate::bindings::{DRIVE_REMOTE, GetDriveTypeW, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_core::PCWSTR;
 
 /// What one process's handle, memory and token tell, read the moment a
 /// snapshot first lists it.
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn this_process_reads_its_own_passport() {
-        let me = unsafe { query_sequence_number(windows::Win32::GetCurrentProcess()) }.expect("sequence number");
+        let me = unsafe { query_sequence_number(crate::bindings::GetCurrentProcess()) }.expect("sequence number");
         let read = read(std::process::id(), me, None, Default::default(), &mut SidNames::default());
         assert!(read.image_path.ends_with(".exe"), "{}", read.image_path);
         assert_eq!(read.command_line, std::env::args().collect::<Vec<_>>());
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     #[ignore = "requires admin"]
     fn the_services_of_system_read_with_a_limited_handle() {
-        crate::privileges::enable(windows::core::w!("SeDebugPrivilege")).unwrap();
+        crate::privileges::enable(windows_core::w!("SeDebugPrivilege")).unwrap();
         let mut processes = crate::snapshot::Processes::new();
         processes.read().expect("elevated");
         let mut names = SidNames::default();
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn a_handle_to_another_process_than_the_listed_one_reads_nothing() {
-        let me = unsafe { query_sequence_number(windows::Win32::GetCurrentProcess()) }.expect("sequence number");
+        let me = unsafe { query_sequence_number(crate::bindings::GetCurrentProcess()) }.expect("sequence number");
         let package = ("listed".to_string(), "app".to_string());
         let read = read(std::process::id(), me + 1, None, package, &mut SidNames::default());
         assert!(read.image_path.is_empty() && read.command_line.is_empty());
