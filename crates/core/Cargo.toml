@@ -20,7 +20,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 enumset = "1.1"
 uniproc-agent-kit = { git = "https://github.com/uniproc-dev/uniproc-agent-kit", tag = "v0.3.0" }
-roxmltree = "0.20"
+roxmltree = "0.21"
 smol_str = { version = "0.3", features = ["serde"] }
 
 [dev-dependencies]
