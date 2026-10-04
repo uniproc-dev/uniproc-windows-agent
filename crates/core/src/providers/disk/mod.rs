@@ -2,7 +2,9 @@ mod events;
 mod vars;
 
 use anyhow::Result;
-use crate::bindings::{EVENT_RECORD, EVENT_TRACE_FLAG_DISK_IO};
+use uniproc_etw::Event;
+
+use crate::bindings::EVENT_TRACE_FLAG_DISK_IO;
 
 use crate::etw::router::{Batch, KernelRouterBuilder};
 use crate::etw::vars::BATCH_WINDOW;
@@ -12,8 +14,9 @@ use crate::etw::signatures::utils::parse;
 use crate::providers::disk::events::DiskIoTypeGroup1;
 use crate::providers::disk::vars::*;
 
-fn event(record: &EVENT_RECORD, data: &[u8]) -> Option<(u32, DiskEvent)> {
-    let event_type = match record.EventHeader.EventDescriptor.Opcode {
+fn event(event: &Event<'_>) -> Option<(u32, DiskEvent)> {
+    let data = event.user_data();
+    let event_type = match event.opcode() {
         OPCODE_DISK_READ => DiskEventType::Read,
         OPCODE_DISK_WRITE => DiskEventType::Write,
         _ => return None,
@@ -32,8 +35,8 @@ fn event(record: &EVENT_RECORD, data: &[u8]) -> Option<(u32, DiskEvent)> {
 struct DiskBatch(DiskDeltas);
 
 impl Batch for DiskBatch {
-    fn add(&mut self, record: &EVENT_RECORD, data: &[u8]) {
-        if let Some((tid, e)) = event(record, data) {
+    fn add(&mut self, read: &Event<'_>) {
+        if let Some((tid, e)) = event(read) {
             self.0.entry(tid).or_default().add(&e);
         }
     }
@@ -74,29 +77,24 @@ impl Provider for KernelDiskProvider {
 mod tests {
     use super::*;
     use crate::providers::disk::events::tests::group1_dump;
-    use crate::bindings::{EVENT_DESCRIPTOR, EVENT_HEADER};
+    use uniproc_etw::{Header, OwnedEvent};
 
-    fn record(opcode: u8) -> EVENT_RECORD {
-        EVENT_RECORD {
-            EventHeader: EVENT_HEADER {
-                ProviderId: DISK_IO_TASK_GUID,
-                EventDescriptor: EVENT_DESCRIPTOR {
-                    Opcode: opcode,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+    fn record(opcode: u8) -> OwnedEvent {
+        let header = Header {
+            provider: DISK_IO_TASK_GUID.to_u128(),
+            opcode,
+            ..Header::default()
+        };
+        OwnedEvent::new(header, group1_dump().to_vec())
     }
 
     #[test]
     fn a_batch_sums_reads_and_writes_and_ignores_the_rest() {
         let mut b = DiskBatch::default();
-        b.add(&record(OPCODE_DISK_READ), &group1_dump());
-        b.add(&record(OPCODE_DISK_WRITE), &group1_dump());
-        b.add(&record(OPCODE_DISK_WRITE), &group1_dump());
-        b.add(&record(14), &group1_dump());
+        b.add(&record(OPCODE_DISK_READ).event());
+        b.add(&record(OPCODE_DISK_WRITE).event());
+        b.add(&record(OPCODE_DISK_WRITE).event());
+        b.add(&record(14).event());
 
         match b.take() {
             Some(StateChange::Disk(d)) => assert_eq!(
@@ -117,9 +115,9 @@ mod tests {
     fn an_empty_batch_hands_over_nothing() {
         let mut b = DiskBatch::default();
         assert!(b.take().is_none());
-        b.add(&record(14), &group1_dump());
+        b.add(&record(14).event());
         assert!(b.take().is_none(), "an opcode that is not a transfer adds nothing");
-        b.add(&record(OPCODE_DISK_READ), &group1_dump());
+        b.add(&record(OPCODE_DISK_READ).event());
         assert!(b.take().is_some());
         assert!(b.take().is_none(), "a handed over batch starts empty");
     }

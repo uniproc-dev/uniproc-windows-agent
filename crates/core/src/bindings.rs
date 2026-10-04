@@ -93,37 +93,12 @@ pub unsafe fn CloseHandle(hobject: HANDLE) -> windows_core::BOOL {
     unsafe { CloseHandle(hobject) }
 }
 #[inline]
-pub unsafe fn CloseTrace(tracehandle: PROCESSTRACE_HANDLE) -> u32 {
-    windows_core::link!("advapi32.dll" "system" fn CloseTrace(tracehandle : PROCESSTRACE_HANDLE) -> u32);
-    unsafe { CloseTrace(tracehandle) }
-}
-#[inline]
 pub unsafe fn CommandLineToArgvW<P0>(lpcmdline: P0, pnumargs: *mut i32) -> *mut windows_core::PWSTR
 where
     P0: windows_core::Param<windows_core::PCWSTR>,
 {
     windows_core::link!("shell32.dll" "system" fn CommandLineToArgvW(lpcmdline : windows_core::PCWSTR, pnumargs : *mut i32) -> *mut windows_core::PWSTR);
     unsafe { CommandLineToArgvW(lpcmdline.param().abi(), pnumargs as _) }
-}
-#[inline]
-pub unsafe fn ControlTraceW<P1>(
-    traceid: CONTROLTRACE_ID,
-    instancename: P1,
-    properties: *mut EVENT_TRACE_PROPERTIES,
-    controlcode: u32,
-) -> u32
-where
-    P1: windows_core::Param<windows_core::PCWSTR>,
-{
-    windows_core::link!("advapi32.dll" "system" fn ControlTraceW(traceid : CONTROLTRACE_ID, instancename : windows_core::PCWSTR, properties : *mut EVENT_TRACE_PROPERTIES, controlcode : u32) -> u32);
-    unsafe {
-        ControlTraceW(
-            traceid,
-            instancename.param().abi(),
-            properties as _,
-            controlcode,
-        )
-    }
 }
 #[inline]
 pub unsafe fn ConvertSidToStringSidW(
@@ -373,31 +348,6 @@ pub unsafe fn DuplicateHandle(
             dwdesiredaccess,
             binherithandle.into(),
             dwoptions,
-        )
-    }
-}
-#[inline]
-pub unsafe fn EnableTraceEx2(
-    traceid: CONTROLTRACE_ID,
-    providerid: *const windows_core::GUID,
-    controlcode: u32,
-    level: u8,
-    matchanykeyword: u64,
-    matchallkeyword: u64,
-    timeout: u32,
-    enableparameters: Option<*const ENABLE_TRACE_PARAMETERS>,
-) -> u32 {
-    windows_core::link!("advapi32.dll" "system" fn EnableTraceEx2(traceid : CONTROLTRACE_ID, providerid : *const windows_core::GUID, controlcode : u32, level : u8, matchanykeyword : u64, matchallkeyword : u64, timeout : u32, enableparameters : *const ENABLE_TRACE_PARAMETERS) -> u32);
-    unsafe {
-        EnableTraceEx2(
-            traceid,
-            providerid,
-            controlcode,
-            level,
-            matchanykeyword,
-            matchallkeyword,
-            timeout,
-            enableparameters.unwrap_or(core::mem::zeroed()) as _,
         )
     }
 }
@@ -910,11 +860,6 @@ pub unsafe fn OpenProcessToken(
     unsafe { OpenProcessToken(processhandle, desiredaccess, tokenhandle as _) }
 }
 #[inline]
-pub unsafe fn OpenTraceW(logfile: *mut EVENT_TRACE_LOGFILEW) -> PROCESSTRACE_HANDLE {
-    windows_core::link!("advapi32.dll" "system" fn OpenTraceW(logfile : *mut EVENT_TRACE_LOGFILEW) -> PROCESSTRACE_HANDLE);
-    unsafe { OpenTraceW(logfile as _) }
-}
-#[inline]
 pub unsafe fn PackageIdFromFullName<P0>(
     packagefullname: P0,
     flags: u32,
@@ -997,31 +942,6 @@ where
 pub unsafe fn ProcessIdToSessionId(dwprocessid: u32, psessionid: *mut u32) -> windows_core::BOOL {
     windows_core::link!("kernel32.dll" "system" fn ProcessIdToSessionId(dwprocessid : u32, psessionid : *mut u32) -> windows_core::BOOL);
     unsafe { ProcessIdToSessionId(dwprocessid, psessionid as _) }
-}
-#[inline]
-pub unsafe fn ProcessTrace(
-    handlearray: &[PROCESSTRACE_HANDLE],
-    starttime: Option<*const FILETIME>,
-    endtime: Option<*const FILETIME>,
-) -> u32 {
-    windows_core::link!("advapi32.dll" "system" fn ProcessTrace(handlearray : *const PROCESSTRACE_HANDLE, handlecount : u32, starttime : *const FILETIME, endtime : *const FILETIME) -> u32);
-    unsafe {
-        ProcessTrace(
-            handlearray.as_ptr(),
-            handlearray.len().try_into().unwrap(),
-            starttime.unwrap_or(core::mem::zeroed()) as _,
-            endtime.unwrap_or(core::mem::zeroed()) as _,
-        )
-    }
-}
-#[inline]
-pub unsafe fn QueryAllTracesW(
-    propertyarray: *mut PEVENT_TRACE_PROPERTIES,
-    propertyarraycount: u32,
-    loggercount: *mut u32,
-) -> u32 {
-    windows_core::link!("advapi32.dll" "system" fn QueryAllTracesW(propertyarray : *mut PEVENT_TRACE_PROPERTIES, propertyarraycount : u32, loggercount : *mut u32) -> u32);
-    unsafe { QueryAllTracesW(propertyarray as _, propertyarraycount, loggercount as _) }
 }
 #[inline]
 pub unsafe fn QueryDosDeviceW<P0>(
@@ -1154,70 +1074,6 @@ where
             psidgroup.unwrap_or(core::mem::zeroed()) as _,
             pdacl.unwrap_or(core::mem::zeroed()) as _,
             psacl.unwrap_or(core::mem::zeroed()) as _,
-        )
-    }
-}
-#[inline]
-pub unsafe fn StartTraceW<P1>(
-    traceid: *mut CONTROLTRACE_ID,
-    instancename: P1,
-    properties: *mut EVENT_TRACE_PROPERTIES,
-) -> u32
-where
-    P1: windows_core::Param<windows_core::PCWSTR>,
-{
-    windows_core::link!("advapi32.dll" "system" fn StartTraceW(traceid : *mut CONTROLTRACE_ID, instancename : windows_core::PCWSTR, properties : *mut EVENT_TRACE_PROPERTIES) -> u32);
-    unsafe { StartTraceW(traceid as _, instancename.param().abi(), properties as _) }
-}
-#[inline]
-pub unsafe fn StopTraceW<P1>(
-    traceid: CONTROLTRACE_ID,
-    instancename: P1,
-    properties: *mut EVENT_TRACE_PROPERTIES,
-) -> u32
-where
-    P1: windows_core::Param<windows_core::PCWSTR>,
-{
-    windows_core::link!("advapi32.dll" "system" fn StopTraceW(traceid : CONTROLTRACE_ID, instancename : windows_core::PCWSTR, properties : *mut EVENT_TRACE_PROPERTIES) -> u32);
-    unsafe { StopTraceW(traceid, instancename.param().abi(), properties as _) }
-}
-#[inline]
-pub unsafe fn TdhGetProperty(
-    pevent: *const EVENT_RECORD,
-    ptdhcontext: Option<&[TDH_CONTEXT]>,
-    ppropertydata: &[PROPERTY_DATA_DESCRIPTOR],
-    buffersize: u32,
-    pbuffer: *mut u8,
-) -> TDHSTATUS {
-    windows_core::link!("tdh.dll" "system" fn TdhGetProperty(pevent : *const EVENT_RECORD, tdhcontextcount : u32, ptdhcontext : *const TDH_CONTEXT, propertydatacount : u32, ppropertydata : *const PROPERTY_DATA_DESCRIPTOR, buffersize : u32, pbuffer : *mut u8) -> TDHSTATUS);
-    unsafe {
-        TdhGetProperty(
-            pevent,
-            ptdhcontext.map_or(0, |slice| slice.len().try_into().unwrap()),
-            ptdhcontext.map_or(core::ptr::null(), |slice| slice.as_ptr()),
-            ppropertydata.len().try_into().unwrap(),
-            ppropertydata.as_ptr(),
-            buffersize,
-            pbuffer as _,
-        )
-    }
-}
-#[inline]
-pub unsafe fn TdhGetPropertySize(
-    pevent: *const EVENT_RECORD,
-    ptdhcontext: Option<&[TDH_CONTEXT]>,
-    ppropertydata: &[PROPERTY_DATA_DESCRIPTOR],
-    ppropertysize: *mut u32,
-) -> TDHSTATUS {
-    windows_core::link!("tdh.dll" "system" fn TdhGetPropertySize(pevent : *const EVENT_RECORD, tdhcontextcount : u32, ptdhcontext : *const TDH_CONTEXT, propertydatacount : u32, ppropertydata : *const PROPERTY_DATA_DESCRIPTOR, ppropertysize : *mut u32) -> TDHSTATUS);
-    unsafe {
-        TdhGetPropertySize(
-            pevent,
-            ptdhcontext.map_or(0, |slice| slice.len().try_into().unwrap()),
-            ptdhcontext.map_or(core::ptr::null(), |slice| slice.as_ptr()),
-            ppropertydata.len().try_into().unwrap(),
-            ppropertydata.as_ptr(),
-            ppropertysize as _,
         )
     }
 }
@@ -1507,9 +1363,6 @@ pub struct CMSG_SIGNER_INFO {
     pub AuthAttrs: CRYPT_ATTRIBUTES,
     pub UnauthAttrs: CRYPT_ATTRIBUTES,
 }
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct CONTROLTRACE_ID(pub u64);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CRL_CONTEXT {
@@ -2834,357 +2687,14 @@ impl DXGK_NODEMETADATA_FLAGS_0_0 {
         self._bitfield = (self._bitfield & !(65535 << 16)) | ((value & 65535) << 16);
     }
 }
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ENABLE_TRACE_PARAMETERS {
-    pub Version: u32,
-    pub EnableProperty: u32,
-    pub ControlFlags: u32,
-    pub SourceId: windows_core::GUID,
-    pub EnableFilterDesc: PEVENT_FILTER_DESCRIPTOR,
-    pub FilterDescCount: u32,
-}
-pub const ENABLE_TRACE_PARAMETERS_VERSION_2: i32 = 2;
 pub const ERROR_ALREADY_EXISTS: i32 = 183;
 pub const ERROR_BAD_LENGTH: i32 = 24;
 pub const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
-pub const ERROR_MORE_DATA: i32 = 234;
 pub const ERROR_NOT_ALL_ASSIGNED: i32 = 1300;
 pub const ERROR_SUCCESS: i32 = 0;
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ETW_BUFFER_CONTEXT {
-    pub Anonymous: ETW_BUFFER_CONTEXT_0,
-    pub LoggerId: u16,
-}
-impl Default for ETW_BUFFER_CONTEXT {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union ETW_BUFFER_CONTEXT_0 {
-    pub Anonymous: ETW_BUFFER_CONTEXT_0_0,
-    pub ProcessorIndex: u16,
-}
-impl Default for ETW_BUFFER_CONTEXT_0 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ETW_BUFFER_CONTEXT_0_0 {
-    pub ProcessorNumber: u8,
-    pub Alignment: u8,
-}
-pub const EVENT_CONTROL_CODE_ENABLE_PROVIDER: i32 = 1;
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EVENT_DESCRIPTOR {
-    pub Id: u16,
-    pub Version: u8,
-    pub Channel: u8,
-    pub Level: u8,
-    pub Opcode: u8,
-    pub Task: u16,
-    pub Keyword: u64,
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EVENT_FILTER_DESCRIPTOR {
-    pub Ptr: u64,
-    pub Size: u32,
-    pub Type: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct EVENT_HEADER {
-    pub Size: u16,
-    pub HeaderType: u16,
-    pub Flags: u16,
-    pub EventProperty: u16,
-    pub ThreadId: u32,
-    pub ProcessId: u32,
-    pub TimeStamp: i64,
-    pub ProviderId: windows_core::GUID,
-    pub EventDescriptor: EVENT_DESCRIPTOR,
-    pub Anonymous: EVENT_HEADER_0,
-    pub ActivityId: windows_core::GUID,
-}
-impl Default for EVENT_HEADER {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union EVENT_HEADER_0 {
-    pub Anonymous: EVENT_HEADER_0_0,
-    pub ProcessorTime: u64,
-}
-impl Default for EVENT_HEADER_0 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EVENT_HEADER_0_0 {
-    pub KernelTime: u32,
-    pub UserTime: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EVENT_HEADER_EXTENDED_DATA_ITEM {
-    pub Reserved1: u16,
-    pub ExtType: u16,
-    pub Anonymous: EVENT_HEADER_EXTENDED_DATA_ITEM_0,
-    pub DataSize: u16,
-    pub DataPtr: u64,
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EVENT_HEADER_EXTENDED_DATA_ITEM_0 {
-    pub _bitfield: u16,
-}
-impl EVENT_HEADER_EXTENDED_DATA_ITEM_0 {
-    pub fn Linkage(&self) -> bool {
-        self._bitfield & 1 != 0
-    }
-    pub fn set_Linkage(&mut self, value: bool) {
-        self._bitfield = (self._bitfield & !1) | (value as u16);
-    }
-    pub fn Reserved2(&self) -> u16 {
-        self._bitfield >> 1
-    }
-    pub fn set_Reserved2(&mut self, value: u16) {
-        self._bitfield = (self._bitfield & !(32767 << 1)) | ((value & 32767) << 1);
-    }
-}
-pub const EVENT_HEADER_FLAG_64_BIT_HEADER: i32 = 64;
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct EVENT_RECORD {
-    pub EventHeader: EVENT_HEADER,
-    pub BufferContext: ETW_BUFFER_CONTEXT,
-    pub ExtendedDataCount: u16,
-    pub UserDataLength: u16,
-    pub ExtendedData: PEVENT_HEADER_EXTENDED_DATA_ITEM,
-    pub UserData: *mut core::ffi::c_void,
-    pub UserContext: *mut core::ffi::c_void,
-}
-impl Default for EVENT_RECORD {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct EVENT_TRACE {
-    pub Header: EVENT_TRACE_HEADER,
-    pub InstanceId: u32,
-    pub ParentInstanceId: u32,
-    pub ParentGuid: windows_core::GUID,
-    pub MofData: *mut core::ffi::c_void,
-    pub MofLength: u32,
-    pub Anonymous: EVENT_TRACE_0,
-}
-impl Default for EVENT_TRACE {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union EVENT_TRACE_0 {
-    pub ClientContext: u32,
-    pub BufferContext: ETW_BUFFER_CONTEXT,
-}
-impl Default for EVENT_TRACE_0 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-pub const EVENT_TRACE_CONTROL_QUERY: i32 = 0;
-pub const EVENT_TRACE_CONTROL_UPDATE: i32 = 2;
 pub const EVENT_TRACE_FLAG_DISK_IO: i32 = 256;
 pub const EVENT_TRACE_FLAG_NETWORK_TCPIP: i32 = 65536;
 pub const EVENT_TRACE_FLAG_PROCESS: i32 = 1;
-pub const EVENT_TRACE_FLAG_PROFILE: i32 = 16777216;
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct EVENT_TRACE_HEADER {
-    pub Size: u16,
-    pub Anonymous: EVENT_TRACE_HEADER_0,
-    pub Anonymous2: EVENT_TRACE_HEADER_1,
-    pub ThreadId: u32,
-    pub ProcessId: u32,
-    pub TimeStamp: i64,
-    pub Anonymous3: EVENT_TRACE_HEADER_2,
-    pub Anonymous4: EVENT_TRACE_HEADER_3,
-}
-impl Default for EVENT_TRACE_HEADER {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union EVENT_TRACE_HEADER_0 {
-    pub FieldTypeFlags: u16,
-    pub Anonymous: EVENT_TRACE_HEADER_0_0,
-}
-impl Default for EVENT_TRACE_HEADER_0 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EVENT_TRACE_HEADER_0_0 {
-    pub HeaderType: u8,
-    pub MarkerFlags: u8,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union EVENT_TRACE_HEADER_1 {
-    pub Version: u32,
-    pub Class: EVENT_TRACE_HEADER_1_0,
-}
-impl Default for EVENT_TRACE_HEADER_1 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EVENT_TRACE_HEADER_1_0 {
-    pub Type: u8,
-    pub Level: u8,
-    pub Version: u16,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union EVENT_TRACE_HEADER_2 {
-    pub Guid: windows_core::GUID,
-    pub GuidPtr: u64,
-}
-impl Default for EVENT_TRACE_HEADER_2 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union EVENT_TRACE_HEADER_3 {
-    pub Anonymous: EVENT_TRACE_HEADER_3_0,
-    pub ProcessorTime: u64,
-    pub Anonymous2: EVENT_TRACE_HEADER_3_1,
-}
-impl Default for EVENT_TRACE_HEADER_3 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EVENT_TRACE_HEADER_3_0 {
-    pub KernelTime: u32,
-    pub UserTime: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct EVENT_TRACE_HEADER_3_1 {
-    pub ClientContext: u32,
-    pub Flags: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct EVENT_TRACE_LOGFILEW {
-    pub LogFileName: windows_core::PWSTR,
-    pub LoggerName: windows_core::PWSTR,
-    pub CurrentTime: i64,
-    pub BuffersRead: u32,
-    pub Anonymous: EVENT_TRACE_LOGFILEW_0,
-    pub CurrentEvent: EVENT_TRACE,
-    pub LogfileHeader: TRACE_LOGFILE_HEADER,
-    pub BufferCallback: PEVENT_TRACE_BUFFER_CALLBACKW,
-    pub BufferSize: u32,
-    pub Filled: u32,
-    pub EventsLost: u32,
-    pub Anonymous2: EVENT_TRACE_LOGFILEW_1,
-    pub IsKernelTrace: u32,
-    pub Context: *mut core::ffi::c_void,
-}
-impl Default for EVENT_TRACE_LOGFILEW {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union EVENT_TRACE_LOGFILEW_0 {
-    pub LogFileMode: u32,
-    pub ProcessTraceMode: u32,
-}
-impl Default for EVENT_TRACE_LOGFILEW_0 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union EVENT_TRACE_LOGFILEW_1 {
-    pub EventCallback: PEVENT_CALLBACK,
-    pub EventRecordCallback: PEVENT_RECORD_CALLBACK,
-}
-impl Default for EVENT_TRACE_LOGFILEW_1 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct EVENT_TRACE_PROPERTIES {
-    pub Wnode: WNODE_HEADER,
-    pub BufferSize: u32,
-    pub MinimumBuffers: u32,
-    pub MaximumBuffers: u32,
-    pub MaximumFileSize: u32,
-    pub LogFileMode: u32,
-    pub FlushTimer: u32,
-    pub EnableFlags: u32,
-    pub Anonymous: EVENT_TRACE_PROPERTIES_0,
-    pub NumberOfBuffers: u32,
-    pub FreeBuffers: u32,
-    pub EventsLost: u32,
-    pub BuffersWritten: u32,
-    pub LogBuffersLost: u32,
-    pub RealTimeBuffersLost: u32,
-    pub LoggerThreadId: HANDLE,
-    pub LogFileNameOffset: u32,
-    pub LoggerNameOffset: u32,
-}
-impl Default for EVENT_TRACE_PROPERTIES {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union EVENT_TRACE_PROPERTIES_0 {
-    pub AgeLimit: i32,
-    pub FlushThreshold: i32,
-}
-impl Default for EVENT_TRACE_PROPERTIES_0 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-pub const EVENT_TRACE_REAL_TIME_MODE: i32 = 256;
-pub const EVENT_TRACE_SYSTEM_LOGGER_MODE: i32 = 33554432;
 pub type FARPROC = Option<unsafe extern "system" fn() -> isize>;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3671,13 +3181,6 @@ pub type PDH_HQUERY = HANDLE;
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PDH_STATUS(pub i32);
-pub type PEVENT_CALLBACK = Option<unsafe extern "system" fn(pevent: *mut EVENT_TRACE)>;
-pub type PEVENT_FILTER_DESCRIPTOR = *mut EVENT_FILTER_DESCRIPTOR;
-pub type PEVENT_HEADER_EXTENDED_DATA_ITEM = *mut EVENT_HEADER_EXTENDED_DATA_ITEM;
-pub type PEVENT_RECORD_CALLBACK = Option<unsafe extern "system" fn(eventrecord: *mut EVENT_RECORD)>;
-pub type PEVENT_TRACE_BUFFER_CALLBACKW =
-    Option<unsafe extern "system" fn(logfile: *mut EVENT_TRACE_LOGFILEW) -> u32>;
-pub type PEVENT_TRACE_PROPERTIES = *mut EVENT_TRACE_PROPERTIES;
 pub type PFN_CPD_ADD_CERT = Option<
     unsafe extern "system" fn(
         pprovdata: *const CRYPT_PROVIDER_DATA,
@@ -3741,24 +3244,12 @@ pub type PFN_PROVUI_CALL = Option<
 pub type PMIB_IF_TABLE2 = *mut MIB_IF_TABLE2;
 pub type POWER_INFORMATION_LEVEL = i32;
 pub type PROCESSINFOCLASS = i32;
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct PROCESSTRACE_HANDLE(pub u64);
 pub const PROCESS_DUP_HANDLE: i32 = 64;
 pub type PROCESS_INFORMATION_CLASS = i32;
 pub type PROCESS_MITIGATION_POLICY = i32;
 pub const PROCESS_QUERY_INFORMATION: i32 = 1024;
 pub const PROCESS_QUERY_LIMITED_INFORMATION: i32 = 4096;
-pub const PROCESS_TRACE_MODE_EVENT_RECORD: i32 = 268435456;
-pub const PROCESS_TRACE_MODE_REAL_TIME: i32 = 256;
 pub const PROCESS_VM_READ: i32 = 16;
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PROPERTY_DATA_DESCRIPTOR {
-    pub PropertyName: u64,
-    pub ArrayIndex: u32,
-    pub Reserved: u32,
-}
 pub const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 2147483648;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3991,18 +3482,6 @@ impl Default for SIP_SUBJECTINFO_0 {
 }
 pub const STATUS_SUCCESS: windows_core::NTSTATUS = windows_core::NTSTATUS(0x0_u32 as _);
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SYSTEMTIME {
-    pub wYear: u16,
-    pub wMonth: u16,
-    pub wDayOfWeek: u16,
-    pub wDay: u16,
-    pub wHour: u16,
-    pub wMinute: u16,
-    pub wSecond: u16,
-    pub wMilliseconds: u16,
-}
-#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SYSTEM_INFO {
     pub Anonymous: SYSTEM_INFO_0,
@@ -4038,33 +3517,6 @@ pub struct SYSTEM_INFO_0_0 {
     pub wProcessorArchitecture: u16,
     pub wReserved: u16,
 }
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct TDHSTATUS(pub u32);
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct TDH_CONTEXT {
-    pub ParameterValue: u64,
-    pub ParameterType: TDH_CONTEXT_TYPE,
-    pub ParameterSize: u32,
-}
-pub type TDH_CONTEXT_TYPE = i32;
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TIME_ZONE_INFORMATION {
-    pub Bias: i32,
-    pub StandardName: [u16; 32],
-    pub StandardDate: SYSTEMTIME,
-    pub StandardBias: i32,
-    pub DaylightName: [u16; 32],
-    pub DaylightDate: SYSTEMTIME,
-    pub DaylightBias: i32,
-}
-impl Default for TIME_ZONE_INFORMATION {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
 pub const TOKEN_ADJUST_PRIVILEGES: i32 = 32;
 pub type TOKEN_INFORMATION_CLASS = i32;
 #[repr(C)]
@@ -4080,71 +3532,6 @@ impl Default for TOKEN_PRIVILEGES {
 }
 pub const TOKEN_QUERY: i32 = 8;
 pub const TRACE_LEVEL_INFORMATION: i32 = 4;
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TRACE_LOGFILE_HEADER {
-    pub BufferSize: u32,
-    pub Anonymous: TRACE_LOGFILE_HEADER_0,
-    pub ProviderVersion: u32,
-    pub NumberOfProcessors: u32,
-    pub EndTime: i64,
-    pub TimerResolution: u32,
-    pub MaximumFileSize: u32,
-    pub LogFileMode: u32,
-    pub BuffersWritten: u32,
-    pub Anonymous2: TRACE_LOGFILE_HEADER_1,
-    pub LoggerName: windows_core::PWSTR,
-    pub LogFileName: windows_core::PWSTR,
-    pub TimeZone: TIME_ZONE_INFORMATION,
-    pub BootTime: i64,
-    pub PerfFreq: i64,
-    pub StartTime: i64,
-    pub ReservedFlags: u32,
-    pub BuffersLost: u32,
-}
-impl Default for TRACE_LOGFILE_HEADER {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union TRACE_LOGFILE_HEADER_0 {
-    pub Version: u32,
-    pub VersionDetail: TRACE_LOGFILE_HEADER_0_0,
-}
-impl Default for TRACE_LOGFILE_HEADER_0 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct TRACE_LOGFILE_HEADER_0_0 {
-    pub MajorVersion: u8,
-    pub MinorVersion: u8,
-    pub SubVersion: u8,
-    pub SubMinorVersion: u8,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union TRACE_LOGFILE_HEADER_1 {
-    pub LogInstanceGuid: windows_core::GUID,
-    pub Anonymous: TRACE_LOGFILE_HEADER_1_0,
-}
-impl Default for TRACE_LOGFILE_HEADER_1 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct TRACE_LOGFILE_HEADER_1_0 {
-    pub StartBuffers: u32,
-    pub PointerSize: u32,
-    pub EventsLost: u32,
-    pub CpuSpeedInMHz: u32,
-}
 pub const TRUST_E_NOSIGNATURE: windows_core::HRESULT = windows_core::HRESULT(0x800B0100_u32 as _);
 pub const TRUST_E_SUBJECT_FORM_UNKNOWN: windows_core::HRESULT =
     windows_core::HRESULT(0x800B0003_u32 as _);
@@ -4288,52 +3675,6 @@ pub struct WINTRUST_SIGNATURE_SETTINGS {
     pub cSecondarySigs: u32,
     pub dwVerifiedSigIndex: u32,
     pub pCryptoPolicy: PCERT_STRONG_SIGN_PARA,
-}
-pub const WNODE_FLAG_TRACED_GUID: i32 = 131072;
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct WNODE_HEADER {
-    pub BufferSize: u32,
-    pub ProviderId: u32,
-    pub Anonymous: WNODE_HEADER_0,
-    pub Anonymous2: WNODE_HEADER_1,
-    pub Guid: windows_core::GUID,
-    pub ClientContext: u32,
-    pub Flags: u32,
-}
-impl Default for WNODE_HEADER {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union WNODE_HEADER_0 {
-    pub HistoricalContext: u64,
-    pub Anonymous: WNODE_HEADER_0_0,
-}
-impl Default for WNODE_HEADER_0 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
-}
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct WNODE_HEADER_0_0 {
-    pub Version: u32,
-    pub Linkage: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union WNODE_HEADER_1 {
-    pub CountLost: u32,
-    pub KernelHandle: HANDLE,
-    pub TimeStamp: i64,
-}
-impl Default for WNODE_HEADER_1 {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
-    }
 }
 pub const WTD_CACHE_ONLY_URL_RETRIEVAL: i32 = 4096;
 pub const WTD_CHOICE_CATALOG: i32 = 2;

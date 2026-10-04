@@ -51,5 +51,3 @@ pub const MAXIMUM_BUFFERS: u32 = 8;
 /// How often a buffer that is not full yet is handed to the consumer; the
 /// machine's disk and network counters move no faster than this.
 pub const FLUSH_TIMER_MS: u32 = 50;
-/// `FlushTimer` counts milliseconds rather than seconds.
-pub const EVENT_TRACE_USE_MS_FLUSH_TIMER: u32 = 0x0000_0010;

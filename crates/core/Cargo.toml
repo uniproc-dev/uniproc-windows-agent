@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 windows-core = "0.100"
+uniproc-etw = { git = "https://github.com/uniproc-dev/uniproc-etw", tag = "v0.1.0" }
 ntapi = "0.4.3"
 rustc-hash = "2"
 binrw = "0.15.0"

@@ -1,15 +1,14 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
 
 use anyhow::Result;
-use tracing::error;
-use crate::bindings::{EVENT_RECORD, ProcessTrace};
-use windows_core::{GUID, w};
+use uniproc_etw::{Event, Options, Session, Timestamps, Trace};
+use windows_core::GUID;
 
-use crate::etw::consumer::{Events, TraceConsumer};
-use crate::etw::session::{self, EtwSession, SessionMode};
-use crate::etw::vars::{KERNEL_SESSION_NAME, SESSION_NAME_PREFIX};
+pub use uniproc_etw::Enable;
+
+use crate::etw::vars::{
+    BUFFER_SIZE_KB, FLUSH_TIMER_MS, KERNEL_SESSION_NAME, MAXIMUM_BUFFERS, MINIMUM_BUFFERS, SESSION_NAME_PREFIX,
+};
 use crate::report::SessionHealth;
 use crate::sink::Sink;
 use crate::state::events::StateChange;
@@ -40,10 +39,22 @@ fn is_guid(text: &str) -> bool {
 /// Stops the sessions a router in the default namespace left running, as a
 /// killed service does, and names them.
 pub fn stop_leftover_sessions() -> Vec<String> {
-    session::running()
+    uniproc_etw::running()
         .into_iter()
-        .filter(|name| is_default_session(name) && session::stop(name))
+        .filter(|name| is_default_session(name) && uniproc_etw::stop(name))
         .collect()
+}
+
+/// A session as the agent starts it: its buffers and flush timer are the
+/// agent's policy, not the crate's defaults.
+fn options(base: Options) -> Options {
+    Options {
+        buffer_kb: BUFFER_SIZE_KB,
+        minimum_buffers: MINIMUM_BUFFERS,
+        maximum_buffers: MAXIMUM_BUFFERS,
+        flush_timer_ms: FLUSH_TIMER_MS,
+        ..base
+    }
 }
 
 /// `d` in the unit of an event's TimeStamp: the consumer is opened without
@@ -58,12 +69,12 @@ fn timestamp_now() -> i64 {
     ((now.dwHighDateTime as i64) << 32) | now.dwLowDateTime as i64
 }
 
-type Handler = Box<dyn FnMut(&EVENT_RECORD, &[u8], &mut Vec<StateChange>) + Send>;
+type Handler = Box<dyn FnMut(&Event<'_>, &mut Vec<StateChange>) + Send>;
 
 /// Folds a provider's events into one change, handed over at most once per
 /// window instead of once per event.
 pub trait Batch: Send {
-    fn add(&mut self, record: &EVENT_RECORD, data: &[u8]);
+    fn add(&mut self, event: &Event<'_>);
     /// The accumulated change, leaving the batch empty; `None` when nothing
     /// was added since the last one.
     fn take(&mut self) -> Option<StateChange>;
@@ -82,20 +93,11 @@ enum Target {
     Batch(usize),
 }
 
-/// What a manifest provider is enabled for.
-#[derive(Clone, Copy, Debug)]
-pub struct Enable {
-    pub keywords: u64,
-    pub level: u8,
-}
-
-impl Enable {
-    /// Every keyword, up to informational events.
-    pub const ALL: Self = Self {
-        keywords: u64::MAX,
-        level: crate::bindings::TRACE_LEVEL_INFORMATION as u8,
-    };
-}
+/// Every keyword, up to informational events.
+pub const EVERY_KEYWORD: Enable = Enable {
+    keywords: u64::MAX,
+    level: crate::bindings::TRACE_LEVEL_INFORMATION as u8,
+};
 
 pub struct EnableFlags(pub u32);
 
@@ -125,12 +127,12 @@ impl KernelRouterBuilder {
     #[allow(dead_code)]
     pub fn on<F, I>(&mut self, providers: &'static [GUID], mut handler: F) -> &mut Self
     where
-        F: FnMut(&EVENT_RECORD, &[u8]) -> I + Send + 'static,
+        F: FnMut(&Event<'_>) -> I + Send + 'static,
         I: IntoIterator<Item = StateChange>,
     {
         let idx = self.handlers.len();
-        self.handlers.push(Box::new(move |record, data, out| {
-            out.extend(handler(record, data));
+        self.handlers.push(Box::new(move |event, out| {
+            out.extend(handler(event));
         }));
         self.route(providers, Target::Handler(idx));
         self
@@ -186,9 +188,9 @@ impl KernelRouterBuilder {
         self
     }
 
-    /// Freezes the routes, brings the sessions up, opens the consumers and
-    /// spawns a pump thread per session (ProcessTrace takes at most one
-    /// real-time session; all pumps share one mutex-guarded RouterCore).
+    /// Freezes the routes, brings the sessions up and reads each on a trace
+    /// of its own; every trace hands its events to one mutex-guarded
+    /// RouterCore.
     pub fn start(self, sink: Sink) -> Result<KernelRouter> {
         let Self {
             flags,
@@ -201,52 +203,32 @@ impl KernelRouterBuilder {
         } = self;
 
         let mut router = KernelRouter {
+            traces: Vec::new(),
             sessions: Vec::new(),
-            consumers: Vec::new(),
-            pumps: Vec::new(),
-            core: Box::new(parking_lot::Mutex::new(RouterCore {
+            core: Arc::new(parking_lot::Mutex::new(RouterCore {
                 routes,
                 handlers,
                 batches,
                 sink,
                 scratch: Vec::new(),
             })),
-            running: Arc::new(AtomicBool::new(true)),
         };
-        let core: *const parking_lot::Mutex<RouterCore> = &*router.core;
 
         if flags != 0 {
-            crate::privileges::enable(w!("SeSystemProfilePrivilege"))?;
             router
                 .sessions
-                .push(EtwSession::start(&kernel_session, flags, SessionMode::SystemLogger)?);
-            // SAFETY: `core` lives in `router`, whose Drop closes every
-            // consumer and joins every pump before the box is freed, on
-            // this path's errors too.
-            router.consumers.push(unsafe { TraceConsumer::open(&kernel_session, core)? });
+                .push(Session::start(&kernel_session, &options(Options::system_logger(flags)))?);
         }
-
         for (guid, enable) in &manifest {
-            let name = manifest_session_name_in(&prefix, guid);
-            let session = EtwSession::start(&name, 0, SessionMode::Normal)?;
-            session.enable(guid, *enable)?;
+            let session = Session::start(&manifest_session_name_in(&prefix, guid), &options(Options::real_time()))?;
+            session.enable(guid.to_u128(), *enable)?;
             router.sessions.push(session);
-            // SAFETY: as above.
-            router.consumers.push(unsafe { TraceConsumer::open(&name, core)? });
         }
-
-        for index in 0..router.consumers.len() {
-            let handle = router.consumers[index].handle();
-            let running = router.running.clone();
-            let pump = std::thread::Builder::new()
-                .name("etw-pump".into())
-                .spawn(move || {
-                    let status = unsafe { ProcessTrace(&[handle], None, None) };
-                    if running.load(Ordering::SeqCst) {
-                        error!("ProcessTrace exited unexpectedly: {status:?}");
-                    }
-                })?;
-            router.pumps.push(pump);
+        for index in 0..router.sessions.len() {
+            let core = router.core.clone();
+            let name = router.sessions[index].name().to_string();
+            let trace = Trace::real_time(&name, Timestamps::SystemTime, move |event| core.lock().on_event(event))?;
+            router.traces.push(trace);
         }
 
         Ok(router)
@@ -262,24 +244,24 @@ struct RouterCore {
 }
 
 impl RouterCore {
-    fn deliver(&mut self, record: &EVENT_RECORD, now: i64) {
-        let provider = record.EventHeader.ProviderId.to_u128();
+    fn deliver(&mut self, event: &Event<'_>, now: i64) {
+        let provider = event.provider();
         let Some((_, targets)) = self.routes.iter().find(|(g, _)| *g == provider) else {
             return;
         };
-        let Some(data) = to_user_data(record) else {
+        if event.user_data().is_empty() {
             return;
-        };
+        }
         for &target in targets {
             match target {
                 Target::Handler(idx) => {
                     self.scratch.clear();
-                    self.handlers[idx](record, data, &mut self.scratch);
+                    self.handlers[idx](event, &mut self.scratch);
                     self.sink.emit_all(self.scratch.drain(..));
                 }
                 Target::Batch(idx) => {
                     let slot = &mut self.batches[idx];
-                    slot.batch.add(record, data);
+                    slot.batch.add(event);
                     slot.since.get_or_insert(now);
                 }
             }
@@ -300,22 +282,20 @@ impl RouterCore {
             }
         }
     }
-}
 
-impl Events for RouterCore {
-    fn on_event(&mut self, record: &EVENT_RECORD) {
-        let now = record.EventHeader.TimeStamp;
-        self.deliver(record, now);
+    fn on_event(&mut self, event: &Event<'_>) {
+        let now = event.timestamp();
+        self.deliver(event, now);
         self.hand_over_due(now);
     }
 }
 
+/// Its traces drop before its sessions: each trace's thread ends before
+/// ETW stops the session it reads.
 pub struct KernelRouter {
-    sessions: Vec<EtwSession>,
-    consumers: Vec<TraceConsumer>,
-    pumps: Vec<JoinHandle<()>>,
-    core: Box<parking_lot::Mutex<RouterCore>>,
-    running: Arc<AtomicBool>,
+    traces: Vec<Trace>,
+    sessions: Vec<Session>,
+    core: Arc<parking_lot::Mutex<RouterCore>>,
 }
 
 impl KernelRouter {
@@ -340,7 +320,7 @@ impl KernelRouter {
     /// Sets how many milliseconds every session holds a buffer that is not
     /// full yet.
     pub fn set_flush_timer(&self, ms: u32) -> Result<()> {
-        self.sessions.iter().try_for_each(|session| session.set_flush_timer(ms))
+        Ok(self.sessions.iter().try_for_each(|session| session.set_flush_timer(ms))?)
     }
 
     /// Whether every session still runs and is still read.
@@ -352,13 +332,13 @@ impl KernelRouter {
     pub fn health(&self) -> Vec<SessionHealth> {
         self.sessions
             .iter()
-            .zip(&self.pumps)
-            .map(|(session, pump)| {
+            .zip(&self.traces)
+            .map(|(session, trace)| {
                 let counters = session.query();
                 SessionHealth {
                     name: session.name().to_string(),
                     running: counters.is_some(),
-                    pumping: !pump.is_finished(),
+                    pumping: trace.pumping(),
                     events_lost: counters.map_or(0, |c| c.events_lost),
                     realtime_buffers_lost: counters.map_or(0, |c| c.realtime_buffers_lost),
                     log_buffers_lost: counters.map_or(0, |c| c.log_buffers_lost),
@@ -371,27 +351,6 @@ impl KernelRouter {
     }
 }
 
-impl Drop for KernelRouter {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
-        // CloseTrace on every handle: each pump's ProcessTrace returns.
-        self.consumers.clear();
-        for pump in self.pumps.drain(..) {
-            let _ = pump.join();
-        }
-        // Only now is it safe for `core` and the sessions (StopTrace) to drop.
-    }
-}
-
-pub fn to_user_data(record: &EVENT_RECORD) -> Option<&[u8]> {
-    if record.UserData.is_null() || record.UserDataLength == 0 {
-        return None;
-    }
-    Some(unsafe {
-        std::slice::from_raw_parts(record.UserData as *const u8, record.UserDataLength as usize)
-    })
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -399,6 +358,8 @@ pub(crate) mod tests {
     use crate::providers::provider::Provider;
     use crate::state::events::{NetDelta, NetDeltas};
     use crate::bindings::EVENT_TRACE_FLAG_NETWORK_TCPIP;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use uniproc_etw::{Header, OwnedEvent};
 
     const KERNEL_PROCESS_PROVIDER: GUID = guid!("22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716");
     const EVENT_ID_PROCESS_START: u16 = 1;
@@ -451,7 +412,7 @@ pub(crate) mod tests {
     struct Counting(u32);
 
     impl Batch for Counting {
-        fn add(&mut self, _: &EVENT_RECORD, _: &[u8]) {
+        fn add(&mut self, _: &Event<'_>) {
             self.0 += 1;
         }
 
@@ -465,13 +426,13 @@ pub(crate) mod tests {
         }
     }
 
-    fn event_at(provider: GUID, timestamp: i64, payload: &[u8; 4]) -> EVENT_RECORD {
-        let mut record = EVENT_RECORD::default();
-        record.EventHeader.ProviderId = provider;
-        record.EventHeader.TimeStamp = timestamp;
-        record.UserData = payload.as_ptr() as *mut _;
-        record.UserDataLength = payload.len() as u16;
-        record
+    fn event_at(provider: GUID, timestamp: i64, payload: &[u8; 4]) -> OwnedEvent {
+        let header = Header {
+            provider: provider.to_u128(),
+            timestamp,
+            ..Header::default()
+        };
+        OwnedEvent::new(header, payload.to_vec())
     }
 
     #[test]
@@ -490,15 +451,15 @@ pub(crate) mod tests {
         };
         let payload = [0u8; 4];
 
-        core.on_event(&event_at(QUIET, 1_000, &payload));
-        core.on_event(&event_at(QUIET, 1_050, &payload));
-        core.on_event(&event_at(CHATTY, 1_099, &payload));
+        core.on_event(&event_at(QUIET, 1_000, &payload).event());
+        core.on_event(&event_at(QUIET, 1_050, &payload).event());
+        core.on_event(&event_at(CHATTY, 1_099, &payload).event());
         assert!(rx.try_recv().is_err(), "not due before the window has passed");
 
-        core.on_event(&event_at(CHATTY, 1_100, &payload));
+        core.on_event(&event_at(CHATTY, 1_100, &payload).event());
         assert!(matches!(rx.try_recv(), Ok(StateChange::Network(d)) if d.contains_key(&2)));
 
-        core.on_event(&event_at(CHATTY, 5_000, &payload));
+        core.on_event(&event_at(CHATTY, 5_000, &payload).event());
         assert!(rx.try_recv().is_err(), "an empty batch sends nothing");
     }
 
@@ -522,7 +483,7 @@ pub(crate) mod tests {
         builder.batched(&[QUIET], std::time::Duration::from_millis(1), Counting(0));
         let router = builder.start(sink).expect("a router with no session starts anywhere");
         let payload = [0u8; 4];
-        router.core.lock().on_event(&event_at(QUIET, timestamp_now(), &payload));
+        router.core.lock().on_event(&event_at(QUIET, timestamp_now(), &payload).event());
         assert!(rx.try_recv().is_err());
 
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -537,8 +498,8 @@ pub(crate) mod tests {
         let mut builder = KernelRouter::builder();
         builder
             .session_namespace("Uniproc-HealthTest-")
-            .manifest(KERNEL_PROCESS_PROVIDER, Enable::ALL)
-            .on(&[KERNEL_PROCESS_PROVIDER], |_, _| None);
+            .manifest(KERNEL_PROCESS_PROVIDER, EVERY_KEYWORD)
+            .on(&[KERNEL_PROCESS_PROVIDER], |_| None);
         let router = builder.start(sink).expect("router start");
 
         let health = router.health();
@@ -573,9 +534,9 @@ pub(crate) mod tests {
         let mut builder = KernelRouter::builder();
         builder
             .kernel_flags(EVENT_TRACE_FLAG_NETWORK_TCPIP)
-            .manifest(KERNEL_PROCESS_PROVIDER, Enable::ALL)
-            .on(&[TEST_GUID], |_, _| None)
-            .on(&[KERNEL_PROCESS_PROVIDER], |_, _| None);
+            .manifest(KERNEL_PROCESS_PROVIDER, EVERY_KEYWORD)
+            .on(&[TEST_GUID], |_| None)
+            .on(&[KERNEL_PROCESS_PROVIDER], |_| None);
         let router = builder.start(sink).expect("router start");
         assert!(
             wait_session(KERNEL_SESSION_NAME, true),
@@ -602,8 +563,7 @@ pub(crate) mod tests {
     fn a_session_left_behind_by_a_killed_agent_does_not_silence_disk_and_network() {
         let _guard = ETW_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::forget(
-            crate::etw::session::EtwSession::start(KERNEL_SESSION_NAME, 0, SessionMode::SystemLogger)
-                .expect("leftover session"),
+            Session::start(KERNEL_SESSION_NAME, &options(Options::system_logger(0))).expect("leftover session"),
         );
 
         let (sink, rx) = Sink::bounded(1 << 16, || {});
@@ -697,10 +657,10 @@ pub(crate) mod tests {
         crate::providers::network::KernelNetworkProvider::new()
             .register(&mut builder)
             .unwrap();
-        builder.manifest(KERNEL_PROCESS_PROVIDER, Enable::ALL).on(&[KERNEL_PROCESS_PROVIDER], {
+        builder.manifest(KERNEL_PROCESS_PROVIDER, EVERY_KEYWORD).on(&[KERNEL_PROCESS_PROVIDER], {
             let started = started.clone();
-            move |record, _| {
-                if record.EventHeader.EventDescriptor.Id == EVENT_ID_PROCESS_START {
+            move |event| {
+                if event.id() == EVENT_ID_PROCESS_START {
                     started.store(true, Ordering::SeqCst);
                 }
                 None
@@ -750,8 +710,8 @@ pub(crate) mod tests {
             )
             .on(&[KERNEL_PROCESS_PROVIDER], {
                 let seen = seen.clone();
-                move |record, _| {
-                    seen.lock().insert(record.EventHeader.EventDescriptor.Id);
+                move |event| {
+                    seen.lock().insert(event.id());
                     None
                 }
             });

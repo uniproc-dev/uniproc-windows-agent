@@ -2386,6 +2386,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniproc-etw"
+version = "0.1.0"
+source = "git+https://github.com/uniproc-dev/uniproc-etw?tag=v0.1.0#506a4b36a957159919fa80784979a450136e8ae8"
+dependencies = [
+ "windows-core",
+]
+
+[[package]]
 name = "uniproc-protocol"
 version = "0.18.0"
 source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.18.0#dc3f820713820e49fbcfda4e3908033136bd80a5"
@@ -2435,6 +2443,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uniproc-agent-kit",
+ "uniproc-etw",
  "windows-core",
 ]
 

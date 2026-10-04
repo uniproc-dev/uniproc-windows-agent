@@ -19,11 +19,12 @@ use smol_str::SmolStr;
 use uniproc_agent_kit::Notify;
 use crate::bindings::{EVENT_TRACE_FLAG_PROCESS, TRACE_LEVEL_INFORMATION};
 
-use crate::etw::router::{Enable, KernelRouterBuilder};
+use crate::etw::router::{EVERY_KEYWORD, Enable, KernelRouterBuilder};
 use crate::providers::provider::Provider;
 use crate::report::SessionHealth;
 use assemble::{Assembler, SECOND};
-use decode::{KERNEL_PROCESS, KERNEL_PROCESS_KEYWORD, PROCESS, Record, TASK_SCHEDULER};
+use decode::{KERNEL_PROCESS, KERNEL_PROCESS_KEYWORD, PROCESS, TASK_SCHEDULER};
+use uniproc_etw::OwnedEvent;
 use history::{Cursor, History};
 use resolve::Machine;
 
@@ -130,7 +131,7 @@ pub struct ProcessEventsProvider {
 }
 
 enum Input {
-    Record(Record),
+    Record(OwnedEvent),
     KernelLost(u64),
 }
 
@@ -147,9 +148,9 @@ impl Provider for ProcessEventsProvider {
                     level: TRACE_LEVEL_INFORMATION as u8,
                 },
             )
-            .manifest(TASK_SCHEDULER, Enable::ALL)
-            .on(&PROVIDERS, move |record, data| {
-                if decode::wanted(record) && input.try_send(Input::Record(Record::copy(record, data))).is_err() {
+            .manifest(TASK_SCHEDULER, EVERY_KEYWORD)
+            .on(&PROVIDERS, move |event| {
+                if decode::wanted(event) && input.try_send(Input::Record(event.to_owned())).is_err() {
                     dropped.fetch_add(1, Ordering::Relaxed);
                 }
                 None
@@ -172,7 +173,7 @@ fn run(inbox: Receiver<Input>, shared: Arc<Shared>, dropped: Arc<AtomicU64>, mut
     let (mut kernel_lost, mut dropped_seen, mut lost) = (0u64, 0u64, 0u64);
     let mut take = |input: Input, assembler: &mut Assembler, lost: &mut u64| match input {
         Input::Record(record) => {
-            if let Some(raw) = decode::decode(&record, resolve::working_directory) {
+            if let Some(raw) = decode::decode(&record.event(), resolve::working_directory) {
                 assembler.add(raw);
             }
         }

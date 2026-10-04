@@ -2,9 +2,7 @@
 //! names, so a newer version of an event reads as well.
 
 use smol_str::SmolStr;
-use crate::bindings::{
-    EVENT_HEADER_FLAG_64_BIT_HEADER, EVENT_RECORD, PROPERTY_DATA_DESCRIPTOR, TdhGetProperty, TdhGetPropertySize,
-};
+use uniproc_etw::Event;
 use windows_core::GUID;
 
 use super::ProcessExited;
@@ -25,55 +23,23 @@ const PROCESS_START_OPCODE: u8 = 1;
 const TASK_PROCESS_CREATED: u16 = 129;
 
 /// Whether `record` is one of the events read here, before it is copied.
-pub(crate) fn wanted(record: &EVENT_RECORD) -> bool {
-    let descriptor = &record.EventHeader.EventDescriptor;
-    match record.EventHeader.ProviderId {
-        KERNEL_PROCESS => matches!(descriptor.Id, KERNEL_PROCESS_START | KERNEL_PROCESS_STOP),
-        PROCESS => descriptor.Opcode == PROCESS_START_OPCODE,
-        TASK_SCHEDULER => descriptor.Id == TASK_PROCESS_CREATED,
+pub(crate) fn wanted(event: &Event<'_>) -> bool {
+    match event.provider() {
+        provider if provider == KERNEL_PROCESS.to_u128() => matches!(event.id(), KERNEL_PROCESS_START | KERNEL_PROCESS_STOP),
+        provider if provider == PROCESS.to_u128() => event.opcode() == PROCESS_START_OPCODE,
+        provider if provider == TASK_SCHEDULER.to_u128() => event.id() == TASK_PROCESS_CREATED,
         _ => false,
     }
 }
 
-/// An event copied out of the ETW callback, read on another thread.
-pub(crate) struct Record {
-    record: EVENT_RECORD,
-    data: Vec<u8>,
-}
-
-unsafe impl Send for Record {}
-
-impl Record {
-    pub fn copy(record: &EVENT_RECORD, data: &[u8]) -> Self {
-        let mut record = *record;
-        record.UserData = std::ptr::null_mut();
-        record.UserDataLength = 0;
-        record.ExtendedData = std::ptr::null_mut();
-        record.ExtendedDataCount = 0;
-        record.UserContext = std::ptr::null_mut();
-        Self {
-            record,
-            data: data.to_vec(),
-        }
-    }
-
-    fn record(&self) -> EVENT_RECORD {
-        let mut record = self.record;
-        record.UserData = self.data.as_ptr() as *mut _;
-        record.UserDataLength = self.data.len() as u16;
-        record
-    }
-}
-
-/// What `record` tells; `working_directory` reads a process that just
+/// What `event` tells; `working_directory` reads a process that just
 /// started.
-pub(crate) fn decode(record: &Record, working_directory: impl FnOnce(u32) -> SmolStr) -> Option<Raw> {
-    let event = Fields(record.record());
-    let header = &event.0.EventHeader;
-    let descriptor = &header.EventDescriptor;
-    let time = header.TimeStamp as u64;
-    match header.ProviderId {
-        KERNEL_PROCESS if descriptor.Id == KERNEL_PROCESS_START => {
+pub(crate) fn decode(event: &Event<'_>, working_directory: impl FnOnce(u32) -> SmolStr) -> Option<Raw> {
+    let event = Fields(event);
+    let time = event.0.timestamp() as u64;
+    let (provider, id, opcode) = (event.0.provider(), event.0.id(), event.0.opcode());
+    match provider {
+        provider if provider == KERNEL_PROCESS.to_u128() && id == KERNEL_PROCESS_START => {
             let pid = event.number("ProcessID")? as u32;
             Some(Raw::Created(Created {
                 pid,
@@ -88,7 +54,7 @@ pub(crate) fn decode(record: &Record, working_directory: impl FnOnce(u32) -> Smo
                 working_directory: working_directory(pid),
             }))
         }
-        KERNEL_PROCESS if descriptor.Id == KERNEL_PROCESS_STOP => Some(Raw::Ended(Ended {
+        provider if provider == KERNEL_PROCESS.to_u128() && id == KERNEL_PROCESS_STOP => Some(Raw::Ended(Ended {
             pid: event.number("ProcessID")? as u32,
             sequence_number: event.number("ProcessSequenceNumber").filter(|&n| n != 0)?,
             time: event.number("ExitTime").unwrap_or(time),
@@ -107,13 +73,13 @@ pub(crate) fn decode(record: &Record, working_directory: impl FnOnce(u32) -> Smo
                 hard_faults: event.number("HardFaultCount").unwrap_or(0) as u32,
             },
         })),
-        PROCESS if descriptor.Opcode == PROCESS_START_OPCODE => Some(Raw::Launched(Launched {
+        provider if provider == PROCESS.to_u128() && opcode == PROCESS_START_OPCODE => Some(Raw::Launched(Launched {
             pid: event.number("ProcessId")? as u32,
             time,
             sid: event.sid("UserSID"),
             command_line: event.text("CommandLine"),
         })),
-        TASK_SCHEDULER if descriptor.Id == TASK_PROCESS_CREATED => Some(Raw::Scheduled(Scheduled {
+        provider if provider == TASK_SCHEDULER.to_u128() && id == TASK_PROCESS_CREATED => Some(Raw::Scheduled(Scheduled {
             pid: event.number("ProcessID")? as u32,
             time,
             task: event.text("TaskName"),
@@ -122,65 +88,25 @@ pub(crate) fn decode(record: &Record, working_directory: impl FnOnce(u32) -> Smo
     }
 }
 
-struct Fields(EVENT_RECORD);
+/// An event's fields as the process events keep them: a missing string or
+/// SID is empty.
+struct Fields<'a, 'e>(&'a Event<'e>);
 
-impl Fields {
-    fn bytes(&self, name: &str) -> Option<Vec<u8>> {
-        let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        let descriptor = [PROPERTY_DATA_DESCRIPTOR {
-            PropertyName: name.as_ptr() as u64,
-            ArrayIndex: u32::MAX,
-            Reserved: 0,
-        }];
-        let mut size = 0u32;
-        if unsafe { TdhGetPropertySize(&self.0, None, &descriptor, &mut size) }.0 != 0 {
-            return None;
-        }
-        let mut bytes = vec![0u8; size as usize];
-        if unsafe { TdhGetProperty(&self.0, None, &descriptor, size, bytes.as_mut_ptr()) }.0 != 0 {
-            return None;
-        }
-        Some(bytes)
-    }
-
+impl Fields<'_, '_> {
     fn number(&self, name: &str) -> Option<u64> {
-        let bytes = self.bytes(name)?;
-        let mut le = [0u8; 8];
-        let len = bytes.len().min(8);
-        le[..len].copy_from_slice(&bytes[..len]);
-        Some(u64::from_le_bytes(le))
+        self.0.number(name)
     }
 
     fn text(&self, name: &str) -> SmolStr {
-        let Some(bytes) = self.bytes(name) else {
-            return SmolStr::default();
-        };
-        let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .take_while(|&unit| unit != 0)
-            .collect();
-        String::from_utf16_lossy(&units).into()
+        self.0.text(name).map(SmolStr::from).unwrap_or_default()
     }
 
     fn ansi(&self, name: &str) -> SmolStr {
-        let Some(bytes) = self.bytes(name) else {
-            return SmolStr::default();
-        };
-        let end = bytes.iter().position(|&byte| byte == 0).unwrap_or(bytes.len());
-        String::from_utf8_lossy(&bytes[..end]).into()
+        self.0.ansi(name).map(SmolStr::from).unwrap_or_default()
     }
 
-    /// The SID of a kernel event's TOKEN_USER: the SID follows the
-    /// structure's pointer and attributes.
+    /// The classic Process event's UserSID is a TOKEN_USER.
     fn sid(&self, name: &str) -> Vec<u8> {
-        let Some(bytes) = self.bytes(name) else {
-            return Vec::new();
-        };
-        let pointer = if self.0.EventHeader.Flags as u32 & EVENT_HEADER_FLAG_64_BIT_HEADER as u32 != 0 { 8 } else { 4 };
-        match bytes.get(2 * pointer..) {
-            Some(sid) if sid.first() == Some(&1) => sid.to_vec(),
-            _ => Vec::new(),
-        }
+        self.0.wbem_sid(name).unwrap_or_default()
     }
 }
