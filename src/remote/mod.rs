@@ -94,7 +94,8 @@ struct Envelope {
     reply: oneshot::Sender<Result<Reply>>,
 }
 
-/// A connection to the agent service. Clones share it; it closes when the last one is dropped.
+/// A connection to the agent service. Clones share it; it closes when the
+/// last one, and the last watch or sampler taken from one, is dropped.
 ///
 /// Every session lives on one I/O thread with its own compio runtime,
 /// started on the first connect and kept for the process, so the calls
@@ -169,7 +170,10 @@ impl Remote {
         let (tx, calls) = mpsc::unbounded();
         let spec = wire::known_to(self.agent, spec);
         match self.call(Request::Subscribe { spec, calls }).await? {
-            Reply::Subscribed => Ok(RemoteSampler { calls: tx }),
+            Reply::Subscribed => Ok(RemoteSampler {
+                calls: tx,
+                _session: self.clone(),
+            }),
             _ => bail!("a subscribe answered with something else"),
         }
     }
@@ -192,7 +196,11 @@ impl Remote {
             released,
         };
         match self.call(request).await? {
-            Reply::Watching => Ok(Watch { rx, _release: release }),
+            Reply::Watching => Ok(Watch {
+                rx,
+                _release: release,
+                _session: self.clone(),
+            }),
             _ => bail!("a watch answered with something else"),
         }
     }
@@ -212,7 +220,11 @@ impl Remote {
             released,
         };
         match self.call(request).await? {
-            Reply::Watching => Ok(RemoteWatch { rx, _release: release }),
+            Reply::Watching => Ok(RemoteWatch {
+                rx,
+                _release: release,
+                _session: self.clone(),
+            }),
             _ => bail!("a watch answered with something else"),
         }
     }
@@ -232,7 +244,11 @@ impl Remote {
         let (batches, rx) = mpsc::unbounded();
         let (release, released) = oneshot::channel();
         match self.call(Request::WatchProcessEvents { batches, released }).await? {
-            Reply::Watching => Ok(RemoteProcessEvents { rx, _release: release }),
+            Reply::Watching => Ok(RemoteProcessEvents {
+                rx,
+                _release: release,
+                _session: self.clone(),
+            }),
             _ => bail!("a watch answered with something else"),
         }
     }
@@ -242,6 +258,7 @@ impl Remote {
 pub struct RemoteWatch {
     rx: mpsc::UnboundedReceiver<Delivery<Update>>,
     _release: oneshot::Sender<()>,
+    _session: Remote,
 }
 
 impl RemoteWatch {
@@ -256,6 +273,7 @@ impl RemoteWatch {
 pub struct RemoteProcessEvents {
     rx: mpsc::UnboundedReceiver<Delivery<ProcessEventBatch>>,
     _release: oneshot::Sender<()>,
+    _session: Remote,
 }
 
 impl RemoteProcessEvents {
@@ -269,6 +287,7 @@ impl RemoteProcessEvents {
 /// One subscription over the pipe; the agent releases it when this is dropped.
 pub struct RemoteSampler {
     calls: mpsc::UnboundedSender<SampleCall>,
+    _session: Remote,
 }
 
 impl RemoteSampler {
@@ -287,6 +306,7 @@ impl RemoteSampler {
 struct Watch {
     rx: mpsc::UnboundedReceiver<ServiceStatus>,
     _release: oneshot::Sender<()>,
+    _session: Remote,
 }
 
 impl Stream for Watch {
@@ -925,6 +945,54 @@ mod tests {
         })
         .map_err(|e| format!("{e:#}"));
         assert_eq!(told, Ok((batch, Err("the agent stopped".to_string()))));
+    }
+
+    /// Tells its one batch a while after the watch begins.
+    #[derive(Clone)]
+    struct TellingLater(ProcessEventBatch);
+
+    impl windows_agent::Server for TellingLater {
+        async fn watch_process_events(
+            self: Rc<Self>,
+            params: windows_agent::WatchProcessEventsParams,
+            mut results: windows_agent::WatchProcessEventsResults,
+        ) -> Result<(), capnp::Error> {
+            let listener = params.get()?.get_listener()?;
+            let batch = self.0.clone();
+            compio::runtime::spawn(async move {
+                compio::time::sleep(Duration::from_millis(300)).await;
+                let mut request = listener.events_request();
+                request.get().init_meta();
+                encode::process_event_batch(&batch, request.get().init_batch());
+                let _ = request.send().promise.await;
+            })
+            .detach();
+            results.get().init_meta();
+            results.get().set_handle(capnp_rpc::new_client(Released));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_watch_goes_on_after_the_remote_it_came_from_is_dropped() {
+        let batch = ProcessEventBatch {
+            history_from: 3,
+            events: Vec::new(),
+            lost: 0,
+        };
+        serve_as("uniproc-test-agent-tells-later", PROTOCOL.version.minor, TellingLater(batch.clone()));
+        let (told, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let first = futures::executor::block_on(async {
+                let mut events = Remote::connect_to("uniproc-test-agent-tells-later", Duration::from_secs(5))
+                    .await?
+                    .watch_process_events()
+                    .await?;
+                events.next().await
+            });
+            let _ = told.send(first.map_err(|e| format!("{e:#}")));
+        });
+        assert_eq!(heard.recv_timeout(Duration::from_secs(10)), Ok(Ok(batch)));
     }
 
     #[test]
