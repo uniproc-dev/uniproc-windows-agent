@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use crossbeam_channel::Sender;
 use uniproc_agent_kit::Versioned;
-use uniproc_windows_core::{Diff, Epoch, Health, Process, SessionHealth};
+use uniproc_windows_core::{Diff, Epoch, Health, Process, SessionHealth, SmolStr};
 
 use crate::api::{
     MetricSpec, ProcessInfo, ProcessState, ProcessStates, Sample, ServiceState, ServiceStats,
@@ -38,6 +38,7 @@ pub struct Published {
 pub struct Feed {
     latest: Arc<ArcSwap<Published>>,
     requests: Sender<Request>,
+    gone: Arc<Gone>,
 }
 
 /// What the sources tell the picture.
@@ -55,6 +56,48 @@ pub(crate) struct Painter {
     thread: Option<JoinHandle<()>>,
 }
 
+/// How long the image of a process that left the list is still named:
+/// its exit can come from ETW after the sample that saw it go.
+const GONE_KEPT: Duration = Duration::from_secs(10);
+
+/// The images of the processes that left the list in the last [`GONE_KEPT`].
+#[derive(Default)]
+pub(crate) struct Gone(parking_lot::Mutex<GoneList>);
+
+#[derive(Default)]
+struct GoneList {
+    order: VecDeque<(Instant, (u32, u64))>,
+    images: HashMap<(u32, u64), (Instant, SmolStr)>,
+}
+
+impl Gone {
+    fn remember(&self, pid: u32, sequence_number: u64, image: SmolStr, now: Instant) {
+        let mut list = self.0.lock();
+        while let Some(&(at, key)) = list.order.front()
+            && now.saturating_duration_since(at) > GONE_KEPT
+        {
+            list.order.pop_front();
+            if list.images.get(&key).is_some_and(|(left, _)| *left == at) {
+                list.images.remove(&key);
+            }
+        }
+        list.order.push_back((now, (pid, sequence_number)));
+        list.images.insert((pid, sequence_number), (now, image));
+    }
+
+    /// The image of the process `pid` with `sequence_number` if it left
+    /// lately; empty otherwise.
+    pub(crate) fn image(&self, pid: u32, sequence_number: u64, now: Instant) -> SmolStr {
+        self.0
+            .lock()
+            .images
+            .get(&(pid, sequence_number))
+            .filter(|(left, _)| now.saturating_duration_since(*left) <= GONE_KEPT)
+            .map(|(_, image)| image.clone())
+            .unwrap_or_default()
+    }
+}
+
 /// What the sources of the agent's picture tell it, kept up by the core's
 /// diffs, the service scans and the followed services' statuses. The only
 /// place that tags what the agent shows.
@@ -69,6 +112,7 @@ struct Picture {
     sample: Arc<Sample>,
     services: Versioned<Arc<[ServiceStats]>>,
     followed: HashMap<String, (ServiceState, u32)>,
+    gone: Arc<Gone>,
 }
 
 #[cfg(test)]
@@ -87,6 +131,13 @@ impl Feed {
         self.latest.load_full()
     }
 
+    /// The image of the process `pid` with `sequence_number`, listed now or
+    /// gone lately; empty when unknown.
+    pub(crate) fn image_of(&self, pid: u32, sequence_number: u64) -> SmolStr {
+        listed_image(&self.latest().snapshot.processes.value, pid, sequence_number)
+            .unwrap_or_else(|| self.gone.image(pid, sequence_number, Instant::now()))
+    }
+
     /// Delivers what `spec` asks for until the sampler is dropped.
     pub fn subscribe(&self, spec: MetricSpec) -> LocalSampler {
         LocalSampler::subscribe(&self.requests, spec)
@@ -103,6 +154,7 @@ impl Painter {
     /// publishes to. `spare` gets the core's diffs back, emptied.
     pub fn start(mut subscriptions: Subscriptions, spare: Sender<Diff>) -> std::io::Result<(Self, Sender<Change>, Feed)> {
         let mut picture = Picture::new();
+        let gone = picture.gone.clone();
         let latest = Arc::new(ArcSwap::from_pointee(picture.publish()));
         let (changes, inbox) = crossbeam_channel::unbounded::<Change>();
         let (requests, asked) = crossbeam_channel::unbounded::<Request>();
@@ -126,7 +178,7 @@ impl Painter {
                 }
             }
         })?;
-        let feed = Feed { latest, requests };
+        let feed = Feed { latest, requests, gone };
         Ok((
             Self {
                 stop: Some(stop),
@@ -162,6 +214,14 @@ fn paint(
     }
 }
 
+/// The image of the process listed as `pid` with `sequence_number`.
+fn listed_image(processes: &[ProcessInfo], pid: u32, sequence_number: u64) -> Option<SmolStr> {
+    processes
+        .iter()
+        .find(|process| process.pid == pid && process.sequence_number == sequence_number)
+        .map(|process| process.image_path.clone())
+}
+
 fn publish(picture: &Picture, latest: &ArcSwap<Published>, subscriptions: &mut Subscriptions) {
     let published = Arc::new(picture.publish());
     latest.store(published.clone());
@@ -191,6 +251,7 @@ impl Picture {
             sample: Arc::default(),
             services: Versioned::new(epoch, Arc::from([])),
             followed: HashMap::new(),
+            gone: Arc::default(),
         }
     }
 
@@ -212,9 +273,12 @@ impl Picture {
         let mut listed = false;
         let restated = !diff.states.is_empty() || diff.sample.is_some();
         let news = self.health.as_ref().is_none_or(|last| news(last, &health));
+        let now = Instant::now();
         for (pid, sequence_number) in diff.gone.drain(..) {
-            if self.passports.get(&pid).is_some_and(|p| p.sequence_number == sequence_number) {
-                self.passports.remove(&pid);
+            if self.passports.get(&pid).is_some_and(|p| p.sequence_number == sequence_number)
+                && let Some(left) = self.passports.remove(&pid)
+            {
+                self.gone.remember(pid, sequence_number, left.image_path, now);
                 self.process_states.remove(&pid);
                 listed = true;
             }
@@ -576,6 +640,42 @@ mod tests {
         let latest = feed.latest();
         assert_eq!(latest.snapshot.processes.value.iter().map(|p| p.pid).collect::<Vec<_>>(), [10]);
         assert_eq!(latest.snapshot.states.value.states.iter().map(|s| s.pid).collect::<Vec<_>>(), [10]);
+    }
+
+    #[test]
+    fn a_process_that_just_left_still_names_its_image_for_a_while() {
+        let feed = Painted::new();
+        apply(
+            &feed,
+            Diff {
+                passports: vec![Process {
+                    image_path: r"C:\ten.exe".into(),
+                    ..passport(10)
+                }],
+                sample: Some(sample(1, &[10])),
+                ..Default::default()
+            },
+        );
+        apply(&feed, Diff { gone: vec![(10, 1010)], ..Default::default() });
+        let gone = feed.picture.borrow().gone.clone();
+        let now = Instant::now();
+        assert_eq!(gone.image(10, 1010, now), r"C:\ten.exe");
+        assert_eq!(gone.image(10, 1011, now), "", "another instance under the pid");
+        assert_eq!(gone.image(10, 1010, now + GONE_KEPT + Duration::from_secs(1)), "", "forgotten after a while");
+    }
+
+    #[test]
+    fn an_instance_s_image_is_the_one_listed_under_its_pid_and_sequence_number() {
+        let process = |pid, sequence_number, image: &str| ProcessInfo {
+            pid,
+            sequence_number,
+            image_path: image.into(),
+            ..Default::default()
+        };
+        let listed = [process(4, 40, r"C:\a.exe"), process(5, 51, r"C:\b.exe")];
+        assert_eq!(listed_image(&listed, 5, 51).as_deref(), Some(r"C:\b.exe"));
+        assert_eq!(listed_image(&listed, 5, 50), None, "the pid reused by another instance");
+        assert_eq!(listed_image(&listed, 6, 60), None);
     }
 
     #[test]
