@@ -106,6 +106,14 @@ struct WatchHandleImpl {
 
 impl watch_handle::Server for WatchHandleImpl {}
 
+/// What `promise` came to, or None once the watch is released first.
+async fn answered<T>(released: &mut oneshot::Receiver<()>, promise: impl Future<Output = T>) -> Option<T> {
+    match select(released, std::pin::pin!(promise)).await {
+        Either::Left(_) => None,
+        Either::Right((answer, _)) => Some(answer),
+    }
+}
+
 async fn forward(
     mut watch: ServiceWatch,
     watcher: service_watcher::Client,
@@ -120,7 +128,7 @@ async fn forward(
         let mut request = watcher.changed_request();
         request.get().init_meta();
         encode::service_status(&status, request.get().init_status());
-        if request.send().promise.await.is_err() {
+        if !matches!(answered(&mut released, request.send().promise).await, Some(Ok(_))) {
             return;
         }
     }
@@ -141,7 +149,7 @@ async fn push(mut watch: LocalWatch, listener: agent_listener::Client, mut relea
         if encode::update(&update, before.as_ref(), request.get()).is_err() {
             return;
         }
-        if request.send().promise.await.is_err() {
+        if !matches!(answered(&mut released, request.send().promise).await, Some(Ok(_))) {
             return;
         }
         before = Some(update.snapshot);
@@ -162,7 +170,7 @@ async fn tell(
         let mut request = listener.events_request();
         request.get().init_meta();
         encode::process_event_batch(&batch, request.get().init_batch());
-        if request.send().promise.await.is_err() {
+        if !matches!(answered(&mut released, request.send().promise).await, Some(Ok(_))) {
             return;
         }
     }
@@ -481,6 +489,31 @@ mod tests {
             .unwrap()
             .block_on(tell(batches, listener, released));
         assert_eq!(*heard.borrow(), []);
+    }
+
+    struct Deaf;
+
+    impl process_event_listener::Server for Deaf {
+        async fn events(
+            self: Rc<Self>,
+            _: process_event_listener::EventsParams,
+            _: process_event_listener::EventsResults,
+        ) -> Result<(), capnp::Error> {
+            futures::future::pending().await
+        }
+    }
+
+    #[test]
+    fn a_watch_released_while_its_listener_does_not_answer_ends() {
+        let listener: process_event_listener::Client = capnp_rpc::new_client(Deaf);
+        let (release, released) = oneshot::channel();
+        let ended = compio::runtime::Runtime::new().unwrap().block_on(async {
+            let telling = compio::runtime::spawn(tell(futures::stream::iter([batch(1)]), listener, released));
+            compio::time::sleep(std::time::Duration::from_millis(50)).await;
+            drop(release);
+            compio::time::timeout(std::time::Duration::from_secs(2), telling).await.is_ok()
+        });
+        assert!(ended, "the watch went on after its handle was released");
     }
 
     #[test]
