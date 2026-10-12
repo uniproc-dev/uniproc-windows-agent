@@ -34,12 +34,21 @@ impl Drop for HandleGuard {
     }
 }
 
+/// Win32 ERROR_ACCESS_DENIED: the agent does not stop or freeze itself.
+const ERROR_ACCESS_DENIED: u32 = 5;
+
+fn not_the_agent(pid: u32) -> CommandResult {
+    if pid == std::process::id() { Err(ERROR_ACCESS_DENIED) } else { Ok(()) }
+}
+
 pub fn kill(pid: u32) -> CommandResult {
+    not_the_agent(pid)?;
     let handle = HandleGuard::open(PROCESS_TERMINATE, pid)?;
     unsafe { TerminateProcess(handle.0, 1) }.ok().map_err(|e| win32_code(&e))
 }
 
 pub fn suspend(pid: u32) -> CommandResult {
+    not_the_agent(pid)?;
     let handle = HandleGuard::open(PROCESS_SUSPEND_RESUME, pid)?;
     // NTSTATUS, not a Win32 code.
     let status = unsafe { ntapi::ntpsapi::NtSuspendProcess(handle.0.0 as _) };

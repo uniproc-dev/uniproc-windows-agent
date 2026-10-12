@@ -153,6 +153,52 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "run by the_agent_refuses_to_kill_or_suspend_itself in a process of its own"]
+    fn on_itself() {
+        let Ok(which) = std::env::var("UNIPROC_ON_ITSELF") else { return };
+        let (commands, _watcher) = commands();
+        let pid = std::process::id();
+        let command = match which.as_str() {
+            "kill" => Command::Kill { pid },
+            _ => Command::Suspend { pid },
+        };
+        println!("answered {:?}", answer(commands.run(command)));
+    }
+
+    #[test]
+    fn the_agent_refuses_to_kill_or_suspend_itself() {
+        use std::io::Read;
+
+        for which in ["kill", "suspend"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["commands::tests::on_itself", "--exact", "--ignored", "--nocapture"])
+                .env("UNIPROC_ON_ITSELF", which)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break Some(status);
+                }
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let mut out = String::new();
+            let _ = child.stdout.take().unwrap().read_to_string(&mut out);
+            assert!(
+                status.is_some_and(|s| s.success()) && out.contains("answered Err(5)"),
+                "{which}: {status:?}\n{out}"
+            );
+        }
+    }
+
+    #[test]
     fn a_gone_process_cannot_be_killed() {
         let (commands, _watcher) = commands();
         let gone = commands.run(Command::Kill { pid: u32::MAX - 3 });
