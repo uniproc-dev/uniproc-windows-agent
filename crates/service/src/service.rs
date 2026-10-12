@@ -240,16 +240,43 @@ pub fn uninstall(service_name: &str) -> Result<Vec<String>> {
         service_name,
         ServiceAccess::DELETE | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
     )?;
-    let _ = service.stop();
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while service.query_status()?.current_state != ServiceState::Stopped {
-        if std::time::Instant::now() > deadline {
-            anyhow::bail!("{service_name} did not stop within a minute");
-        }
-        std::thread::sleep(Duration::from_millis(250));
+    let stopped = stop_within(
+        Duration::from_secs(60),
+        || {
+            let _ = service.stop();
+        },
+        || Ok(service.query_status()?.current_state),
+    )?;
+    if !stopped {
+        anyhow::bail!("{service_name} did not stop within a minute");
     }
     service.delete()?;
     Ok(uniproc_windows_agent::stop_leftover_sessions())
+}
+
+/// How often a stopping service is looked at again.
+const STOP_POLL: Duration = Duration::from_millis(250);
+
+/// Asks the service to stop until it is stopped, again whenever it is not
+/// stopping: one still starting takes no stop until it runs. False when it
+/// is not stopped within `within`.
+fn stop_within(
+    within: Duration,
+    mut stop: impl FnMut(),
+    mut state: impl FnMut() -> Result<ServiceState>,
+) -> Result<bool> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        match state()? {
+            ServiceState::Stopped => return Ok(true),
+            ServiceState::StopPending => {}
+            _ => stop(),
+        }
+        if std::time::Instant::now() > deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(STOP_POLL);
+    }
 }
 
 #[cfg(test)]
@@ -281,5 +308,29 @@ mod tests {
         assert_eq!(told(Step::Running), (ServiceState::Running, 0, Duration::ZERO));
         let stop = [Step::Stopping, Step::CoreStopped];
         assert_eq!(count(&stop, ServiceState::StopPending), (0..STOP_STEPS).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_service_still_starting_is_stopped_once_it_runs() {
+        let state = std::cell::Cell::new(ServiceState::StartPending);
+        let looked = std::cell::Cell::new(0);
+        let stopped = stop_within(
+            Duration::from_secs(3),
+            || {
+                if state.get() == ServiceState::Running {
+                    state.set(ServiceState::StopPending);
+                }
+            },
+            || {
+                looked.set(looked.get() + 1);
+                match state.get() {
+                    ServiceState::StartPending if looked.get() > 2 => state.set(ServiceState::Running),
+                    ServiceState::StopPending => state.set(ServiceState::Stopped),
+                    _ => {}
+                }
+                Ok(state.get())
+            },
+        );
+        assert!(stopped.is_ok_and(|stopped| stopped), "{:?} after {} looks", state.get(), looked.get());
     }
 }
