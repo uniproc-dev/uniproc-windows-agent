@@ -70,22 +70,33 @@ struct Config {
     load_group: String,
     description: String,
     image_path: String,
+    /// The process the service ran in when this was read.
+    pid: u32,
 }
 
-/// Configuration never changes while a service exists, so it is read once
-/// per name. None when the services could not be listed.
+/// None when the services could not be listed.
 fn scan(scm: ScHandle, buf: &mut Vec<u64>, configs: &mut HashMap<String, Config>) -> Option<Vec<ServiceStats>> {
     let mut services = enumerate(scm, buf)?;
-    for service in &mut services {
-        let config = configs
-            .entry(service.name.clone())
-            .or_insert_with(|| config(scm, &service.name));
-        service.load_group = config.load_group.clone();
-        service.description = config.description.clone();
-        service.image_path = config.image_path.clone();
+    describe(scm, &mut services, configs);
+    Some(services)
+}
+
+/// Fills in each service's configuration, read again once the service runs
+/// in another process, since a new binary path takes effect only then. A
+/// read that fails keeps what was read before and is tried next scan.
+fn describe(scm: ScHandle, services: &mut [ServiceStats], configs: &mut HashMap<String, Config>) {
+    for service in services.iter_mut() {
+        let current = configs.get(&service.name).is_some_and(|c| c.pid == service.pid);
+        if !current && let Some(read) = config(scm, &service.name) {
+            configs.insert(service.name.clone(), Config { pid: service.pid, ..read });
+        }
+        if let Some(config) = configs.get(&service.name) {
+            service.load_group = config.load_group.clone();
+            service.description = config.description.clone();
+            service.image_path = config.image_path.clone();
+        }
     }
     configs.retain(|name, _| services.iter().any(|s| &s.name == name));
-    Some(services)
 }
 
 fn aligned_bytes(len: u32) -> Vec<u64> {
@@ -96,23 +107,25 @@ unsafe fn as_byte_slice(buf: &mut [u64], len: u32) -> &mut [u8] {
     unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, len as usize) }
 }
 
-fn config(scm: ScHandle, name: &str) -> Config {
+/// None when the service cannot be opened or its configuration read; a
+/// description that cannot be read is left empty.
+fn config(scm: ScHandle, name: &str) -> Option<Config> {
     let mut out = Config::default();
-    let Ok(service) = Service::open(scm, name, SERVICE_QUERY_CONFIG) else {
-        return out;
-    };
+    let service = Service::open(scm, name, SERVICE_QUERY_CONFIG).ok()?;
 
     unsafe {
         let mut size = 0u32;
         let _ = QueryServiceConfigW(service.0, None, 0, &mut size);
-        if size > 0 {
-            let mut storage = aligned_bytes(size);
-            let config = storage.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
-            if QueryServiceConfigW(service.0, Some(config), size, &mut size).as_bool() {
-                out.load_group = (*config).lpLoadOrderGroup.to_string().unwrap_or_default();
-                out.image_path = (*config).lpBinaryPathName.to_string().unwrap_or_default();
-            }
+        if size == 0 {
+            return None;
         }
+        let mut storage = aligned_bytes(size);
+        let config = storage.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+        if !QueryServiceConfigW(service.0, Some(config), size, &mut size).as_bool() {
+            return None;
+        }
+        out.load_group = (*config).lpLoadOrderGroup.to_string().unwrap_or_default();
+        out.image_path = (*config).lpBinaryPathName.to_string().unwrap_or_default();
 
         let level = SERVICE_CONFIG_DESCRIPTION as u32;
         let mut size = 0u32;
@@ -137,7 +150,7 @@ fn config(scm: ScHandle, name: &str) -> Config {
         }
     }
 
-    out
+    Some(out)
 }
 
 /// Win32 ERROR_MORE_DATA: services came between sizing the buffer and filling it.
@@ -212,6 +225,43 @@ mod tests {
         assert!(!services.is_empty());
         assert_eq!(configs.len(), services.len());
         assert!(services.iter().any(|s| s.state == ServiceState::Running && s.pid != 0));
+    }
+
+    fn listed(name: &str, pid: u32) -> ServiceStats {
+        ServiceStats {
+            name: name.to_string(),
+            pid,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_configuration_that_could_not_be_read_is_read_again_next_scan() {
+        let scm = Scm::new();
+        let connection = scm.connection().unwrap();
+        let mut configs = HashMap::new();
+        describe(connection.handle(), &mut [listed("UniprocNoSuchService", 0)], &mut configs);
+        assert!(!configs.contains_key("UniprocNoSuchService"), "{configs:?}");
+    }
+
+    #[test]
+    fn a_service_in_another_process_is_read_again() {
+        let scm = Scm::new();
+        let connection = scm.connection().unwrap();
+        let running = scan(connection.handle(), &mut Vec::new(), &mut HashMap::new())
+            .expect("listed")
+            .into_iter()
+            .find(|s| s.name == "EventLog")
+            .expect("EventLog is listed");
+        let stale = Config {
+            image_path: "stale".into(),
+            pid: running.pid.wrapping_add(4),
+            ..Default::default()
+        };
+        let mut configs = HashMap::from([("EventLog".to_string(), stale)]);
+        let mut services = [listed("EventLog", running.pid)];
+        describe(connection.handle(), &mut services, &mut configs);
+        assert_eq!(services[0].image_path, running.image_path);
     }
 
     #[test]
