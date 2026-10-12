@@ -12,6 +12,7 @@ use windows_core::PCWSTR;
 
 use crate::api::ServiceStats;
 use crate::scm::{ScHandle, Scm, Service, state};
+use crate::win::win32_code;
 
 /// How often the inventory is taken again.
 const INTERVAL: Duration = Duration::from_secs(5);
@@ -32,8 +33,10 @@ impl Inventory {
         let mut buf = Vec::new();
         let mut configs = HashMap::new();
         let mut take = move |publish: &mut dyn FnMut(Vec<ServiceStats>)| {
-            if let Ok(connection) = scm.connection() {
-                publish(scan(connection.handle(), &mut buf, &mut configs));
+            if let Ok(connection) = scm.connection()
+                && let Some(services) = scan(connection.handle(), &mut buf, &mut configs)
+            {
+                publish(services);
             }
         };
         take(&mut publish);
@@ -69,9 +72,10 @@ struct Config {
     image_path: String,
 }
 
-/// Configuration never changes while a service exists, so it is read once per name.
-fn scan(scm: ScHandle, buf: &mut Vec<u64>, configs: &mut HashMap<String, Config>) -> Vec<ServiceStats> {
-    let mut services = enumerate(scm, buf);
+/// Configuration never changes while a service exists, so it is read once
+/// per name. None when the services could not be listed.
+fn scan(scm: ScHandle, buf: &mut Vec<u64>, configs: &mut HashMap<String, Config>) -> Option<Vec<ServiceStats>> {
+    let mut services = enumerate(scm, buf)?;
     for service in &mut services {
         let config = configs
             .entry(service.name.clone())
@@ -81,7 +85,7 @@ fn scan(scm: ScHandle, buf: &mut Vec<u64>, configs: &mut HashMap<String, Config>
         service.image_path = config.image_path.clone();
     }
     configs.retain(|name, _| services.iter().any(|s| &s.name == name));
-    services
+    Some(services)
 }
 
 fn aligned_bytes(len: u32) -> Vec<u64> {
@@ -136,66 +140,62 @@ fn config(scm: ScHandle, name: &str) -> Config {
     out
 }
 
-/// Every Win32 service with its current state; `buf` keeps its capacity across calls.
-fn enumerate(scm: ScHandle, buf: &mut Vec<u64>) -> Vec<ServiceStats> {
-    unsafe {
+/// Win32 ERROR_MORE_DATA: services came between sizing the buffer and filling it.
+const ERROR_MORE_DATA: u32 = 234;
+/// How many times the buffer is sized again before a scan is given up.
+const LIST_ATTEMPTS: usize = 4;
+/// Room for services added between sizing the buffer and filling it.
+const LIST_SLACK: u32 = 4096;
+
+/// Every Win32 service with its current state; `buf` keeps its capacity
+/// across calls. None when they could not be listed.
+fn enumerate(scm: ScHandle, buf: &mut Vec<u64>) -> Option<Vec<ServiceStats>> {
+    for _ in 0..LIST_ATTEMPTS {
         let mut bytes_needed = 0u32;
         let mut services_returned = 0u32;
         let mut resume = 0u32;
-
-        let _ = EnumServicesStatusExW(
-            scm.0,
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32 as u32,
-            SERVICE_STATE_ALL as u32,
-            None,
-            0,
-            &mut bytes_needed,
-            &mut services_returned,
-            Some(&mut resume),
-            PCWSTR::null(),
-        );
-
-        if bytes_needed == 0 {
-            return Vec::new();
+        let size = (buf.len() * size_of::<u64>()) as u32;
+        let listed = unsafe {
+            EnumServicesStatusExW(
+                scm.0,
+                SC_ENUM_PROCESS_INFO,
+                SERVICE_WIN32 as u32,
+                SERVICE_STATE_ALL as u32,
+                (size > 0).then(|| as_byte_slice(buf, size).as_mut_ptr()),
+                size,
+                &mut bytes_needed,
+                &mut services_returned,
+                Some(&mut resume),
+                PCWSTR::null(),
+            )
         }
-
-        buf.clear();
-        buf.resize(bytes_needed.div_ceil(8) as usize, 0);
-        resume = 0;
-        let size = bytes_needed;
-        if !EnumServicesStatusExW(
-            scm.0,
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32 as u32,
-            SERVICE_STATE_ALL as u32,
-            Some(as_byte_slice(buf, size).as_mut_ptr()),
-            size,
-            &mut bytes_needed,
-            &mut services_returned,
-            Some(&mut resume),
-            PCWSTR::null(),
-        )
-        .as_bool()
-        {
-            return Vec::new();
+        .ok();
+        match listed {
+            Ok(()) => return Some(unsafe { entries(buf, services_returned) }),
+            Err(error) if win32_code(&error) == ERROR_MORE_DATA => {
+                buf.clear();
+                buf.resize((bytes_needed + LIST_SLACK).div_ceil(8) as usize, 0);
+            }
+            Err(_) => return None,
         }
-
-        let entries = std::slice::from_raw_parts(
-            buf.as_ptr() as *const ENUM_SERVICE_STATUS_PROCESSW,
-            services_returned as usize,
-        );
-        entries
-            .iter()
-            .map(|e| ServiceStats {
-                name: e.lpServiceName.to_string().unwrap_or_default(),
-                display_name: e.lpDisplayName.to_string().unwrap_or_default(),
-                pid: e.ServiceStatusProcess.dwProcessId,
-                state: state(e.ServiceStatusProcess.dwCurrentState),
-                ..Default::default()
-            })
-            .collect()
     }
+    None
+}
+
+/// The first `count` entries EnumServicesStatusExW wrote into `buf`.
+unsafe fn entries(buf: &[u64], count: u32) -> Vec<ServiceStats> {
+    let entries =
+        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const ENUM_SERVICE_STATUS_PROCESSW, count as usize) };
+    entries
+        .iter()
+        .map(|e| ServiceStats {
+            name: unsafe { e.lpServiceName.to_string() }.unwrap_or_default(),
+            display_name: unsafe { e.lpDisplayName.to_string() }.unwrap_or_default(),
+            pid: e.ServiceStatusProcess.dwProcessId,
+            state: state(e.ServiceStatusProcess.dwCurrentState),
+            ..Default::default()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -208,10 +208,23 @@ mod tests {
         let scm = Scm::new();
         let connection = scm.connection().expect("anyone may enumerate services");
         let mut configs = HashMap::new();
-        let services = scan(connection.handle(), &mut Vec::new(), &mut configs);
+        let services = scan(connection.handle(), &mut Vec::new(), &mut configs).expect("listed");
         assert!(!services.is_empty());
         assert_eq!(configs.len(), services.len());
         assert!(services.iter().any(|s| s.state == ServiceState::Running && s.pid != 0));
+    }
+
+    #[test]
+    fn services_that_could_not_be_listed_are_no_scan() {
+        use crate::bindings::{CloseServiceHandle, OpenSCManagerW, SC_MANAGER_CONNECT};
+
+        let connect_only =
+            unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT as u32) };
+        assert!(!connect_only.0.is_null());
+        let mut configs = HashMap::new();
+        let scanned = scan(ScHandle(connect_only), &mut Vec::new(), &mut configs);
+        let _ = unsafe { CloseServiceHandle(connect_only) };
+        assert!(scanned.is_none(), "{} services", scanned.unwrap_or_default().len());
     }
 
     #[test]
