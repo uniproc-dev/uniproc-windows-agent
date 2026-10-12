@@ -114,15 +114,8 @@ impl Painter {
                     crossbeam_channel::select! {
                         recv(inbox) -> change => {
                             let Ok(change) = change else { break };
-                            let mut news = picture.apply(change, &spare);
-                            for change in inbox.try_iter() {
-                                news |= picture.apply(change, &spare);
-                            }
-                            if news {
-                                let published = Arc::new(picture.publish());
-                                latest.store(published.clone());
-                                subscriptions.deliver(&published);
-                            }
+                            let batch = std::iter::once(change).chain(inbox.try_iter());
+                            paint(&mut picture, batch, &spare, &latest, &mut subscriptions);
                         }
                         recv(asked) -> request => {
                             let Ok(request) = request else { break };
@@ -143,6 +136,36 @@ impl Painter {
             feed,
         ))
     }
+}
+
+/// Applies a batch of changes and publishes what they tell: at once after
+/// each that brought a sample, so every sample is offered to the
+/// subscribers, and once at the end for the rest.
+fn paint(
+    picture: &mut Picture,
+    batch: impl IntoIterator<Item = Change>,
+    spare: &Sender<Diff>,
+    latest: &ArcSwap<Published>,
+    subscriptions: &mut Subscriptions,
+) {
+    let mut news = false;
+    for change in batch {
+        let taken = picture.taken.clone();
+        news |= picture.apply(change, spare);
+        if news && !Arc::ptr_eq(&taken, &picture.taken) {
+            publish(picture, latest, subscriptions);
+            news = false;
+        }
+    }
+    if news {
+        publish(picture, latest, subscriptions);
+    }
+}
+
+fn publish(picture: &Picture, latest: &ArcSwap<Published>, subscriptions: &mut Subscriptions) {
+    let published = Arc::new(picture.publish());
+    latest.store(published.clone());
+    subscriptions.deliver(&published);
 }
 
 impl Drop for Painter {
@@ -723,6 +746,53 @@ mod tests {
         let latest = feed.latest();
         assert_ne!(latest.snapshot.states.etag, states);
         assert_eq!(latest.snapshot.states.value.states[0].suspended, Some(true));
+    }
+
+    #[test]
+    fn every_sample_in_a_batch_is_offered_to_the_subscribers() {
+        let handles = MetricSpec {
+            interval: Duration::from_secs(1),
+            processes: [uniproc_windows_core::ProcessMetric::Handles].into_iter().collect(),
+            machine: crate::api::MachineMetrics::empty(),
+        };
+        let cpu = MetricSpec {
+            interval: Duration::from_millis(100),
+            processes: Default::default(),
+            machine: uniproc_windows_core::MachineMetric::Cpu.into(),
+        };
+        let mut subscriptions = Subscriptions::new(Duration::from_secs(2), || {});
+        let mut picture = Picture::new();
+        let latest = ArcSwap::from_pointee(picture.publish());
+        let (requests, asked) = crossbeam_channel::unbounded();
+        let sampler = LocalSampler::subscribe(&requests, handles);
+        for request in asked.try_iter() {
+            subscriptions.handle(request, &latest.load_full());
+        }
+
+        let core = |sample: Sample| {
+            Change::Core(
+                Diff {
+                    sample: Some(Arc::new(sample)),
+                    ..Default::default()
+                },
+                health(None),
+            )
+        };
+        let rows = core(Sample {
+            snapshot: 1,
+            pids: [10].as_slice().into(),
+            wanted: handles,
+            ..Default::default()
+        });
+        let machine_only = core(Sample {
+            snapshot: 2,
+            sampled_at: 1_000_000,
+            wanted: cpu,
+            ..Default::default()
+        });
+        let (spare, _) = crossbeam_channel::unbounded();
+        paint(&mut picture, [rows, machine_only], &spare, &latest, &mut subscriptions);
+        assert_eq!(sampler.latest().map(|s| s.snapshot), Some(1));
     }
 
     #[test]
