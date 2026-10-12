@@ -24,7 +24,7 @@ pub const START_STEPS: u32 = 5;
 /// StopPending; Stopped is all of them.
 pub const STOP_STEPS: u32 = 2;
 
-/// Ok, or the Win32 error code; an NTSTATUS for suspend and resume.
+/// Ok, or the Win32 error code.
 pub type CommandResult = Result<(), u32>;
 
 /// How every process runs, for exactly the processes listed under `passport_etag`.
