@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "frida": "^17.24.3"
+  }
+}

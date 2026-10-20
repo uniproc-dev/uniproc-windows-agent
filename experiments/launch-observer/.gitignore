@@ -1,0 +1,7 @@
+node_modules/
+logs/
+*.jsonl
+STOP
+STOP-ETW
+etw/bin/
+etw/obj/
