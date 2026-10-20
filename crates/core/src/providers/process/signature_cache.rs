@@ -9,7 +9,6 @@ use crate::bindings::{
 };
 
 use amethystate::store::builder::Backend;
-use amethystate::store::config::AfterGivingUp;
 use amethystate::store::{OnUnreadable, UnreadableEntries, WillNotOpen};
 use amethystate::{ReactiveMap, Store, StoreBuilder, amethystate};
 
@@ -154,10 +153,7 @@ fn builder(path: PathBuf) -> StoreBuilder {
             r.on_unreadable(OnUnreadable::UseDefault)
                 .unreadable_entries(UnreadableEntries::Skip)
         })
-        .disk(|d| {
-            d.debounce(Duration::from_secs(5))
-                .on_failure(|_| AfterGivingUp::Ignore)
-        })
+        .disk(|d| d.debounce(Duration::from_secs(5)))
 }
 
 pub struct PersistentSignatures {
@@ -198,7 +194,7 @@ pub fn open(name: &str) -> Option<PersistentSignatures> {
         }
     };
 
-    let cache = match SignatureCache::new_with(&store) {
+    let cache = match SignatureCache::try_new_with(&store) {
         Ok(cache) => cache,
         Err(err) => {
             tracing::warn!(%err, "could not open the signature cache");

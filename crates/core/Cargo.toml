@@ -1,6 +1,6 @@
 [package]
 name = "uniproc-windows-core"
-version = "0.22.2"
+version = "0.23.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ uniproc-etw = { git = "https://github.com/uniproc-dev/uniproc-etw", tag = "v0.1.
 ntapi = "0.4.3"
 rustc-hash = "2"
 binrw = "0.15.0"
-amethystate = { version = "0.23.4", default-features = false, features = ["redb"] }
+amethystate = { version = "0.27.0", default-features = false, features = ["redb"] }
 serde = { version = "1", features = ["derive", "rc"] }
 anyhow = "1"
 tracing = "0.1"
