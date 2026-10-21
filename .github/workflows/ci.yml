@@ -20,6 +20,8 @@ jobs:
     # Windows-only: the agent is Win32 top to bottom (ETW, SCM services,
     # WinTrust signature checks), it does not build anywhere else.
     runs-on: windows-latest
+    env:
+      RUSTFLAGS: "-C link-arg=/DEBUG:NONE"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
