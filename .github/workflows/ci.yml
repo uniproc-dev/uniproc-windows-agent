@@ -30,6 +30,13 @@ jobs:
           toolchain: "1.99.1"
           components: rustfmt
 
+      - name: Verify Rust toolchain
+        shell: pwsh
+        run: |
+          $version = rustc --version
+          $version
+          if ($version -notmatch '^rustc 1\.99\.1 ') { throw "Unexpected Rust toolchain: $version" }
+
       # `uniproc-protocol`'s build.rs runs `capnpc`, which shells out to the
       # `capnp` compiler binary. It is not on the runner image, so install it
       # before any cargo invocation.
