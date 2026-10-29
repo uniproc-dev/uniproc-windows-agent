@@ -350,11 +350,17 @@ pub struct SECURITY_ATTRIBUTES {
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct SECURITY_INFORMATION(pub u32);
+pub const SERVICE_CONFIG_DELAYED_AUTO_START_INFO: i32 = 3;
 pub const SERVICE_CONFIG_DESCRIPTION: i32 = 1;
 pub const SERVICE_CONTINUE_PENDING: i32 = 5;
 pub const SERVICE_CONTROL_CONTINUE: i32 = 3;
 pub const SERVICE_CONTROL_PAUSE: i32 = 2;
 pub const SERVICE_CONTROL_STOP: i32 = 1;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SERVICE_DELAYED_AUTO_START_INFO {
+    pub fDelayedAutostart: windows_core::BOOL,
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SERVICE_DESCRIPTIONW {

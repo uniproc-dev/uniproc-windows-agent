@@ -319,11 +319,30 @@ mod tests {
             load_group: "group".into(),
             description: "does things".into(),
             image_path: "C:\\svc.exe".into(),
+            startup_type: crate::api::ServiceStartType::Automatic,
+            delayed_auto: true,
+            account: "NT AUTHORITY\\LocalService".into(),
+            service_type: 0x20,
+            accepted_controls: 0x101,
         }];
         let mut message = capnp::message::Builder::new_default();
         encode::services(&sent, message.init_root::<get_services_results::Builder>());
         let reader = message.get_root_as_reader::<get_services_results::Reader>().unwrap();
         assert_eq!(&*decode::services(reader.get_services().unwrap()).unwrap(), &sent);
+        for startup_type in [
+            crate::api::ServiceStartType::Unknown,
+            crate::api::ServiceStartType::Boot,
+            crate::api::ServiceStartType::System,
+            crate::api::ServiceStartType::Automatic,
+            crate::api::ServiceStartType::Manual,
+            crate::api::ServiceStartType::Disabled,
+        ] {
+            let sent = [ServiceStats { startup_type, ..sent[0].clone() }];
+            let mut message = capnp::message::Builder::new_default();
+            encode::services(&sent, message.init_root::<get_services_results::Builder>());
+            let reader = message.get_root_as_reader::<get_services_results::Reader>().unwrap();
+            assert_eq!(&*decode::services(reader.get_services().unwrap()).unwrap(), &sent);
+        }
     }
 
     #[test]

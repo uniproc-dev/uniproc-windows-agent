@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use capnp::struct_list;
 use uniproc_protocol::windows_capnp::{
+    ServiceStartupType as WireServiceStartupType,
     Architecture as WireArchitecture, DpiAwareness as WireDpi, ExtendedCfg as WireExtendedCfg,
     GpuEngineType as WireGpuEngineType, IoPriority as WireIoPriority, Isolation as WireIsolation,
     MachineMetric as WireMachineMetric, ProcessMetric as WireProcessMetric, ProcessPriority as WirePriority,
@@ -14,6 +15,7 @@ use uniproc_protocol::windows_capnp::{
 };
 
 use crate::api::{
+    ServiceStartType,
     Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, GpuAdapter, GpuEngine, GpuEngineKind, IoPriority,
     Isolation, MachineCpu, MachineDisk, MachineMemory, MachineMetric, MachineNetwork, MachineProcessor,
     MachineSample, MetricSpec, Mitigations, NetworkAdapter, ProcessEvent, ProcessEventBatch, ProcessEventKind,
@@ -282,6 +284,18 @@ pub fn services(list: struct_list::Reader<'_, service_stats::Owned>) -> capnp::R
                 load_group: text(s.get_load_group())?,
                 description: text(s.get_description())?,
                 image_path: text(s.get_image_path())?,
+                startup_type: match s.get_startup_type() {
+                    Ok(WireServiceStartupType::Boot) => ServiceStartType::Boot,
+                    Ok(WireServiceStartupType::System) => ServiceStartType::System,
+                    Ok(WireServiceStartupType::Automatic) => ServiceStartType::Automatic,
+                    Ok(WireServiceStartupType::Manual) => ServiceStartType::Manual,
+                    Ok(WireServiceStartupType::Disabled) => ServiceStartType::Disabled,
+                    _ => ServiceStartType::Unknown,
+                },
+                delayed_auto: s.get_delayed_auto(),
+                account: text(s.get_account())?,
+                service_type: s.get_service_type(),
+                accepted_controls: s.get_accepted_controls(),
             })
         })
         .collect()

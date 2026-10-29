@@ -130,6 +130,22 @@ pub struct ServiceStats {
     pub description: String,
     /// Path the SCM starts the service from, as its config gives it.
     pub image_path: String,
+    pub startup_type: ServiceStartType,
+    pub delayed_auto: bool,
+    pub account: String,
+    pub service_type: u32,
+    pub accepted_controls: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServiceStartType {
+    #[default]
+    Unknown,
+    Boot,
+    System,
+    Automatic,
+    Manual,
+    Disabled,
 }
 
 /// What a process is. Fixed for its lifetime.

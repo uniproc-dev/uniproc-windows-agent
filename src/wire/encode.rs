@@ -1,4 +1,5 @@
 use uniproc_protocol::windows_capnp::{
+    ServiceStartupType as WireServiceStartupType,
     Architecture as WireArchitecture, DpiAwareness as WireDpi, ExtendedCfg as WireExtendedCfg,
     GpuEngineType as WireGpuEngineType, IoPriority as WireIoPriority, Isolation as WireIsolation,
     MachineMetric as WireMachineMetric,
@@ -9,6 +10,7 @@ use uniproc_protocol::windows_capnp::{
 };
 
 use crate::api::{
+    ServiceStartType,
     Architecture, DpiAwareness, ExtendedCfg, GpuEngineKind, IoPriority, Isolation, MachineMetric, MachineSample,
     MetricSpec, ProcessEventBatch, ProcessEventKind, ProcessInfo, ProcessMetric, ProcessPriority, ProcessState,
     ProcessStates, Sample,
@@ -283,6 +285,18 @@ fn service_stats(svc: &ServiceStats, mut s: service_stats::Builder) {
     s.set_load_group(&svc.load_group);
     s.set_description(&svc.description);
     s.set_image_path(&svc.image_path);
+    s.set_startup_type(match svc.startup_type {
+        ServiceStartType::Unknown => WireServiceStartupType::Unknown,
+        ServiceStartType::Boot => WireServiceStartupType::Boot,
+        ServiceStartType::System => WireServiceStartupType::System,
+        ServiceStartType::Automatic => WireServiceStartupType::Automatic,
+        ServiceStartType::Manual => WireServiceStartupType::Manual,
+        ServiceStartType::Disabled => WireServiceStartupType::Disabled,
+    });
+    s.set_delayed_auto(svc.delayed_auto);
+    s.set_account(&svc.account);
+    s.set_service_type(svc.service_type);
+    s.set_accepted_controls(svc.accepted_controls);
 }
 
 /// One watch update: the lists as they moved since `before`, which the

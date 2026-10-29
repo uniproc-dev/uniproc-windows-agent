@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{RecvTimeoutError, Sender};
 use crate::bindings::{
     ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, QUERY_SERVICE_CONFIGW,
     QueryServiceConfig2W, QueryServiceConfigW, SC_ENUM_PROCESS_INFO, SERVICE_CONFIG_DESCRIPTION,
     SERVICE_DESCRIPTIONW, SERVICE_QUERY_CONFIG, SERVICE_STATE_ALL, SERVICE_WIN32,
+    SERVICE_CONFIG_DELAYED_AUTO_START_INFO, SERVICE_DELAYED_AUTO_START_INFO,
 };
 use windows_core::PCWSTR;
 
-use crate::api::ServiceStats;
+use crate::api::{ServiceStats, ServiceStartType};
 use crate::scm::{ScHandle, Scm, Service, state};
 use crate::win::win32_code;
 
@@ -72,6 +73,10 @@ struct Config {
     image_path: String,
     /// The process the service ran in when this was read.
     pid: u32,
+    startup_type: ServiceStartType,
+    delayed_auto: bool,
+    account: String,
+    read_at: Option<Instant>,
 }
 
 /// None when the services could not be listed.
@@ -81,12 +86,11 @@ fn scan(scm: ScHandle, buf: &mut Vec<u64>, configs: &mut HashMap<String, Config>
     Some(services)
 }
 
-/// Fills in each service's configuration, read again once the service runs
-/// in another process, since a new binary path takes effect only then. A
-/// read that fails keeps what was read before and is tried next scan.
 fn describe(scm: ScHandle, services: &mut [ServiceStats], configs: &mut HashMap<String, Config>) {
     for service in services.iter_mut() {
-        let current = configs.get(&service.name).is_some_and(|c| c.pid == service.pid);
+        let current = configs.get(&service.name).is_some_and(|c| {
+            c.pid == service.pid && c.read_at.is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+        });
         if !current && let Some(read) = config(scm, &service.name) {
             configs.insert(service.name.clone(), Config { pid: service.pid, ..read });
         }
@@ -94,6 +98,9 @@ fn describe(scm: ScHandle, services: &mut [ServiceStats], configs: &mut HashMap<
             service.load_group = config.load_group.clone();
             service.description = config.description.clone();
             service.image_path = config.image_path.clone();
+            service.startup_type = config.startup_type;
+            service.delayed_auto = config.delayed_auto;
+            service.account = config.account.clone();
         }
     }
     configs.retain(|name, _| services.iter().any(|s| &s.name == name));
@@ -126,6 +133,23 @@ fn config(scm: ScHandle, name: &str) -> Option<Config> {
         }
         out.load_group = (*config).lpLoadOrderGroup.to_string().unwrap_or_default();
         out.image_path = (*config).lpBinaryPathName.to_string().unwrap_or_default();
+        out.startup_type = startup_type((*config).dwStartType);
+        out.account = (*config).lpServiceStartName.to_string().unwrap_or_default();
+        let mut delayed = SERVICE_DELAYED_AUTO_START_INFO::default();
+        let mut needed = 0;
+        if QueryServiceConfig2W(
+            service.0,
+            SERVICE_CONFIG_DELAYED_AUTO_START_INFO as u32,
+            Some((&mut delayed as *mut SERVICE_DELAYED_AUTO_START_INFO).cast()),
+            size_of::<SERVICE_DELAYED_AUTO_START_INFO>() as u32,
+            &mut needed,
+        )
+        .as_bool()
+        {
+            out.delayed_auto = delayed.fDelayedAutostart.as_bool();
+        } else if out.startup_type == ServiceStartType::Automatic {
+            out.startup_type = ServiceStartType::Unknown;
+        }
 
         let level = SERVICE_CONFIG_DESCRIPTION as u32;
         let mut size = 0u32;
@@ -150,7 +174,19 @@ fn config(scm: ScHandle, name: &str) -> Option<Config> {
         }
     }
 
+    out.read_at = Some(Instant::now());
     Some(out)
+}
+
+fn startup_type(value: u32) -> ServiceStartType {
+    match value {
+        0 => ServiceStartType::Boot,
+        1 => ServiceStartType::System,
+        2 => ServiceStartType::Automatic,
+        3 => ServiceStartType::Manual,
+        4 => ServiceStartType::Disabled,
+        _ => ServiceStartType::Unknown,
+    }
 }
 
 /// Win32 ERROR_MORE_DATA: services came between sizing the buffer and filling it.
@@ -206,6 +242,8 @@ unsafe fn entries(buf: &[u64], count: u32) -> Vec<ServiceStats> {
             display_name: unsafe { e.lpDisplayName.to_string() }.unwrap_or_default(),
             pid: e.ServiceStatusProcess.dwProcessId,
             state: state(e.ServiceStatusProcess.dwCurrentState),
+            service_type: e.ServiceStatusProcess.dwServiceType,
+            accepted_controls: e.ServiceStatusProcess.dwControlsAccepted,
             ..Default::default()
         })
         .collect()
@@ -215,6 +253,27 @@ unsafe fn entries(buf: &[u64], count: u32) -> Vec<ServiceStats> {
 mod tests {
     use super::*;
     use crate::api::ServiceState;
+
+    #[test]
+    fn scm_start_types_preserve_unknown_values() {
+        assert_eq!(startup_type(0), ServiceStartType::Boot);
+        assert_eq!(startup_type(1), ServiceStartType::System);
+        assert_eq!(startup_type(2), ServiceStartType::Automatic);
+        assert_eq!(startup_type(3), ServiceStartType::Manual);
+        assert_eq!(startup_type(4), ServiceStartType::Disabled);
+        assert_eq!(startup_type(u32::MAX), ServiceStartType::Unknown);
+    }
+
+    #[test]
+    fn running_service_exposes_startup_account_and_status_controls() {
+        let scm = Scm::new();
+        let connection = scm.connection().unwrap();
+        let services = scan(connection.handle(), &mut Vec::new(), &mut HashMap::new()).unwrap();
+        let event_log = services.iter().find(|s| s.name == "EventLog").unwrap();
+        assert_eq!(event_log.startup_type, ServiceStartType::Automatic);
+        assert!(!event_log.account.is_empty());
+        assert_ne!(event_log.service_type, 0);
+    }
 
     #[test]
     fn the_machine_has_services_and_each_is_described_once() {
@@ -262,6 +321,24 @@ mod tests {
         let mut services = [listed("EventLog", running.pid)];
         describe(connection.handle(), &mut services, &mut configs);
         assert_eq!(services[0].image_path, running.image_path);
+    }
+
+    #[test]
+    fn configuration_is_refreshed_even_when_the_pid_did_not_change() {
+        let scm = Scm::new();
+        let connection = scm.connection().unwrap();
+        let actual = config(connection.handle(), "EventLog").unwrap();
+        let stale = Config {
+            image_path: "stale".into(),
+            read_at: Some(Instant::now() - Duration::from_secs(31)),
+            ..Default::default()
+        };
+        let mut configs = HashMap::from([("EventLog".to_string(), stale)]);
+        let mut services = [listed("EventLog", 0)];
+        describe(connection.handle(), &mut services, &mut configs);
+        assert_eq!(services[0].image_path, actual.image_path);
+        assert_eq!(services[0].startup_type, actual.startup_type);
+        assert_eq!(services[0].account, actual.account);
     }
 
     #[test]
