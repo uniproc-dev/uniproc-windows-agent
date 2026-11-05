@@ -200,6 +200,7 @@ fn machine_metric(m: WireMachineMetric) -> MachineMetric {
         WireMachineMetric::Processors => MachineMetric::Processors,
         WireMachineMetric::Gpu => MachineMetric::Gpu,
         WireMachineMetric::NetworkAdapters => MachineMetric::NetworkAdapters,
+        WireMachineMetric::Temperatures => MachineMetric::Temperatures,
     }
 }
 
@@ -395,7 +396,9 @@ pub fn lists(before: Option<&Snapshot>, lists: lists_update::Reader<'_>) -> capn
             let upserted = processes(delta.get_upserted()?)?;
             changes.left = keys(before.value.iter().filter(|p| left.contains(&p.sequence_number)), |p| (p.pid, p.sequence_number));
             changes.passports = keys(upserted.iter(), |p| (p.pid, p.sequence_number));
-            merge(&before.value, &left, &upserted, |p| (p.pid, p.sequence_number))
+            merge(&before.value, &left, &upserted, |p| {
+                (p.pid, p.sequence_number)
+            })
         }
     };
 
@@ -412,7 +415,9 @@ pub fn lists(before: Option<&Snapshot>, lists: lists_update::Reader<'_>) -> capn
             let left: HashSet<u64> = delta.get_left()?.iter().collect();
             let upserted = process_states(delta.get_upserted()?);
             changes.states = keys(upserted.iter(), |s| (s.pid, s.sequence_number));
-            merge(&before.value.states, &left, &upserted, |s| (s.pid, s.sequence_number))
+            merge(&before.value.states, &left, &upserted, |s| {
+                (s.pid, s.sequence_number)
+            })
         }
     };
 
@@ -631,6 +636,11 @@ fn gpus(list: struct_list::Reader<'_, gpu_adapter::Owned>) -> capnp::Result<Arc<
 
 fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample> {
     Ok(MachineSample {
+        temperatures: if m.has_temperatures() {
+            Some(Arc::new(temperatures(m.get_temperatures()?)?))
+        } else {
+            None
+        },
         cpu: if m.has_cpu() {
             let c = m.get_cpu()?;
             Some(MachineCpu {
@@ -716,4 +726,65 @@ fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample>
             None
         },
     })
+}
+
+fn temperatures(
+    sample: uniproc_protocol::windows_capnp::temperature_sample::Reader<'_>,
+) -> capnp::Result<crate::api::MachineTemperatures> {
+    use crate::api::{
+        MachineTemperatures, TemperatureCategory, TemperatureDevice, TemperatureSensor,
+    };
+    use uniproc_protocol::windows_capnp::{
+        TemperatureCategory as C, temperature_sensor::reading::Which,
+    };
+    Ok(MachineTemperatures {
+        status: temperature_status(sample.get_status()),
+        error: text(sample.get_error())?,
+        devices: sample
+            .get_devices()?
+            .iter()
+            .map(|device| {
+                Ok(TemperatureDevice {
+                    id: text(device.get_id())?,
+                    name: text(device.get_name())?,
+                    error: text(device.get_error())?,
+                    status: temperature_status(device.get_status()),
+                    category: match device.get_category() {
+                        Ok(C::Cpu) => TemperatureCategory::Cpu,
+                        Ok(C::Gpu) => TemperatureCategory::Gpu,
+                        Ok(C::Memory) => TemperatureCategory::Memory,
+                        Ok(C::Storage) => TemperatureCategory::Storage,
+                        _ => TemperatureCategory::Unknown,
+                    },
+                    sensors: device
+                        .get_sensors()?
+                        .iter()
+                        .map(|sensor| {
+                            Ok(TemperatureSensor {
+                                id: text(sensor.get_id())?,
+                                name: text(sensor.get_name())?,
+                                celsius: match sensor.get_reading().which() {
+                                    Ok(Which::Celsius(value)) if value.is_finite() => Some(value),
+                                    _ => None,
+                                },
+                            })
+                        })
+                        .collect::<capnp::Result<_>>()?,
+                })
+            })
+            .collect::<capnp::Result<_>>()?,
+    })
+}
+
+fn temperature_status(
+    value: Wire<uniproc_protocol::windows_capnp::TemperatureStatus>,
+) -> crate::api::TemperatureStatus {
+    use crate::api::TemperatureStatus as C;
+    use uniproc_protocol::windows_capnp::TemperatureStatus as W;
+    match value {
+        Ok(W::Available) => C::Available,
+        Ok(W::Unavailable) => C::Unavailable,
+        Ok(W::Error) => C::Error,
+        _ => C::Unknown,
+    }
 }

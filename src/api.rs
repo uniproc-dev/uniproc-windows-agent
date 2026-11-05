@@ -7,6 +7,7 @@ pub use uniproc_windows_core::{
     MetricSpec, Mitigations, NO_DATA_U32, NO_DATA_U64, ProcessEvent, ProcessEventBatch, ProcessEventKind, ProcessExited,
     ProcessMetric, ProcessMetrics, ProcessPriority, ProcessStarted, ProcessState, Sample, SignatureStatus, SmolStr,
     StackProtection, Tagged, UacVirtualization,
+    MachineTemperatures, TemperatureCategory, TemperatureDevice, TemperatureSensor, TemperatureStatus,
 };
 
 /// Name the agent's Windows service is registered under.

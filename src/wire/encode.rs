@@ -200,6 +200,7 @@ fn machine_metric(m: MachineMetric) -> WireMachineMetric {
         MachineMetric::Processors => WireMachineMetric::Processors,
         MachineMetric::Gpu => WireMachineMetric::Gpu,
         MachineMetric::NetworkAdapters => WireMachineMetric::NetworkAdapters,
+        MachineMetric::Temperatures => WireMachineMetric::Temperatures,
     }
 }
 
@@ -314,7 +315,9 @@ pub fn update(update: &Update, before: Option<&Snapshot>, mut out: agent_listene
                 process_info(e, list.reborrow().get(i as u32));
             }
         }
-        Some(before) if before.processes.etag == after.processes.etag => lists.reborrow().init_passports().set_unchanged(()),
+        Some(before) if before.processes.etag == after.processes.etag => {
+            lists.reborrow().init_passports().set_unchanged(())
+        }
         Some(before) => {
             let mut delta = lists.reborrow().init_passports().init_delta();
             delta.set_base_etag(before.processes.etag);
@@ -337,7 +340,9 @@ pub fn update(update: &Update, before: Option<&Snapshot>, mut out: agent_listene
                 process_state(e, list.reborrow().get(i as u32));
             }
         }
-        Some(before) if before.states.etag == after.states.etag => lists.reborrow().init_states().set_unchanged(()),
+        Some(before) if before.states.etag == after.states.etag => {
+            lists.reborrow().init_states().set_unchanged(())
+        }
         Some(before) => {
             let mut delta = lists.reborrow().init_states().init_delta();
             delta.set_base_etag(before.states.etag);
@@ -535,7 +540,41 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         processors,
         gpus,
         network_adapters,
+        temperatures,
     } = &sample.machine;
+    if let Some(sample) = temperatures {
+        let mut target = out.reborrow().init_temperatures();
+        target.set_status(temperature_status(sample.status));
+        target.set_error(&sample.error);
+        let mut devices = target.init_devices(sample.devices.len() as u32);
+        for (index, device) in sample.devices.iter().enumerate() {
+            let mut target = devices.reborrow().get(index as u32);
+            target.set_id(&device.id);
+            target.set_name(&device.name);
+            target.set_status(temperature_status(device.status));
+            target.set_error(&device.error);
+            use crate::api::TemperatureCategory as C;
+            use uniproc_protocol::windows_capnp::TemperatureCategory as W;
+            target.set_category(match device.category {
+                C::Unknown => W::Unknown,
+                C::Cpu => W::Cpu,
+                C::Gpu => W::Gpu,
+                C::Memory => W::Memory,
+                C::Storage => W::Storage,
+            });
+            let mut sensors = target.init_sensors(device.sensors.len() as u32);
+            for (index, sensor) in device.sensors.iter().enumerate() {
+                let mut target = sensors.reborrow().get(index as u32);
+                target.set_id(&sensor.id);
+                target.set_name(&sensor.name);
+                let mut reading = target.init_reading();
+                match sensor.celsius.filter(|value| value.is_finite()) {
+                    Some(value) => reading.set_celsius(value),
+                    None => reading.set_unavailable(()),
+                }
+            }
+        }
+    }
     if let Some(adapters) = network_adapters {
         let mut list = out.reborrow().init_network_adapters(adapters.len() as u32);
         for (i, a) in adapters.iter().enumerate() {
@@ -616,5 +655,18 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
                 we.set_max_frequency(e.max_frequency);
             }
         }
+    }
+}
+
+fn temperature_status(
+    value: crate::api::TemperatureStatus,
+) -> uniproc_protocol::windows_capnp::TemperatureStatus {
+    use crate::api::TemperatureStatus as C;
+    use uniproc_protocol::windows_capnp::TemperatureStatus as W;
+    match value {
+        C::Unknown => W::Unknown,
+        C::Available => W::Available,
+        C::Unavailable => W::Unavailable,
+        C::Error => W::Error,
     }
 }

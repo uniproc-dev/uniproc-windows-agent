@@ -5,7 +5,7 @@ pub mod encode;
 
 use ogurpchik::auth::handshake::{Protocol, Version};
 use uniproc_protocol::WINDOWS_PROTOCOL;
-use uniproc_windows_core::{MetricSpec, ProcessMetric};
+use uniproc_windows_core::{MachineMetric, MetricSpec, ProcessMetric};
 
 /// What both ends of the service's pipe present in the handshake: the windows schema's id and version.
 pub const PROTOCOL: Protocol = Protocol::new(
@@ -31,9 +31,16 @@ pub fn takes_process_events(agent: Version) -> bool {
     (agent.major, agent.minor) >= (2, 8)
 }
 
+pub fn takes_temperatures(agent: Version) -> bool {
+    (agent.major, agent.minor) >= (2, 11)
+}
+
 /// `spec` without the metrics `agent` has no name for: an agent older than
 /// windows 2.6 refuses a spec that asks for exclusiveMapped.
 pub fn known_to(agent: Version, mut spec: MetricSpec) -> MetricSpec {
+    if !takes_temperatures(agent) {
+        spec.machine.remove(MachineMetric::Temperatures);
+    }
     if (agent.major, agent.minor) < (2, 6) {
         spec.processes.remove(ProcessMetric::ExclusiveMapped);
     }
@@ -53,12 +60,13 @@ mod tests {
 
     use super::{decode, encode};
     use crate::api::{
-        Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, IoPriority, Isolation, MachineCpu,
-        GpuAdapter, GpuEngine, GpuEngineKind, MachineDisk, MachineMemory, MachineMetric, MachineMetrics,
-        MachineNetwork, MachineProcessor, MachineSample, NetworkAdapter, ProcessGpuEngine,
-        MetricSpec, Mitigations, ProcessInfo, ProcessMetric, ProcessMetrics, ProcessPriority,
-        ProcessState, ProcessStates, Sample, ServiceState, ServiceStats, ServiceStatus,
-        SignatureStatus, Snapshot, StackProtection, Tagged, UacVirtualization, Update,
+        Architecture, Changes, Columns, DpiAwareness, ExtendedCfg, GpuAdapter, GpuEngine,
+        GpuEngineKind, IoPriority, Isolation, MachineCpu, MachineDisk, MachineMemory,
+        MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample, MetricSpec,
+        Mitigations, NetworkAdapter, ProcessGpuEngine, ProcessInfo, ProcessMetric, ProcessMetrics,
+        ProcessPriority, ProcessState, ProcessStates, Sample, ServiceState, ServiceStats,
+        ServiceStatus, SignatureStatus, Snapshot, StackProtection, Tagged, UacVirtualization,
+        Update,
     };
 
     fn process(pid: u32) -> ProcessInfo {
@@ -462,6 +470,29 @@ mod tests {
                 },
             ])),
             machine: MachineSample {
+                temperatures: Some(Arc::new(crate::api::MachineTemperatures {
+                    status: crate::api::TemperatureStatus::Available,
+                    error: String::new(),
+                    devices: vec![crate::api::TemperatureDevice {
+                        id: "/cpu/0".into(),
+                        name: "CPU".into(),
+                        category: crate::api::TemperatureCategory::Cpu,
+                        status: crate::api::TemperatureStatus::Available,
+                        error: "device diagnostic".into(),
+                        sensors: vec![
+                            crate::api::TemperatureSensor {
+                                id: "/cpu/0/temperature/0".into(),
+                                name: "Package".into(),
+                                celsius: Some(0.0),
+                            },
+                            crate::api::TemperatureSensor {
+                                id: "/cpu/0/temperature/1".into(),
+                                name: "Core".into(),
+                                celsius: None,
+                            },
+                        ],
+                    }],
+                })),
                 cpu: Some(MachineCpu {
                     idle_time: 1,
                     kernel_time: 2,
@@ -624,6 +655,30 @@ mod tests {
         assert!(!super::takes_process_events(v(2, 7)));
         assert!(super::takes_process_events(v(2, 8)));
         assert!(super::takes_process_events(v(3, 0)));
+    }
+
+    #[test]
+    fn old_agents_do_not_receive_the_temperature_metric() {
+        let spec = MetricSpec {
+            machine: MachineMetrics::all(),
+            ..MetricSpec::idle(Duration::from_secs(1))
+        };
+        let old = ogurpchik::auth::handshake::Version {
+            major: 2,
+            minor: 10,
+            patch: 0,
+        };
+        let new = ogurpchik::auth::handshake::Version { minor: 11, ..old };
+        assert!(
+            !super::known_to(old, spec)
+                .machine
+                .contains(MachineMetric::Temperatures)
+        );
+        assert!(
+            super::known_to(new, spec)
+                .machine
+                .contains(MachineMetric::Temperatures)
+        );
     }
 
     #[test]

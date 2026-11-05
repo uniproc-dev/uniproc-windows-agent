@@ -234,6 +234,10 @@ impl Remote {
         wire::takes_process_events(self.agent)
     }
 
+    pub fn can_temperatures(&self) -> bool {
+        wire::takes_temperatures(self.agent)
+    }
+
     /// The process starts and exits the agent holds, about the last hour,
     /// then each one as it happens, until the watch is dropped. An agent
     /// that cannot tell them is refused here, before anything is sent.
@@ -376,7 +380,9 @@ async fn serve(
         compio::runtime::spawn(async move {
             let result = compio::time::timeout(CALL_TIMEOUT, session.dispatch(envelope.request))
                 .await
-                .unwrap_or_else(|_| Err(anyhow!("no reply from the agent within {CALL_TIMEOUT:?}")));
+                .unwrap_or_else(|_| {
+                    Err(anyhow!("no reply from the agent within {CALL_TIMEOUT:?}"))
+                });
             let _ = envelope.reply.send(result);
         })
         .detach();
@@ -562,7 +568,9 @@ fn not_modified(meta: response_meta::Reader<'_>) -> Result<bool> {
     match meta.get_status() {
         Ok(ResponseStatus::Ok) => Ok(false),
         Ok(ResponseStatus::NotModified) => Ok(true),
-        Err(capnp::NotInSchema(status)) => bail!("the agent answered with status {status}, which this client does not know"),
+        Err(capnp::NotInSchema(status)) => {
+            bail!("the agent answered with status {status}, which this client does not know")
+        }
     }
 }
 

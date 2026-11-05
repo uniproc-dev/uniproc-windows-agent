@@ -1419,6 +1419,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link 0.2.1",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2395,8 +2405,8 @@ dependencies = [
 
 [[package]]
 name = "uniproc-protocol"
-version = "0.19.0"
-source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.19.0#59a93bd266f8593c9043dfddfc257cde0a93a9fb"
+version = "0.21.0"
+source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.21.0#d33714778d967c48ca0e8921d8c48abf4e77f2e4"
 dependencies = [
  "capnp",
  "capnp-rpc",
@@ -2405,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-agent"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2426,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-core"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "amethystate",
  "anyhow",
@@ -2434,11 +2444,13 @@ dependencies = [
  "crossbeam-channel",
  "enumset",
  "futures",
+ "libloading",
  "ntapi",
  "parking_lot",
  "roxmltree",
  "rustc-hash 2.1.3",
  "serde",
+ "serde_json",
  "smol_str",
  "tracing",
  "tracing-subscriber",
@@ -2449,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-http"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -2463,7 +2475,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-rpc"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "capnp",
@@ -2478,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-service"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "clap",
