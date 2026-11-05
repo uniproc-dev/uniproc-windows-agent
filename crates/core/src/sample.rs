@@ -74,6 +74,7 @@ pub enum MachineMetric {
     Processors,
     Gpu,
     NetworkAdapters,
+    Temperatures,
 }
 
 /// A set of process counters, iterated in declaration order.
@@ -395,8 +396,52 @@ pub struct ProcessGpuEngine {
     pub running_time: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TemperatureStatus {
+    Unknown,
+    Available,
+    #[default]
+    Unavailable,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TemperatureCategory {
+    Cpu,
+    Gpu,
+    Memory,
+    Storage,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TemperatureSensor {
+    pub id: String,
+    pub name: String,
+    pub celsius: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TemperatureDevice {
+    pub id: String,
+    pub name: String,
+    pub category: TemperatureCategory,
+    pub status: TemperatureStatus,
+    pub error: String,
+    pub sensors: Vec<TemperatureSensor>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MachineTemperatures {
+    pub status: TemperatureStatus,
+    pub error: String,
+    pub devices: Vec<TemperatureDevice>,
+}
+
 /// A group is `None` when nobody asked for it or it could not be read.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct MachineSample {
     pub cpu: Option<MachineCpu>,
     pub memory: Option<MachineMemory>,
@@ -408,12 +453,14 @@ pub struct MachineSample {
     /// Hardware adapters only.
     pub gpus: Option<Arc<[GpuAdapter]>>,
     pub network_adapters: Option<Arc<[NetworkAdapter]>>,
+    pub temperatures: Option<Arc<MachineTemperatures>>,
 }
 
 impl MachineSample {
     pub fn project(&self, wanted: MachineMetrics) -> Self {
         Self {
             cpu: self.cpu.filter(|_| wanted.contains(MachineMetric::Cpu)),
+            temperatures: self.temperatures.clone().filter(|_| wanted.contains(MachineMetric::Temperatures)),
             memory: self.memory.filter(|_| wanted.contains(MachineMetric::Memory)),
             disk: self.disk.filter(|_| wanted.contains(MachineMetric::Disk)),
             network: self.network.filter(|_| wanted.contains(MachineMetric::Network)),
@@ -428,7 +475,7 @@ impl MachineSample {
 }
 
 /// Everything sampled at one moment.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sample {
     /// Moves with every sample the agent takes.
     pub snapshot: u64,

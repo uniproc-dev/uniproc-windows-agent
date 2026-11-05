@@ -182,6 +182,9 @@ impl Supervisor {
             health_told: sampled,
             snapshot_error: None,
         };
+        supervisor.reader.machine.temperature_demand(
+            supervisor.demand.get().iter().any(|spec| spec.machine.contains(MachineMetric::Temperatures)),
+        );
         supervisor.reader.sample(&first, true).context("the first snapshot")?;
         progress(Started::FirstSnapshot);
         supervisor.reader.await_verdicts(sampled + FIRST_VERDICTS);
@@ -197,6 +200,9 @@ impl Supervisor {
     pub fn tick(&mut self, diff: &mut Diff) {
         self.keep_sessions();
         let specs = self.demand.get();
+        self.reader.machine.temperature_demand(
+            specs.iter().any(|spec| spec.machine.contains(MachineMetric::Temperatures)),
+        );
         if let Some(router) = &self.router {
             let flush_timer = flush_timer_for(&specs);
             if flush_timer != self.flush_timer {

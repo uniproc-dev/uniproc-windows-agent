@@ -2,6 +2,7 @@ mod adapters;
 mod processor_times;
 mod sample;
 mod vars;
+mod temperatures;
 
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,7 @@ pub struct MachineProbe {
     frequency: Option<(Instant, (u32, u32))>,
     times: ProcessorTimes,
     adapters: NetworkAdapters,
+    temperatures: temperatures::Temperatures,
 }
 
 impl Default for MachineProbe {
@@ -41,13 +43,21 @@ impl MachineProbe {
             frequency: None,
             times: ProcessorTimes::new(),
             adapters: NetworkAdapters::default(),
+            temperatures: temperatures::Temperatures::default(),
         }
+    }
+
+    pub fn temperature_demand(&mut self, wanted: bool) {
+        self.temperatures.demand(wanted);
     }
 
     /// The wanted groups; disk and network come from the ETW totals.
     #[tracing::instrument(name = "machine", level = "debug", skip_all)]
     pub fn sample(&mut self, wanted: MachineMetrics, totals: &MachineTotals) -> MachineSample {
         let mut sample = MachineSample::default();
+        if wanted.contains(MachineMetric::Temperatures) {
+            sample.temperatures = Some(self.temperatures.latest());
+        }
         if wanted.contains(MachineMetric::Cpu) || wanted.contains(MachineMetric::Processors) {
             match self.times.read() {
                 Ok(processors) => {
