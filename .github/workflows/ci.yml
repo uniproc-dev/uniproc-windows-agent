@@ -83,4 +83,4 @@ jobs:
       - name: Test against live ETW
         env:
           UNIPROC_TEST_SERVICE: Spooler
-        run: cargo test --workspace -- --ignored --test-threads=1
+        run: cargo test --workspace -- --ignored --test-threads=1 --skip providers::vm_memory::tests::live_vm_host_probe

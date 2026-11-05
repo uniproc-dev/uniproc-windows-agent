@@ -35,9 +35,16 @@ pub fn takes_temperatures(agent: Version) -> bool {
     (agent.major, agent.minor) >= (2, 11)
 }
 
+pub fn takes_vm_working_set(agent: Version) -> bool {
+    (agent.major, agent.minor) >= (2, 13)
+}
+
 /// `spec` without the metrics `agent` has no name for: an agent older than
 /// windows 2.6 refuses a spec that asks for exclusiveMapped.
 pub fn known_to(agent: Version, mut spec: MetricSpec) -> MetricSpec {
+    if !takes_vm_working_set(agent) {
+        spec.processes.remove(ProcessMetric::VmWorkingSet);
+    }
     if !takes_temperatures(agent) {
         spec.machine.remove(MachineMetric::Temperatures);
     }
@@ -420,6 +427,7 @@ mod tests {
                 cpu_kernel_time: rows(20),
                 cpu_cycles: rows(30),
                 working_set: rows(40),
+                vm_working_set: Some(Arc::from([0, crate::api::NO_DATA_U64])),
                 peak_working_set: rows(50),
                 private_working_set: rows(60),
                 commit: rows(70),
@@ -603,6 +611,7 @@ mod tests {
             spec(ProcessMetrics::only(ProcessMetric::GpuEngines), MachineMetric::Gpu),
             spec(ProcessMetric::GpuDedicated | ProcessMetric::GpuShared, MachineMetrics::empty()),
             spec(ProcessMetrics::only(ProcessMetric::ExclusiveMapped), MachineMetrics::empty()),
+            spec(ProcessMetrics::only(ProcessMetric::VmWorkingSet), MachineMetrics::empty()),
             spec(ProcessMetrics::empty(), MachineMetric::NetworkAdapters | MachineMetric::Network),
             spec(ProcessMetrics::empty(), MachineMetrics::empty()),
         ] {
@@ -620,6 +629,18 @@ mod tests {
             ProcessMetrics::only(ProcessMetric::WorkingSet)
         );
         assert_eq!(super::known_to(version(6), asked), asked);
+    }
+
+    #[test]
+    fn vm_working_set_is_requested_only_from_a_peer_that_knows_it() {
+        let asked = spec(ProcessMetrics::all(), MachineMetrics::empty());
+        let version = |minor| ogurpchik::auth::handshake::Version { major: 2, minor, patch: 0 };
+        let old = super::known_to(version(12), asked);
+        assert!(!old.processes.contains(ProcessMetric::VmWorkingSet));
+        assert!(old.processes.contains(ProcessMetric::WorkingSet));
+        assert_eq!(super::known_to(version(13), asked), asked);
+        assert!(!super::takes_vm_working_set(version(12)));
+        assert!(super::takes_vm_working_set(version(13)));
     }
 
     #[test]

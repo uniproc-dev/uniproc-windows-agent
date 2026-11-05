@@ -188,6 +188,7 @@ fn process_metric(m: WireProcessMetric) -> ProcessMetric {
         WireProcessMetric::GpuShared => ProcessMetric::GpuShared,
         WireProcessMetric::GpuEngines => ProcessMetric::GpuEngines,
         WireProcessMetric::ExclusiveMapped => ProcessMetric::ExclusiveMapped,
+        WireProcessMetric::VmWorkingSet => ProcessMetric::VmWorkingSet,
     }
 }
 
@@ -566,6 +567,7 @@ pub fn sample(
             gpu_dedicated => (has_gpu_dedicated, get_gpu_dedicated),
             gpu_shared => (has_gpu_shared, get_gpu_shared),
             exclusive_mapped => (has_exclusive_mapped, get_exclusive_mapped),
+            vm_working_set => (has_vm_working_set, get_vm_working_set),
         ),
         gpu_engines: if p.has_gpu_engines() {
             Some(

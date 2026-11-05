@@ -238,6 +238,10 @@ impl Remote {
         wire::takes_temperatures(self.agent)
     }
 
+    pub fn can_vm_working_set(&self) -> bool {
+        wire::takes_vm_working_set(self.agent)
+    }
+
     /// The process starts and exits the agent holds, about the last hour,
     /// then each one as it happens, until the watch is dropped. An agent
     /// that cannot tell them is refused here, before anything is sent.
