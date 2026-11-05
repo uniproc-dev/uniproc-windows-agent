@@ -10,7 +10,7 @@
 `cargo run -p xtask -- lhm --release` builds the Windows service and deploys the
 NativeAOT backend next to its executable. The build requires .NET SDK 10.0.114
 and the Windows C++ NativeAOT toolchain. It checks out pristine LibreHardwareMonitor
-commit `2808d80564b6761e1b01f42fabfd966ed695fcbc` into `target/lhm-source` and uses
+commit `2808d80564b6761e1b01f42fabfd966ed695fcbc` into `native/lhm/.source` and uses
 the committed NuGet lock file. Native output lives in `target/lhm-native-aot`;
 `CARGO_TARGET_DIR` selects the Rust output directory. Deploy the generated DLLs
 and `lhm-licenses` directory together with the service executable.

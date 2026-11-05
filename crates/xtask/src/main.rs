@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&licenses)?;
             for name in ["LICENSE", "THIRD-PARTY-NOTICES.txt"] {
                 std::fs::copy(
-                    root().join("target/lhm-source").join(name),
+                    root().join("native/lhm/.source").join(name),
                     licenses.join(name),
                 )?;
             }

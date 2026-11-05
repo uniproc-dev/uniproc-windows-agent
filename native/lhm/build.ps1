@@ -1,7 +1,7 @@
 param([string]$Destination)
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$source = Join-Path $root 'target/lhm-source'
+$source = Join-Path $PSScriptRoot '.source'
 $commit = '2808d80564b6761e1b01f42fabfd966ed695fcbc'
 if (-not (Test-Path -LiteralPath (Join-Path $source '.git'))) {
     git clone --no-checkout https://github.com/LibreHardwareMonitor/LibreHardwareMonitor.git $source
