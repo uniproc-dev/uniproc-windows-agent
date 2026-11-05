@@ -478,6 +478,7 @@ mod tests {
                 },
             ])),
             machine: MachineSample {
+                cpu_name: Some("Intel® Core™ i5-10400F CPU @ 2.90GHz".into()),
                 temperatures: Some(Arc::new(crate::api::MachineTemperatures {
                     status: crate::api::TemperatureStatus::Available,
                     error: String::new(),
@@ -598,6 +599,20 @@ mod tests {
     fn a_sample_survives_the_wire() {
         let sent = full_sample();
         assert_eq!(round_trip(&sent), sent);
+    }
+
+    #[test]
+    fn cpu_name_is_optional_and_independent_of_cpu_counters_and_temperatures() {
+        let mut sent = full_sample();
+        sent.machine.cpu_name = None;
+        assert_eq!(round_trip(&sent).machine.cpu_name, None);
+        sent.machine.cpu_name = Some("CPU brand".into());
+        sent.machine.cpu = None;
+        sent.machine.temperatures = None;
+        let got = round_trip(&sent);
+        assert_eq!(got.machine.cpu_name, sent.machine.cpu_name);
+        assert_eq!(got.machine.cpu, None);
+        assert_eq!(got.machine.temperatures, None);
     }
 
     #[test]

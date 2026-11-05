@@ -536,6 +536,7 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
     out.set_sampled_at(sample.sampled_at);
     let MachineSample {
         cpu,
+        cpu_name,
         memory,
         disk,
         network,
@@ -544,6 +545,9 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         network_adapters,
         temperatures,
     } = &sample.machine;
+    if let Some(name) = cpu_name {
+        out.reborrow().set_cpu_name(name);
+    }
     if let Some(sample) = temperatures {
         let mut target = out.reborrow().init_temperatures();
         target.set_status(temperature_status(sample.status));

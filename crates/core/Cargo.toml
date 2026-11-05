@@ -1,6 +1,6 @@
 [package]
 name = "uniproc-windows-core"
-version = "0.27.1"
+version = "0.28.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -10,6 +10,7 @@ publish = false
 serde_json = "1"
 libloading = "0.8"
 windows-core = "0.100"
+winreg = "0.55"
 uniproc-etw = { git = "https://github.com/uniproc-dev/uniproc-etw", tag = "v0.1.0" }
 ntapi = "0.4.3"
 rustc-hash = "2"

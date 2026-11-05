@@ -55,3 +55,13 @@ return unavailable. Consumers keep a fallback to raw working set.
 not sent the new metric, including in requests built with `ProcessMetrics::all()`.
 Use `cargo run --example vm_working_set -- <pid>` against the service for a
 30-second comparison of raw, private, and corrected working sets.
+
+# CPU name
+
+`MachineSample.cpu_name: Option<SmolStr>` is static metadata included with
+`MachineMetric::Cpu`, independently of counter or temperature availability.
+The core reads `ProcessorNameString` from HKLM's CentralProcessor/0 key once
+per process through winreg and trims surrounding whitespace. Empty values and
+read failures produce None. CPU times and `MachineCpu` remain unchanged.
+The additive Windows protocol 2.14 `cpuName` text defaults to unavailable for
+older peers; no new metric or peer filtering is required.

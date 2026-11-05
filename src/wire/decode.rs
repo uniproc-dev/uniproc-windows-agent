@@ -638,6 +638,10 @@ fn gpus(list: struct_list::Reader<'_, gpu_adapter::Owned>) -> capnp::Result<Arc<
 
 fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample> {
     Ok(MachineSample {
+        cpu_name: {
+            let name: crate::api::SmolStr = text(m.get_cpu_name())?;
+            (!name.is_empty()).then_some(name)
+        },
         temperatures: if m.has_temperatures() {
             Some(Arc::new(temperatures(m.get_temperatures()?)?))
         } else {
