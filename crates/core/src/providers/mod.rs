@@ -9,3 +9,4 @@ pub mod prober;
 pub mod provider;
 pub mod utils;
 pub mod vm_host;
+pub mod vm_memory;

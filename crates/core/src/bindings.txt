@@ -227,3 +227,6 @@ Windows::Win32::WinBuiltinAdministratorsSid
 Windows::Win32::WinLocalSystemSid
 Windows::Win32::WinVerifyTrust
 Windows::Win32::WriteProcessMemory
+Windows::Win32::VirtualQueryEx
+Windows::Win32::MEMORY_BASIC_INFORMATION
+Windows::Win32::MEM_MAPPED

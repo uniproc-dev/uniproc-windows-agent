@@ -1103,6 +1103,23 @@ where
     }
 }
 #[inline]
+pub unsafe fn VirtualQueryEx(
+    hprocess: HANDLE,
+    lpaddress: Option<*const core::ffi::c_void>,
+    lpbuffer: *mut MEMORY_BASIC_INFORMATION,
+    dwlength: usize,
+) -> usize {
+    windows_core::link!("kernel32.dll" "system" fn VirtualQueryEx(hprocess : HANDLE, lpaddress : *const core::ffi::c_void, lpbuffer : *mut MEMORY_BASIC_INFORMATION, dwlength : usize) -> usize);
+    unsafe {
+        VirtualQueryEx(
+            hprocess,
+            lpaddress.unwrap_or(core::mem::zeroed()) as _,
+            lpbuffer as _,
+            dwlength,
+        )
+    }
+}
+#[inline]
 pub unsafe fn WTHelperGetProvSignerFromChain(
     pprovdata: *mut CRYPT_PROVIDER_DATA,
     idxsigner: u32,
@@ -2869,6 +2886,36 @@ pub struct MEMORYSTATUSEX {
     pub ullAvailVirtual: DWORDLONG,
     pub ullAvailExtendedVirtual: DWORDLONG,
 }
+#[repr(C)]
+#[cfg(target_arch = "x86")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MEMORY_BASIC_INFORMATION {
+    pub BaseAddress: *mut core::ffi::c_void,
+    pub AllocationBase: *mut core::ffi::c_void,
+    pub AllocationProtect: u32,
+    pub RegionSize: usize,
+    pub State: u32,
+    pub Protect: u32,
+    pub Type: u32,
+}
+#[repr(C)]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "arm64ec",
+    target_arch = "x86_64"
+))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MEMORY_BASIC_INFORMATION {
+    pub BaseAddress: *mut core::ffi::c_void,
+    pub AllocationBase: *mut core::ffi::c_void,
+    pub AllocationProtect: u32,
+    pub PartitionId: u16,
+    pub RegionSize: usize,
+    pub State: u32,
+    pub Protect: u32,
+    pub Type: u32,
+}
+pub const MEM_MAPPED: i32 = 262144;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MIB_IF_ROW2 {
