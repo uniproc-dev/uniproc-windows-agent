@@ -447,6 +447,7 @@ pub struct MachineTemperatures {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct MachineSample {
     pub cpu: Option<MachineCpu>,
+    pub cpu_name: Option<SmolStr>,
     pub memory: Option<MachineMemory>,
     pub disk: Option<MachineDisk>,
     pub network: Option<MachineNetwork>,
@@ -463,6 +464,7 @@ impl MachineSample {
     pub fn project(&self, wanted: MachineMetrics) -> Self {
         Self {
             cpu: self.cpu.filter(|_| wanted.contains(MachineMetric::Cpu)),
+            cpu_name: self.cpu_name.clone().filter(|_| wanted.contains(MachineMetric::Cpu)),
             temperatures: self.temperatures.clone().filter(|_| wanted.contains(MachineMetric::Temperatures)),
             memory: self.memory.filter(|_| wanted.contains(MachineMetric::Memory)),
             disk: self.disk.filter(|_| wanted.contains(MachineMetric::Disk)),
@@ -540,6 +542,19 @@ pub fn now_100ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_name_follows_cpu_demand_independently_of_timing_availability() {
+        let sample = MachineSample {
+            cpu_name: Some("AMD Ryzen 9 9950X".into()),
+            ..Default::default()
+        };
+        let cpu = sample.project(MachineMetric::Cpu.into());
+        assert_eq!(cpu.cpu_name.as_deref(), Some("AMD Ryzen 9 9950X"));
+        assert!(cpu.cpu.is_none());
+        assert!(sample.project(MachineMetric::Processors.into()).cpu_name.is_none());
+        assert!(sample.project(MachineMetrics::empty()).cpu_name.is_none());
+    }
 
     #[test]
     fn a_reader_without_gaps_loses_only_the_columns_that_have_them() {
