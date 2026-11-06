@@ -1,6 +1,6 @@
 [package]
 name = "uniproc-windows-service"
-version = "0.28.0"
+version = "0.28.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -19,6 +19,7 @@ uniproc-windows-http = { path = "../http" }
 uniproc-windows-rpc = { path = "../rpc" }
 
 windows-service = "0.8.0"
+windows-core = "0.100"
 clap = { version = "4", features = ["derive"] }
 dhat = "0.3.3"
 ctrlc = "3"

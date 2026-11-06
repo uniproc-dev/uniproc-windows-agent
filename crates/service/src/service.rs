@@ -113,6 +113,9 @@ fn run_service(service_name: &str, telemetry: Telemetry) -> Result<()> {
     if let Err(error) = uniproc_windows_agent::agent_service::let_interactive_users_control() {
         tracing::warn!(error, "only administrators can start and stop the service");
     }
+    if let Err(error) = ensure_recovery(service_name) {
+        tracing::warn!(%error, "service failure recovery could not be configured");
+    }
 
     let ran = run(telemetry, &mut tell, || {
         stop_rx.recv().ok();
@@ -213,22 +216,33 @@ pub fn install(service_name: &str, display_name: &str, description: &str) -> Res
         ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
     )?;
     service.set_description(description)?;
-    let restart = ServiceAction {
-        action_type: ServiceActionType::Restart,
-        delay: Duration::from_secs(10),
-    };
-    service.update_failure_actions(ServiceFailureActions {
-        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
-        reboot_msg: None,
-        command: None,
-        actions: Some(vec![restart.clone(), restart, ServiceAction {
-            action_type: ServiceActionType::None,
-            delay: Duration::ZERO,
-        }]),
-    })?;
+    service.update_failure_actions(recovery_actions())?;
     service.set_failure_actions_on_non_crash_failures(true)?;
     uniproc_windows_agent::agent_service::let_interactive_users_control()
         .map_err(|code| anyhow::anyhow!("interactive users were not let start and stop the service: Win32 {code}"))?;
+    Ok(())
+}
+
+fn recovery_actions() -> ServiceFailureActions {
+    ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
+        reboot_msg: None,
+        command: None,
+        actions: Some([10, 30, 60].into_iter().map(|seconds| ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(seconds),
+        }).collect()),
+    }
+}
+
+fn ensure_recovery(service_name: &str) -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(service_name, ServiceAccess::QUERY_CONFIG | ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)?;
+    if service.get_failure_actions()?.actions.as_ref().is_none_or(Vec::is_empty) {
+        service.update_failure_actions(recovery_actions())?;
+        service.set_failure_actions_on_non_crash_failures(true)?;
+        info!("service failure recovery configured");
+    }
     Ok(())
 }
 

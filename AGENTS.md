@@ -65,3 +65,23 @@ per process through winreg and trims surrounding whitespace. Empty values and
 read failures produce None. CPU times and `MachineCpu` remain unchanged.
 The additive Windows protocol 2.14 `cpuName` text defaults to unavailable for
 older peers; no new metric or peer filtering is required.
+
+# Fatal service diagnostics and recovery
+
+Service stderr shares the live log file handle, so Rust allocation failures and
+panics reach `agent.log`, rotated to `agent.previous.log` on the next start.
+The service defaults its own RUST_BACKTRACE to 1 only when it was unset; this
+changes no machine or user environment setting. Release diagnostics can use an
+explicit linker MAP artifact without enabling PDBs or changing build profiles.
+
+A service with no configured failure actions is initialized at startup with
+restart delays of 10, 30, and 60 seconds, resetting after 24 hours without failure.
+SCM repeats the final action for later failures. Existing nonempty policies are
+preserved. Installation uses the same defaults. Normal requested stops remain
+stops. Recovery is applied by the service to its own SCM record as LocalSystem.
+
+The 2026-11-05 15:14:35 Moscow v0.28.0 crash matched Rust's allocation-error
+handler at RVA 0x6111b1 in PE timestamp 6AEC6C20. The old stderr was not captured;
+WER retained no dump, so the failed byte count and allocation stack are unknown.
+This diagnostic/recovery change does not establish or fix the source of that
+allocation failure. No unproven queue or buffer rewrite was included.

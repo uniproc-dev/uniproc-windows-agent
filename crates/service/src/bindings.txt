@@ -1,0 +1,3 @@
+Windows::Win32::SetStdHandle
+Windows::Win32::STD_ERROR_HANDLE
+Windows::Win32::CREATE_NO_WINDOW

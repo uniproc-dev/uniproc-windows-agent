@@ -4,12 +4,13 @@
 use std::path::{Path, PathBuf};
 
 /// Each crate's filter and the bindings written from it, from the workspace root.
-const BINDINGS: [(&str, &str); 2] = [
+const BINDINGS: [(&str, &str); 3] = [
     ("src/bindings.txt", "src/bindings.rs"),
     (
         "crates/core/src/bindings.txt",
         "crates/core/src/bindings.rs",
     ),
+    ("crates/service/src/bindings.txt", "crates/service/src/bindings.rs"),
 ];
 
 fn main() -> anyhow::Result<()> {
