@@ -502,6 +502,21 @@ pub unsafe fn GetLastError() -> u32 {
     unsafe { GetLastError() }
 }
 #[inline]
+pub unsafe fn GetLogicalProcessorInformationEx(
+    relationshiptype: LOGICAL_PROCESSOR_RELATIONSHIP,
+    buffer: Option<*mut SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>,
+    returnedlength: *mut u32,
+) -> windows_core::BOOL {
+    windows_core::link!("kernel32.dll" "system" fn GetLogicalProcessorInformationEx(relationshiptype : LOGICAL_PROCESSOR_RELATIONSHIP, buffer : *mut SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, returnedlength : *mut u32) -> windows_core::BOOL);
+    unsafe {
+        GetLogicalProcessorInformationEx(
+            relationshiptype,
+            buffer.unwrap_or(core::mem::zeroed()) as _,
+            returnedlength as _,
+        )
+    }
+}
+#[inline]
 pub unsafe fn GetMappedFileNameW(
     hprocess: HANDLE,
     lpv: *const core::ffi::c_void,
@@ -571,6 +586,14 @@ where
             path.unwrap_or(core::mem::zeroed()) as _,
         )
     }
+}
+#[inline]
+pub unsafe fn GetPerformanceInfo(
+    pperformanceinformation: *mut PERFORMANCE_INFORMATION,
+    cb: u32,
+) -> windows_core::BOOL {
+    windows_core::link!("kernel32.dll" "system" "K32GetPerformanceInfo" fn GetPerformanceInfo(pperformanceinformation : *mut PERFORMANCE_INFORMATION, cb : u32) -> windows_core::BOOL);
+    unsafe { GetPerformanceInfo(pperformanceinformation as _, cb) }
 }
 #[inline]
 pub unsafe fn GetProcAddress<P1>(hmodule: HMODULE, lpprocname: P1) -> FARPROC
@@ -684,6 +707,11 @@ pub unsafe fn GetSystemTimePreciseAsFileTime() -> FILETIME {
     }
 }
 #[inline]
+pub unsafe fn GetTickCount64() -> u64 {
+    windows_core::link!("kernel32.dll" "system" fn GetTickCount64() -> u64);
+    unsafe { GetTickCount64() }
+}
+#[inline]
 pub unsafe fn GetTokenInformation(
     tokenhandle: HANDLE,
     tokeninformationclass: TOKEN_INFORMATION_CLASS,
@@ -706,6 +734,11 @@ pub unsafe fn GetTokenInformation(
 pub unsafe fn GlobalMemoryStatusEx(lpbuffer: *mut MEMORYSTATUSEX) -> windows_core::BOOL {
     windows_core::link!("kernel32.dll" "system" fn GlobalMemoryStatusEx(lpbuffer : *mut MEMORYSTATUSEX) -> windows_core::BOOL);
     unsafe { GlobalMemoryStatusEx(lpbuffer as _) }
+}
+#[inline]
+pub unsafe fn IsProcessorFeaturePresent(processorfeature: u32) -> windows_core::BOOL {
+    windows_core::link!("kernel32.dll" "system" fn IsProcessorFeaturePresent(processorfeature : u32) -> windows_core::BOOL);
+    unsafe { IsProcessorFeaturePresent(processorfeature) }
 }
 #[inline]
 pub unsafe fn IsWellKnownSid(
@@ -1194,6 +1227,34 @@ pub struct BY_HANDLE_FILE_INFORMATION {
     pub nFileIndexLow: u32,
 }
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CACHE_RELATIONSHIP {
+    pub Level: u8,
+    pub Associativity: u8,
+    pub LineSize: u16,
+    pub CacheSize: u32,
+    pub Type: PROCESSOR_CACHE_TYPE,
+    pub Reserved: [u8; 18],
+    pub GroupCount: u16,
+    pub Anonymous: CACHE_RELATIONSHIP_0,
+}
+impl Default for CACHE_RELATIONSHIP {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union CACHE_RELATIONSHIP_0 {
+    pub GroupMask: GROUP_AFFINITY,
+    pub GroupMasks: [GROUP_AFFINITY; 1],
+}
+impl Default for CACHE_RELATIONSHIP_0 {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CATALOG_INFO {
     pub cbStruct: u32,
@@ -1674,6 +1735,9 @@ pub struct CTL_USAGE {
     pub cUsageIdentifier: u32,
     pub rgpszUsageIdentifier: *mut windows_core::PSTR,
 }
+pub const CacheData: PROCESSOR_CACHE_TYPE = 2;
+pub const CacheInstruction: PROCESSOR_CACHE_TYPE = 1;
+pub const CacheUnified: PROCESSOR_CACHE_TYPE = 0;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct D3DKMT_ADAPTERINFO {
@@ -2745,6 +2809,31 @@ pub const FILE_SHARE_WRITE: i32 = 2;
 pub const FSCTL_READ_FILE_USN_DATA: i32 = 590059;
 pub const FileIdInfo: FILE_INFO_BY_HANDLE_CLASS = 18;
 pub const GENERIC_READ: u32 = 2147483648;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GROUP_AFFINITY {
+    pub Mask: KAFFINITY,
+    pub Group: u16,
+    pub Reserved: [u16; 3],
+}
+impl Default for GROUP_AFFINITY {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GROUP_RELATIONSHIP {
+    pub MaximumGroupCount: u16,
+    pub ActiveGroupCount: u16,
+    pub Reserved: [u8; 20],
+    pub GroupInfo: [PROCESSOR_GROUP_INFO; 1],
+}
+impl Default for GROUP_RELATIONSHIP {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct HANDLE(pub *mut core::ffi::c_void);
@@ -2778,6 +2867,9 @@ pub const IF_TYPE_SOFTWARE_LOOPBACK: i32 = 24;
 pub const IF_TYPE_TUNNEL: i32 = 131;
 pub const INVALID_HANDLE_VALUE: HANDLE = HANDLE(-1 as _);
 pub const IfOperStatusUp: IF_OPER_STATUS = 1;
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct KAFFINITY(pub usize);
 pub const KMTQAITYPE_ADAPTERADDRESS: KMTQUERYADAPTERINFOTYPE = 6;
 pub const KMTQAITYPE_ADAPTERADDRESS_RENDER: KMTQUERYADAPTERINFOTYPE = 53;
 pub const KMTQAITYPE_ADAPTERGUID: KMTQUERYADAPTERINFOTYPE = 4;
@@ -2861,6 +2953,7 @@ pub const KMTQAITYPE_XBOX: KMTQUERYADAPTERINFOTYPE = 27;
 pub type KMTQUERYADAPTERINFOTYPE = i32;
 pub const KMTQUITYPE_GPUVERSION: KMTQUERYADAPTERINFOTYPE = 64;
 pub const LIST_MODULES_ALL: i32 = 3;
+pub type LOGICAL_PROCESSOR_RELATIONSHIP = i32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LUID {
@@ -3064,6 +3157,30 @@ impl NET_LUID_LH_0 {
         self._bitfield = (self._bitfield & !(65535 << 48)) | ((value & 65535) << 48);
     }
 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NUMA_NODE_RELATIONSHIP {
+    pub NodeNumber: u32,
+    pub Reserved: [u8; 18],
+    pub GroupCount: u16,
+    pub Anonymous: NUMA_NODE_RELATIONSHIP_0,
+}
+impl Default for NUMA_NODE_RELATIONSHIP {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union NUMA_NODE_RELATIONSHIP_0 {
+    pub GroupMask: GROUP_AFFINITY,
+    pub GroupMasks: [GROUP_AFFINITY; 1],
+}
+impl Default for NUMA_NODE_RELATIONSHIP_0 {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
 pub type OBJECT_INFORMATION_CLASS = i32;
 pub const OPEN_EXISTING: i32 = 3;
 #[repr(C)]
@@ -3228,6 +3345,24 @@ pub type PDH_HQUERY = HANDLE;
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PDH_STATUS(pub i32);
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PERFORMANCE_INFORMATION {
+    pub cb: u32,
+    pub CommitTotal: usize,
+    pub CommitLimit: usize,
+    pub CommitPeak: usize,
+    pub PhysicalTotal: usize,
+    pub PhysicalAvailable: usize,
+    pub SystemCache: usize,
+    pub KernelTotal: usize,
+    pub KernelPaged: usize,
+    pub KernelNonpaged: usize,
+    pub PageSize: usize,
+    pub HandleCount: u32,
+    pub ProcessCount: u32,
+    pub ThreadCount: u32,
+}
 pub type PFN_CPD_ADD_CERT = Option<
     unsafe extern "system" fn(
         pprovdata: *const CRYPT_PROVIDER_DATA,
@@ -3288,9 +3423,38 @@ pub type PFN_PROVUI_CALL = Option<
         pprovdata: *const CRYPT_PROVIDER_DATA,
     ) -> windows_core::BOOL,
 >;
+pub const PF_VIRT_FIRMWARE_ENABLED: i32 = 21;
 pub type PMIB_IF_TABLE2 = *mut MIB_IF_TABLE2;
 pub type POWER_INFORMATION_LEVEL = i32;
 pub type PROCESSINFOCLASS = i32;
+pub type PROCESSOR_CACHE_TYPE = i32;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PROCESSOR_GROUP_INFO {
+    pub MaximumProcessorCount: u8,
+    pub ActiveProcessorCount: u8,
+    pub Reserved: [u8; 38],
+    pub ActiveProcessorMask: KAFFINITY,
+}
+impl Default for PROCESSOR_GROUP_INFO {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PROCESSOR_RELATIONSHIP {
+    pub Flags: u8,
+    pub EfficiencyClass: u8,
+    pub Reserved: [u8; 20],
+    pub GroupCount: u16,
+    pub GroupMask: [GROUP_AFFINITY; 1],
+}
+impl Default for PROCESSOR_RELATIONSHIP {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
 pub const PROCESS_DUP_HANDLE: i32 = 64;
 pub type PROCESS_INFORMATION_CLASS = i32;
 pub type PROCESS_MITIGATION_POLICY = i32;
@@ -3404,6 +3568,9 @@ pub const ProcessWorkingSetWatchEx: PROCESSINFOCLASS = 42;
 pub const ProcessWow64Information: PROCESSINFOCLASS = 26;
 pub const ProcessWx86Information: PROCESSINFOCLASS = 19;
 pub const ProcessorInformation: POWER_INFORMATION_LEVEL = 11;
+pub const RelationCache: LOGICAL_PROCESSOR_RELATIONSHIP = 2;
+pub const RelationProcessorCore: LOGICAL_PROCESSOR_RELATIONSHIP = 0;
+pub const RelationProcessorPackage: LOGICAL_PROCESSOR_RELATIONSHIP = 3;
 pub const SDDL_REVISION_1: i32 = 1;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3426,6 +3593,20 @@ pub struct SECURITY_INFORMATION(pub u32);
 pub const SE_FILE_OBJECT: SE_OBJECT_TYPE = 1;
 pub type SE_OBJECT_TYPE = i32;
 pub const SE_PRIVILEGE_ENABLED: i32 = 2;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SHARED_COMPUTE_UNIT_RELATIONSHIP {
+    pub Type: u32,
+    pub ComputeUnitCount: u32,
+    pub Reserved: [u8; 14],
+    pub GroupCount: u16,
+    pub GroupMasks: [GROUP_AFFINITY; 1],
+}
+impl Default for SHARED_COMPUTE_UNIT_RELATIONSHIP {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
 #[repr(C, packed(1))]
 #[cfg(target_arch = "x86")]
 #[derive(Clone, Copy)]
@@ -3563,6 +3744,32 @@ impl Default for SYSTEM_INFO_0 {
 pub struct SYSTEM_INFO_0_0 {
     pub wProcessorArchitecture: u16,
     pub wReserved: u16,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX {
+    pub Relationship: LOGICAL_PROCESSOR_RELATIONSHIP,
+    pub Size: u32,
+    pub Anonymous: SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX_0,
+}
+impl Default for SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX_0 {
+    pub Processor: PROCESSOR_RELATIONSHIP,
+    pub NumaNode: NUMA_NODE_RELATIONSHIP,
+    pub Cache: CACHE_RELATIONSHIP,
+    pub Group: GROUP_RELATIONSHIP,
+    pub SharedComputeUnit: SHARED_COMPUTE_UNIT_RELATIONSHIP,
+}
+impl Default for SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX_0 {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
 }
 pub const TOKEN_ADJUST_PRIVILEGES: i32 = 32;
 pub type TOKEN_INFORMATION_CLASS = i32;

@@ -1,5 +1,7 @@
 mod adapters;
 mod cpu_name;
+mod cpu_inventory;
+mod system_stats;
 mod processor_times;
 mod sample;
 mod vars;
@@ -58,6 +60,8 @@ impl MachineProbe {
         let mut sample = MachineSample::default();
         if wanted.contains(MachineMetric::Cpu) {
             sample.cpu_name = cpu_name::read();
+            sample.system_stats = system_stats::read();
+            sample.cpu_inventory = Some(cpu_inventory::read());
         }
         if wanted.contains(MachineMetric::Temperatures) {
             sample.temperatures = Some(self.temperatures.latest());
@@ -139,6 +143,7 @@ mod tests {
         let wanted: MachineMetrics = [MachineMetric::Memory, MachineMetric::Network].into_iter().collect();
         let sample = probe.sample(wanted, &totals);
         assert!(sample.cpu.is_none() && sample.cpu_name.is_none() && sample.disk.is_none());
+        assert!(sample.system_stats.is_none() && sample.cpu_inventory.is_none());
         let memory = sample.memory.expect("memory");
         assert!(memory.total_physical > memory.available_physical);
         assert!(memory.commit_limit >= memory.total_physical / 2 && memory.committed <= memory.commit_limit);

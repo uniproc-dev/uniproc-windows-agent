@@ -443,11 +443,35 @@ pub struct MachineTemperatures {
     pub devices: Vec<TemperatureDevice>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MachineSystemStats {
+    pub process_count: u32,
+    pub thread_count: u32,
+    pub handle_count: u32,
+    pub uptime_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CpuInventory {
+    pub active_package_count: Option<u32>,
+    pub physical_core_count: Option<u32>,
+    pub logical_processor_count: Option<u32>,
+    pub l1_cache_bytes: Option<u64>,
+    pub l2_cache_bytes: Option<u64>,
+    pub l3_cache_bytes: Option<u64>,
+    pub base_mhz: Option<u32>,
+    pub virtualization_hardware_supported: Option<bool>,
+    pub virtualization_firmware_enabled: Option<bool>,
+    pub hypervisor_present: Option<bool>,
+}
+
 /// A group is `None` when nobody asked for it or it could not be read.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct MachineSample {
     pub cpu: Option<MachineCpu>,
     pub cpu_name: Option<SmolStr>,
+    pub system_stats: Option<MachineSystemStats>,
+    pub cpu_inventory: Option<Arc<CpuInventory>>,
     pub memory: Option<MachineMemory>,
     pub disk: Option<MachineDisk>,
     pub network: Option<MachineNetwork>,
@@ -465,6 +489,8 @@ impl MachineSample {
         Self {
             cpu: self.cpu.filter(|_| wanted.contains(MachineMetric::Cpu)),
             cpu_name: self.cpu_name.clone().filter(|_| wanted.contains(MachineMetric::Cpu)),
+            system_stats: self.system_stats.filter(|_| wanted.contains(MachineMetric::Cpu)),
+            cpu_inventory: self.cpu_inventory.clone().filter(|_| wanted.contains(MachineMetric::Cpu)),
             temperatures: self.temperatures.clone().filter(|_| wanted.contains(MachineMetric::Temperatures)),
             memory: self.memory.filter(|_| wanted.contains(MachineMetric::Memory)),
             disk: self.disk.filter(|_| wanted.contains(MachineMetric::Disk)),
@@ -554,6 +580,24 @@ mod tests {
         assert!(cpu.cpu.is_none());
         assert!(sample.project(MachineMetric::Processors.into()).cpu_name.is_none());
         assert!(sample.project(MachineMetrics::empty()).cpu_name.is_none());
+    }
+
+    #[test]
+    fn cpu_inventory_and_system_stats_follow_cpu_demand_without_requiring_cpu_times() {
+        let sample = MachineSample {
+            system_stats: Some(MachineSystemStats { process_count: 500, uptime_ms: 123456, ..Default::default() }),
+            cpu_inventory: Some(Arc::new(CpuInventory { physical_core_count: Some(6), logical_processor_count: Some(12), ..Default::default() })),
+            ..Default::default()
+        };
+        let cpu = sample.project(MachineMetric::Cpu.into());
+        assert_eq!(cpu.system_stats, sample.system_stats);
+        assert!(Arc::ptr_eq(cpu.cpu_inventory.as_ref().unwrap(), sample.cpu_inventory.as_ref().unwrap()));
+        assert!(cpu.cpu.is_none());
+        for wanted in [MachineMetrics::empty(), MachineMetric::Processors.into(), MachineMetric::Temperatures.into()] {
+            let projected = sample.project(wanted);
+            assert!(projected.system_stats.is_none());
+            assert!(projected.cpu_inventory.is_none());
+        }
     }
 
     #[test]
