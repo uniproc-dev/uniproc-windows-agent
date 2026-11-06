@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 pub use uniproc_windows_core::{
+    CpuInventory, MachineSystemStats,
     Architecture, Columns, DpiAwareness, ExtendedCfg, GpuAdapter, GpuEngine, GpuEngineKind, IoPriority, Isolation,
     MachineCpu, NetworkAdapter, ProcessGpuEngine,
     MachineDisk, MachineMemory, MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample,

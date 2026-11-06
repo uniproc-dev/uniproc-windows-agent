@@ -638,6 +638,32 @@ fn gpus(list: struct_list::Reader<'_, gpu_adapter::Owned>) -> capnp::Result<Arc<
 
 fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample> {
     Ok(MachineSample {
+        system_stats: if m.has_system_stats() {
+            let stats = m.get_system_stats()?;
+            Some(crate::api::MachineSystemStats {
+                process_count: stats.get_process_count(),
+                thread_count: stats.get_thread_count(),
+                handle_count: stats.get_handle_count(),
+                uptime_ms: stats.get_uptime_ms(),
+            })
+        } else { None },
+        cpu_inventory: if m.has_cpu_inventory() {
+            let info = m.get_cpu_inventory()?;
+            let u32_value = |value| (value != crate::api::NO_DATA_U32).then_some(value);
+            let u64_value = |value| (value != crate::api::NO_DATA_U64).then_some(value);
+            Some(Arc::new(crate::api::CpuInventory {
+                active_package_count: u32_value(info.get_active_package_count()),
+                physical_core_count: u32_value(info.get_physical_core_count()),
+                logical_processor_count: u32_value(info.get_logical_processor_count()),
+                l1_cache_bytes: u64_value(info.get_l1_cache_bytes()),
+                l2_cache_bytes: u64_value(info.get_l2_cache_bytes()),
+                l3_cache_bytes: u64_value(info.get_l3_cache_bytes()),
+                base_mhz: u32_value(info.get_base_mhz()),
+                virtualization_hardware_supported: toggle(info.get_virtualization_hardware_supported()),
+                virtualization_firmware_enabled: toggle(info.get_virtualization_firmware_enabled()),
+                hypervisor_present: toggle(info.get_hypervisor_present()),
+            }))
+        } else { None },
         cpu_name: {
             let name: crate::api::SmolStr = text(m.get_cpu_name())?;
             (!name.is_empty()).then_some(name)

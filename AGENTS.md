@@ -85,3 +85,33 @@ handler at RVA 0x6111b1 in PE timestamp 6AEC6C20. The old stderr was not capture
 WER retained no dump, so the failed byte count and allocation stack are unknown.
 This diagnostic/recovery change does not establish or fix the source of that
 allocation failure. No unproven queue or buffer rewrite was included.
+
+# CPU parity metadata
+
+Windows protocol 2.15 (uniproc-protocol v0.24.0) adds `system_stats` and
+`cpu_inventory` to `MachineSample` under the existing `MachineMetric::Cpu`.
+Old peers leave both groups absent; no new requested metric or peer gate exists.
+`MachineSystemStats` has atomic GetPerformanceInfo process/thread/handle totals
+and GetTickCount64 boot uptime in milliseconds, including sleep. A failed counts
+query leaves the whole group absent, including uptime; zeros remain valid.
+
+`CpuInventory` is an Arc cached on its first read for the process lifetime.
+Package/core/cache relationships use GetLogicalProcessorInformationEx, and
+logical processor count covers all active groups. Counts describe active topology
+at the cached read, not installed/offline hardware. Cache totals count each native
+cache relationship once; L1 sums Data and Instruction or Unified cache records.
+Failures can leave individual fields absent. The variable-length SDK records are
+bounded and validated. Base MHz remains unavailable rather than reusing max MHz
+or parsing the brand string.
+
+Virtualization hardware support means the visible Intel VMX/AMD SVM CPUID feature,
+not a claim about features hidden by another layer. A detected hypervisor leaves
+hardware and firmware fields unknown. Absent/unknown capability also leaves
+firmware unknown; otherwise firmware availability uses the Windows processor flag.
+Inventory numeric absence uses MAX defaults on the wire; three optional booleans
+use Toggle unknown/off/on. Valid zero and false are preserved.
+
+`cargo run --example cpu_inventory` checks a service after its separately
+approved update; `-- --allow-missing` also accepts older peers' absent groups.
+Read-only core tests can validate current-machine topology without starting or
+restarting the service, ETW sessions, or the UI.

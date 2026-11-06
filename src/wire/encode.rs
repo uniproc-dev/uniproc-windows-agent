@@ -537,6 +537,8 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
     let MachineSample {
         cpu,
         cpu_name,
+        system_stats,
+        cpu_inventory,
         memory,
         disk,
         network,
@@ -545,6 +547,26 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         network_adapters,
         temperatures,
     } = &sample.machine;
+    if let Some(stats) = system_stats {
+        let mut target = out.reborrow().init_system_stats();
+        target.set_process_count(stats.process_count);
+        target.set_thread_count(stats.thread_count);
+        target.set_handle_count(stats.handle_count);
+        target.set_uptime_ms(stats.uptime_ms);
+    }
+    if let Some(info) = cpu_inventory {
+        let mut target = out.reborrow().init_cpu_inventory();
+        target.set_active_package_count(info.active_package_count.unwrap_or(crate::api::NO_DATA_U32));
+        target.set_physical_core_count(info.physical_core_count.unwrap_or(crate::api::NO_DATA_U32));
+        target.set_logical_processor_count(info.logical_processor_count.unwrap_or(crate::api::NO_DATA_U32));
+        target.set_l1_cache_bytes(info.l1_cache_bytes.unwrap_or(crate::api::NO_DATA_U64));
+        target.set_l2_cache_bytes(info.l2_cache_bytes.unwrap_or(crate::api::NO_DATA_U64));
+        target.set_l3_cache_bytes(info.l3_cache_bytes.unwrap_or(crate::api::NO_DATA_U64));
+        target.set_base_mhz(info.base_mhz.unwrap_or(crate::api::NO_DATA_U32));
+        target.set_virtualization_hardware_supported(toggle(info.virtualization_hardware_supported));
+        target.set_virtualization_firmware_enabled(toggle(info.virtualization_firmware_enabled));
+        target.set_hypervisor_present(toggle(info.hypervisor_present));
+    }
     if let Some(name) = cpu_name {
         out.reborrow().set_cpu_name(name);
     }

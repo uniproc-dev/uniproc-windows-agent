@@ -478,6 +478,17 @@ mod tests {
                 },
             ])),
             machine: MachineSample {
+                system_stats: Some(crate::api::MachineSystemStats {
+                    process_count: 0, thread_count: 20, handle_count: 30,
+                    uptime_ms: u64::from(u32::MAX) + 100,
+                }),
+                cpu_inventory: Some(Arc::new(crate::api::CpuInventory {
+                    active_package_count: Some(1), physical_core_count: Some(6),
+                    logical_processor_count: Some(12), l1_cache_bytes: Some(0),
+                    l2_cache_bytes: Some(1_572_864), l3_cache_bytes: None, base_mhz: None,
+                    virtualization_hardware_supported: Some(false),
+                    virtualization_firmware_enabled: None, hypervisor_present: Some(true),
+                })),
                 cpu_name: Some("Intel® Core™ i5-10400F CPU @ 2.90GHz".into()),
                 temperatures: Some(Arc::new(crate::api::MachineTemperatures {
                     status: crate::api::TemperatureStatus::Available,
@@ -599,6 +610,20 @@ mod tests {
     fn a_sample_survives_the_wire() {
         let sent = full_sample();
         assert_eq!(round_trip(&sent), sent);
+    }
+
+    #[test]
+    fn missing_cpu_groups_and_unknown_inventory_values_stay_distinct() {
+        let mut sent = full_sample();
+        sent.machine.system_stats = None;
+        sent.machine.cpu_inventory = None;
+        let got = round_trip(&sent);
+        assert!(got.machine.system_stats.is_none());
+        assert!(got.machine.cpu_inventory.is_none());
+        sent.machine.cpu_inventory = Some(Arc::new(crate::api::CpuInventory::default()));
+        let got = round_trip(&sent);
+        assert_eq!(got.machine.cpu_inventory, sent.machine.cpu_inventory);
+        assert!(got.machine.system_stats.is_none());
     }
 
     #[test]
