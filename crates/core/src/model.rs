@@ -2,7 +2,7 @@
 //! A value the agent could not read is `Unknown`, `None`, empty or 0.
 
 /// Task Manager's Architecture column; 16, 32 or 64-bit follows from it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum Architecture {
     #[default]
     Unknown,
@@ -16,7 +16,7 @@ pub enum Architecture {
     Arm64X64Compatible,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum UacVirtualization {
     #[default]
     Unknown,
@@ -25,7 +25,7 @@ pub enum UacVirtualization {
     Enabled,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum Isolation {
     #[default]
     Unknown,
@@ -35,7 +35,7 @@ pub enum Isolation {
     Silo,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum DpiAwareness {
     #[default]
     Unknown,
@@ -48,7 +48,7 @@ pub enum DpiAwareness {
 
 /// Hardware-enforced stack protection: compatible modules only or all
 /// modules, each optionally in audit mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum StackProtection {
     #[default]
     Unknown,
@@ -60,7 +60,7 @@ pub enum StackProtection {
 }
 
 /// Extended Control Flow Guard (XFG).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum ExtendedCfg {
     #[default]
     Unknown,
@@ -70,7 +70,7 @@ pub enum ExtendedCfg {
 }
 
 /// `VeryLow` is what Task Manager shows as Background.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum IoPriority {
     #[default]
     Unknown,
@@ -81,7 +81,7 @@ pub enum IoPriority {
     Critical,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum ProcessPriority {
     Idle,
     BelowNormal,
@@ -106,7 +106,7 @@ impl ProcessPriority {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub struct Mitigations {
     /// Data execution prevention.
     pub dep: Option<bool>,
@@ -115,7 +115,7 @@ pub struct Mitigations {
 }
 
 /// How a process runs right now; changes rarely.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProcessState {
     pub pid: u32,
     pub sequence_number: u64,

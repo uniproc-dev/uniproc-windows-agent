@@ -20,7 +20,8 @@ pub const MIN_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_INTERVAL: Duration = Duration::from_secs(60);
 
 /// One process counter. Everything cumulative is raw, as the OS keeps it.
-#[derive(EnumSetType, Debug, Hash, PartialOrd, Ord)]
+#[derive(EnumSetType, Debug, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[enumset(serialize_repr = "list")]
 pub enum ProcessMetric {
     CpuUserTime,
     CpuKernelTime,
@@ -66,7 +67,8 @@ pub enum ProcessMetric {
 }
 
 /// A group of machine counters.
-#[derive(EnumSetType, Debug, Hash, PartialOrd, Ord)]
+#[derive(EnumSetType, Debug, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[enumset(serialize_repr = "list")]
 pub enum MachineMetric {
     Cpu,
     Memory,
@@ -93,10 +95,12 @@ impl ProcessMetric {
 }
 
 /// What one subscriber wants, and how often.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct MetricSpec {
     pub interval: Duration,
+    #[schemars(with = "Vec<ProcessMetric>")]
     pub processes: ProcessMetrics,
+    #[schemars(with = "Vec<MachineMetric>")]
     pub machine: MachineMetrics,
 }
 
@@ -176,17 +180,25 @@ pub trait Extras {
 }
 
 macro_rules! columns {
-    (|$r:ident, $x:ident| $($field:ident: $ty:ty = $metric:ident, $value:expr;)*) => {
+    (|$r:ident, $x:ident| $($field:ident: $ty:ty = $metric:ident, $value:expr => $unit:literal, $cumulative:literal;)*) => {
         /// Process counters as columns, row i of each for the same process. A
         /// column is `None` when nobody asked for it or there is no data; a
         /// row with no data holds the type's maximum, see
         /// [`ProcessMetric::has_gaps`].
-        #[derive(Clone, Debug, Default, PartialEq, Eq)]
+        #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
         pub struct Columns {
             $(pub $field: Option<Arc<[$ty]>>,)*
         }
 
         impl Columns {
+            pub fn catalog() -> serde_json::Value {
+                serde_json::json!([
+                    $({"metric": ProcessMetric::$metric, "column": stringify!($field),
+                      "value_type": stringify!($ty), "unit": $unit, "cumulative": $cumulative,
+                      "wrap_bits": if ProcessMetric::$metric.has_gaps() { None } else { Some(32u8) },
+                      "sentinel": ProcessMetric::$metric.has_gaps().then_some(<$ty>::MAX as u64)}),*
+                ])
+            }
             /// The wanted columns out of `rows`, in their order.
             pub fn build(wanted: ProcessMetrics, rows: &[Row], extras: &impl Extras) -> Self {
                 let $x = extras;
@@ -223,50 +235,50 @@ macro_rules! columns {
 
 columns! {
     |r, x|
-    cpu_user_time: u64 = CpuUserTime, r.user_time;
-    cpu_kernel_time: u64 = CpuKernelTime, r.kernel_time;
-    cpu_cycles: u64 = CpuCycles, r.cycles;
-    working_set: u64 = WorkingSet, r.working_set;
-    peak_working_set: u64 = PeakWorkingSet, r.peak_working_set;
-    private_working_set: u64 = PrivateWorkingSet, r.private_working_set;
-    commit: u64 = Commit, r.commit;
-    paged_pool: u64 = PagedPool, r.paged_pool;
-    non_paged_pool: u64 = NonPagedPool, r.nonpaged_pool;
-    page_faults: u32 = PageFaults, r.page_faults;
-    handles: u32 = Handles, r.handles;
-    threads: u32 = Threads, r.threads;
-    user_objects: u32 = UserObjects, x.user_objects(r);
-    gdi_objects: u32 = GdiObjects, x.gdi_objects(r);
-    io_read_ops: u64 = IoReadOps, r.io_read_ops;
-    io_write_ops: u64 = IoWriteOps, r.io_write_ops;
-    io_other_ops: u64 = IoOtherOps, r.io_other_ops;
-    io_read_bytes: u64 = IoReadBytes, r.io_read_bytes;
-    io_write_bytes: u64 = IoWriteBytes, r.io_write_bytes;
-    io_other_bytes: u64 = IoOtherBytes, r.io_other_bytes;
-    disk_read_ops: u64 = DiskReadOps, r.disk_read_ops;
-    disk_write_ops: u64 = DiskWriteOps, r.disk_write_ops;
-    disk_flush_ops: u64 = DiskFlushOps, r.disk_flush_ops;
-    disk_read_bytes: u64 = DiskReadBytes, r.disk_read_bytes;
-    disk_write_bytes: u64 = DiskWriteBytes, r.disk_write_bytes;
-    net_rx_bytes: u64 = NetRxBytes, x.net_rx_bytes(r);
-    net_tx_bytes: u64 = NetTxBytes, x.net_tx_bytes(r);
-    virtual_size: u64 = VirtualSize, r.virtual_size;
-    peak_virtual_size: u64 = PeakVirtualSize, r.peak_virtual_size;
-    peak_commit: u64 = PeakCommit, r.peak_commit;
-    peak_paged_pool: u64 = PeakPagedPool, r.peak_paged_pool;
-    peak_non_paged_pool: u64 = PeakNonPagedPool, r.peak_nonpaged_pool;
-    hard_faults: u32 = HardFaults, r.hard_faults;
-    peak_threads: u32 = PeakThreads, r.peak_threads;
-    context_switches: u64 = ContextSwitches, r.context_switches;
-    gpu_dedicated: u64 = GpuDedicated, x.gpu_dedicated(r);
-    gpu_shared: u64 = GpuShared, x.gpu_shared(r);
-    exclusive_mapped: u64 = ExclusiveMapped, x.exclusive_mapped(r);
-    vm_working_set: u64 = VmWorkingSet, x.vm_working_set(r);
+    cpu_user_time: u64 = CpuUserTime, r.user_time => "100ns", true;
+    cpu_kernel_time: u64 = CpuKernelTime, r.kernel_time => "100ns", true;
+    cpu_cycles: u64 = CpuCycles, r.cycles => "cycles", true;
+    working_set: u64 = WorkingSet, r.working_set => "bytes", false;
+    peak_working_set: u64 = PeakWorkingSet, r.peak_working_set => "bytes", false;
+    private_working_set: u64 = PrivateWorkingSet, r.private_working_set => "bytes", false;
+    commit: u64 = Commit, r.commit => "bytes", false;
+    paged_pool: u64 = PagedPool, r.paged_pool => "bytes", false;
+    non_paged_pool: u64 = NonPagedPool, r.nonpaged_pool => "bytes", false;
+    page_faults: u32 = PageFaults, r.page_faults => "count", true;
+    handles: u32 = Handles, r.handles => "count", false;
+    threads: u32 = Threads, r.threads => "count", false;
+    user_objects: u32 = UserObjects, x.user_objects(r) => "count", false;
+    gdi_objects: u32 = GdiObjects, x.gdi_objects(r) => "count", false;
+    io_read_ops: u64 = IoReadOps, r.io_read_ops => "count", true;
+    io_write_ops: u64 = IoWriteOps, r.io_write_ops => "count", true;
+    io_other_ops: u64 = IoOtherOps, r.io_other_ops => "count", true;
+    io_read_bytes: u64 = IoReadBytes, r.io_read_bytes => "bytes", true;
+    io_write_bytes: u64 = IoWriteBytes, r.io_write_bytes => "bytes", true;
+    io_other_bytes: u64 = IoOtherBytes, r.io_other_bytes => "bytes", true;
+    disk_read_ops: u64 = DiskReadOps, r.disk_read_ops => "count", true;
+    disk_write_ops: u64 = DiskWriteOps, r.disk_write_ops => "count", true;
+    disk_flush_ops: u64 = DiskFlushOps, r.disk_flush_ops => "count", true;
+    disk_read_bytes: u64 = DiskReadBytes, r.disk_read_bytes => "bytes", true;
+    disk_write_bytes: u64 = DiskWriteBytes, r.disk_write_bytes => "bytes", true;
+    net_rx_bytes: u64 = NetRxBytes, x.net_rx_bytes(r) => "bytes", true;
+    net_tx_bytes: u64 = NetTxBytes, x.net_tx_bytes(r) => "bytes", true;
+    virtual_size: u64 = VirtualSize, r.virtual_size => "bytes", false;
+    peak_virtual_size: u64 = PeakVirtualSize, r.peak_virtual_size => "bytes", false;
+    peak_commit: u64 = PeakCommit, r.peak_commit => "bytes", false;
+    peak_paged_pool: u64 = PeakPagedPool, r.peak_paged_pool => "bytes", false;
+    peak_non_paged_pool: u64 = PeakNonPagedPool, r.peak_nonpaged_pool => "bytes", false;
+    hard_faults: u32 = HardFaults, r.hard_faults => "count", true;
+    peak_threads: u32 = PeakThreads, r.peak_threads => "count", false;
+    context_switches: u64 = ContextSwitches, r.context_switches => "count", true;
+    gpu_dedicated: u64 = GpuDedicated, x.gpu_dedicated(r) => "bytes", false;
+    gpu_shared: u64 = GpuShared, x.gpu_shared(r) => "bytes", false;
+    exclusive_mapped: u64 = ExclusiveMapped, x.exclusive_mapped(r) => "count", false;
+    vm_working_set: u64 = VmWorkingSet, x.vm_working_set(r) => "bytes", false;
 }
 
 /// Sums over every logical processor in every group, cumulative, 100 ns.
 /// Kernel time includes idle time.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct MachineCpu {
     pub idle_time: u64,
     pub kernel_time: u64,
@@ -279,7 +291,7 @@ pub struct MachineCpu {
 
 /// One logical processor's times, cumulative, 100 ns. Kernel time includes
 /// idle time.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct MachineProcessor {
     pub idle_time: u64,
     pub kernel_time: u64,
@@ -289,7 +301,7 @@ pub struct MachineProcessor {
 }
 
 /// Bytes, current. The commit limit is RAM plus the page files.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct MachineMemory {
     pub total_physical: u64,
     pub available_physical: u64,
@@ -298,7 +310,7 @@ pub struct MachineMemory {
 }
 
 /// All physical disks together, cumulative since the agent started.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct MachineDisk {
     pub read_ops: u64,
     pub write_ops: u64,
@@ -309,14 +321,14 @@ pub struct MachineDisk {
 /// The TCP and UDP payload of every process together, cumulative since the
 /// agent started. Traffic to or from a loopback address is left out; traffic
 /// a process sends to the machine's own non-loopback address is not.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct MachineNetwork {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
 }
 
 /// One network adapter that is up.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct NetworkAdapter {
     /// `NET_LUID`.
     pub luid: u64,
@@ -337,7 +349,7 @@ pub struct NetworkAdapter {
 }
 
 /// What a GPU engine does, as the driver declares it (`DXGK_ENGINE_TYPE`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum GpuEngineKind {
     #[default]
     Other,
@@ -353,7 +365,7 @@ pub enum GpuEngineKind {
 }
 
 /// One engine (node) of an adapter.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct GpuEngine {
     pub ordinal: u32,
     pub kind: GpuEngineKind,
@@ -367,7 +379,7 @@ pub struct GpuEngine {
 }
 
 /// One hardware adapter.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct GpuAdapter {
     /// `HighPart << 32 | LowPart`.
     pub luid: u64,
@@ -388,7 +400,7 @@ pub struct GpuAdapter {
 }
 
 /// How long one process has run on one engine.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProcessGpuEngine {
     /// Index into the sample's rows.
     pub row: u32,
@@ -399,7 +411,7 @@ pub struct ProcessGpuEngine {
     pub running_time: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TemperatureStatus {
     Unknown,
@@ -409,7 +421,7 @@ pub enum TemperatureStatus {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TemperatureCategory {
     Cpu,
@@ -419,14 +431,14 @@ pub enum TemperatureCategory {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct TemperatureSensor {
     pub id: String,
     pub name: String,
     pub celsius: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct TemperatureDevice {
     pub id: String,
     pub name: String,
@@ -436,14 +448,14 @@ pub struct TemperatureDevice {
     pub sensors: Vec<TemperatureSensor>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct MachineTemperatures {
     pub status: TemperatureStatus,
     pub error: String,
     pub devices: Vec<TemperatureDevice>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct MachineSystemStats {
     pub process_count: u32,
     pub thread_count: u32,
@@ -451,7 +463,7 @@ pub struct MachineSystemStats {
     pub uptime_ms: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct CpuInventory {
     pub active_package_count: Option<u32>,
     pub physical_core_count: Option<u32>,
@@ -466,7 +478,7 @@ pub struct CpuInventory {
 }
 
 /// A group is `None` when nobody asked for it or it could not be read.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, schemars::JsonSchema)]
 pub struct MachineSample {
     pub cpu: Option<MachineCpu>,
     pub cpu_name: Option<SmolStr>,
@@ -506,7 +518,7 @@ impl MachineSample {
 }
 
 /// Everything sampled at one moment.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, schemars::JsonSchema)]
 pub struct Sample {
     /// Moves with every sample the agent takes.
     pub snapshot: u64,

@@ -347,7 +347,7 @@ mod tests {
 }
 
 /// A process started or exited.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProcessEvent {
     pub pid: u32,
     pub sequence_number: u64,
@@ -356,13 +356,13 @@ pub struct ProcessEvent {
     pub kind: ProcessEventKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub enum ProcessEventKind {
     Started(ProcessStarted),
     Exited(ProcessExited),
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProcessStarted {
     pub parent_pid: u32,
     /// 0 when not known.
@@ -386,7 +386,7 @@ pub struct ProcessStarted {
 }
 
 /// Who exited, and the totals over its whole life as the kernel reports them at exit.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProcessExited {
     /// Win32 path, from the start held or the process list; empty when the
     /// agent never knew the process whole.
@@ -408,7 +408,7 @@ pub struct ProcessExited {
 }
 
 /// What one call to a watcher carries.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProcessEventBatch {
     /// In the first batch only, 0 after it: the FILETIME from which on
     /// nothing is missing.

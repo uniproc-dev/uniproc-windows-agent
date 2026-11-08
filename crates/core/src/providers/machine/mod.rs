@@ -7,6 +7,8 @@ mod sample;
 mod vars;
 mod temperatures;
 
+pub use cpu_inventory::context as cpu_context;
+
 use std::time::{Duration, Instant};
 
 use ntapi::ntpoapi::PROCESSOR_POWER_INFORMATION;

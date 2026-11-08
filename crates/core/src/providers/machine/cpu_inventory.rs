@@ -15,32 +15,60 @@ const MAX_TOPOLOGY_BYTES: usize = 1 << 20;
 const HEADER: usize = offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Anonymous);
 
 pub fn read() -> Arc<CpuInventory> {
-    static INVENTORY: OnceLock<Arc<CpuInventory>> = OnceLock::new();
-    INVENTORY.get_or_init(|| Arc::new(load())).clone()
+    cached().0.clone()
+}
+
+fn cached() -> &'static (Arc<CpuInventory>, Option<&'static str>) {
+    static INVENTORY: OnceLock<(Arc<CpuInventory>, Option<&'static str>)> = OnceLock::new();
+    INVENTORY.get_or_init(|| {
+        let (inventory, source) = load();
+        (Arc::new(inventory), source)
+    })
+}
+
+pub fn context() -> serde_json::Value {
+    let (inventory, source) = cached();
+    serde_json::json!({"base_mhz": inventory.base_mhz, "base_mhz_source": source,
+        "frequency_semantics": "nominal base frequency exposed by Intel CPUID; not current or maximum frequency"})
 }
 
 #[allow(unused_unsafe)]
-fn load() -> CpuInventory {
+fn load() -> (CpuInventory, Option<&'static str>) {
     let logical = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS as u16) };
     let caches = query(RelationCache).and_then(|bytes| cache_totals(&bytes));
     let (supported, hypervisor) = capabilities();
     let (supported, firmware) = virtualization(supported, hypervisor, || unsafe {
         IsProcessorFeaturePresent(PF_VIRT_FIRMWARE_ENABLED as u32).as_bool()
     });
-    CpuInventory {
-        active_package_count: query(RelationProcessorPackage)
-            .and_then(|bytes| processor_count(&bytes, RelationProcessorPackage)),
-        physical_core_count: query(RelationProcessorCore)
-            .and_then(|bytes| processor_count(&bytes, RelationProcessorCore)),
-        logical_processor_count: (logical > 0).then_some(logical),
-        l1_cache_bytes: caches.and_then(|totals| totals[0]),
-        l2_cache_bytes: caches.and_then(|totals| totals[1]),
-        l3_cache_bytes: caches.and_then(|totals| totals[2]),
-        base_mhz: base_frequency(|leaf| unsafe { std::arch::x86_64::__cpuid(leaf) }),
-        virtualization_hardware_supported: supported,
-        virtualization_firmware_enabled: firmware,
-        hypervisor_present: hypervisor,
-    }
+    let mut brand_used = false;
+    let base_mhz = base_frequency(|leaf| {
+        brand_used |= (0x8000_0002..=0x8000_0004).contains(&leaf);
+        unsafe { std::arch::x86_64::__cpuid(leaf) }
+    });
+    let source = base_mhz.map(|_| {
+        if brand_used {
+            "intel_brand_string"
+        } else {
+            "cpuid_16h"
+        }
+    });
+    (
+        CpuInventory {
+            active_package_count: query(RelationProcessorPackage)
+                .and_then(|bytes| processor_count(&bytes, RelationProcessorPackage)),
+            physical_core_count: query(RelationProcessorCore)
+                .and_then(|bytes| processor_count(&bytes, RelationProcessorCore)),
+            logical_processor_count: (logical > 0).then_some(logical),
+            l1_cache_bytes: caches.and_then(|totals| totals[0]),
+            l2_cache_bytes: caches.and_then(|totals| totals[1]),
+            l3_cache_bytes: caches.and_then(|totals| totals[2]),
+            base_mhz,
+            virtualization_hardware_supported: supported,
+            virtualization_firmware_enabled: firmware,
+            hypervisor_present: hypervisor,
+        },
+        source,
+    )
 }
 
 fn base_frequency(mut cpuid: impl FnMut(u32) -> std::arch::x86_64::CpuidResult) -> Option<u32> {

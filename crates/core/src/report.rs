@@ -12,7 +12,7 @@ use crate::state::process::ProcessEntry;
 
 /// What changed in the core's picture of the machine since the last tick.
 /// The set of processes changes only with a sample.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, schemars::JsonSchema)]
 pub struct Diff {
     /// Processes that left, as pid and sequence number.
     pub gone: Vec<(u32, u64)>,
@@ -36,7 +36,7 @@ pub struct Health {
 }
 
 /// One of the core's ETW sessions. Losses count from the session's start.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct SessionHealth {
     pub name: String,
     /// ETW still has the session; false once someone stopped it from outside.
@@ -57,7 +57,7 @@ impl SessionHealth {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum SignatureStatus {
     /// Not checked yet, or the check itself failed.
     #[default]
@@ -68,7 +68,7 @@ pub enum SignatureStatus {
 }
 
 /// What a process is. Fixed for its lifetime.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct Process {
     pub pid: u32,
     pub parent_pid: u32,
