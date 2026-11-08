@@ -101,8 +101,12 @@ logical processor count covers all active groups. Counts describe active topolog
 at the cached read, not installed/offline hardware. Cache totals count each native
 cache relationship once; L1 sums Data and Instruction or Unified cache records.
 Failures can leave individual fields absent. The variable-length SDK records are
-bounded and validated. Base MHz remains unavailable rather than reusing max MHz
-or parsing the brand string.
+bounded and validated. Base MHz uses Intel CPUID leaf 0x16 EAX bits 15:0 when
+available and nonzero. Otherwise Intel's CPUID brand-string frequency suffix is
+used as documented by the Intel SDM. Both paths require GenuineIntel; the brand
+path checks extended-leaf support and validates its frequency suffix. Missing or
+unsupported values remain unavailable. Current, maximum and boost frequency are
+never substituted for base frequency, and the UI receives the resolved number.
 
 Virtualization hardware support means the visible Intel VMX/AMD SVM CPUID feature,
 not a claim about features hidden by another layer. A detected hypervisor leaves
