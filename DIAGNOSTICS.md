@@ -8,6 +8,7 @@ uniproc-windows-agent.exe dump --format json --output diagnostic.json
 uniproc-windows-agent.exe dump --format text --output diagnostic.txt
 uniproc-windows-agent.exe dump --input diagnostic.json --format text --output diagnostic-rendered.txt
 uniproc-windows-agent.exe dump --duration-ms 5000 --interval-ms 1000 --format json --output diagnostic-5s.json
+uniproc-windows-agent.exe dump --include-sensitive --format json --output diagnostic-private.json
 ```
 
 The command reads the running service's protected loopback access record. The
@@ -55,10 +56,23 @@ host behind a hypervisor. Temperature backend file versions and hashes complemen
 the actual sensor statuses and error messages in machine samples.
 
 No power-plan or battery inventory is collected. Existing process throttling and
-GPU power fields remain in the raw monitoring models. Computer/user names, serial
-numbers and MAC addresses are not requested for system inventory. Existing process
-passports and service records retain their original user, command-line and path
-fields because this is a complete dump of the service's data.
+GPU power fields remain in the monitoring models. Computer/user names, serial
+numbers and MAC addresses are not requested for system inventory.
+
+Output is pseudonymized by default, both inside the service and when the CLI reads
+an older JSON report. User and service identities, process labels, arguments,
+paths, device identifiers and free-form errors are replaced with per-report
+aliases. Corresponding values and service keys in raw frames, events, field paths,
+formatted strings and issues share aliases. The reverse mapping is not exported.
+Numeric raw counters remain exact. Replaced field observations have `redacted:true`;
+the report's `privacy` section records this policy. This is pseudonymization, not
+a guarantee of anonymity: timestamps, hardware models, OS/driver versions and
+numeric measurements are retained and can fingerprint a computer.
+
+Original text requires explicit `--include-sensitive`. With `--input`, that flag
+preserves whatever the input contains; it cannot recover already removed text.
+Old reports are not overwritten or automatically sanitized in place. In particular,
+the first local verification capture predates this default and remains private.
 
 One collection runs at a time. Requests are limited to 30 seconds, 16 observations,
 64 MiB of raw data and 500000 field observations. Exceeding a limit returns an

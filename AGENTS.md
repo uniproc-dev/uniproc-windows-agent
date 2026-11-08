@@ -127,6 +127,13 @@ service's authenticated loopback diagnostics endpoint to collect every metric.
 The access record is administrator-only. `--format summary` is the default;
 `--format text` prints all field observations. `--input report.json` renders a
 saved report without collecting again or requiring elevation. See DIAGNOSTICS.md.
+Both the service endpoint and offline CLI output pseudonymize identities, process
+labels, paths, arguments and free-form errors by default. Original text needs
+explicit `--include-sensitive`. Aliases are per-report, consistent across duplicate
+values and service keys, and no reverse mapping is exported. Numeric raw values
+remain unchanged. Hardware, versions and timing can still fingerprint a machine;
+do not describe this as guaranteed anonymity. Historical private reports are not
+silently rewritten.
 
 All sampling and CIM inventory run inside the service. The command never starts
 another monitor. The core derives JSON Schema and generates column metadata from

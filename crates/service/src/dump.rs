@@ -14,6 +14,11 @@ pub enum Format {
 
 #[derive(Args)]
 pub struct Options {
+    #[arg(
+        long,
+        help = "Include original identities, paths, arguments and error text"
+    )]
+    include_sensitive: bool,
     #[arg(long)]
     input: Option<PathBuf>,
     #[arg(long, value_enum, default_value = "summary")]
@@ -28,6 +33,7 @@ pub struct Options {
 
 pub fn run(options: Options) -> Result<()> {
     let Options {
+        include_sensitive,
         input,
         format,
         duration_ms,
@@ -67,7 +73,7 @@ pub fn run(options: Options) -> Result<()> {
             .build()
             .into();
         let address = format!(
-            "{}/diagnostics?duration_ms={duration_ms}&interval_ms={interval_ms}",
+            "{}/diagnostics?duration_ms={duration_ms}&interval_ms={interval_ms}&include_sensitive={include_sensitive}",
             access.url.trim_end_matches('/')
         );
         let mut response = client
@@ -83,8 +89,9 @@ pub fn run(options: Options) -> Result<()> {
             .limit(256 * 1024 * 1024)
             .read_to_vec()?
     };
-    let report: serde_json::Value =
+    let mut report: serde_json::Value =
         serde_json::from_slice(&bytes).context("Invalid diagnostic JSON")?;
+    uniproc_windows_http::diagnostics::apply_privacy(&mut report, include_sensitive);
     let text = match format {
         Format::Json => serde_json::to_string_pretty(&report)?,
         Format::Summary => uniproc_windows_http::diagnostics::render(&report, false),

@@ -1,5 +1,6 @@
 mod context;
 mod fields;
+mod privacy;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,6 +32,8 @@ impl Drop for Collection {
 
 #[derive(Deserialize)]
 pub(super) struct Options {
+    #[serde(default)]
+    include_sensitive: bool,
     #[serde(default = "duration")]
     duration_ms: u64,
     #[serde(default = "interval")]
@@ -211,7 +214,7 @@ async fn collect(app: &App, options: Options) -> Result<Value, String> {
         Some("unclassified") => 3,
         _ => 4,
     });
-    Ok(json!({
+    let mut report = json!({
         "schema_version":1,
         "collection":{"started_unix_ms":started_unix_ms,"elapsed_ms":started.elapsed().as_millis() as u64,"requested_duration_ms":options.duration_ms,"requested_interval_ms":options.interval_ms,"samples":raw.len(),"sample_ages_ms_at_completion":sample_ages_ms,"raw_bytes":raw_bytes,"reconnections":0,"transport":"service-local diagnostic subscription","power_inventory":"excluded"},
         "service":{"version":env!("CARGO_PKG_VERSION"),"commit":env!("UNIPROC_BUILD_COMMIT"),"pid":std::process::id(),"protocol":format!("{}.{}.{}",uniproc_windows_agent::wire::PROTOCOL.version.major,uniproc_windows_agent::wire::PROTOCOL.version.minor,uniproc_windows_agent::wire::PROTOCOL.version.patch)},
@@ -219,7 +222,13 @@ async fn collect(app: &App, options: Options) -> Result<Value, String> {
         "cpu_context":cpu_context,"system":system,"health_before":health_before,"health_after":after,"service_statuses_after_samples":service_statuses,
         "raw_samples":raw,"events":batches,"fields":all_fields,"derived_cpu_percentages":derived,"coverage":observations,"issues":issues,
         "source_observability":{"support":"schema catalog lists implemented capabilities","startup":"ETW session running/pumping states are current observations; historical startup errors are not retained by this API","ingestion":"per-field availability, event history and cumulative loss counters; no events during an interval does not prove source failure","field_failure_reasons":"unknown when the underlying provider exposes only null or a sentinel","reconnections":"not applicable to the in-service collector; external client reconnect history is not exposed"}
-    }))
+    });
+    privacy::apply(&mut report, options.include_sensitive);
+    Ok(report)
+}
+
+pub fn apply_privacy(report: &mut Value, include_sensitive: bool) {
+    privacy::apply(report, include_sensitive);
 }
 
 fn health(app: &App) -> Value {
@@ -420,6 +429,7 @@ mod tests {
     fn bounded_collection_requires_multiple_observations() {
         assert!(
             Options {
+                include_sensitive: false,
                 duration_ms: 3000,
                 interval_ms: 1000
             }
@@ -428,14 +438,17 @@ mod tests {
         );
         for options in [
             Options {
+                include_sensitive: false,
                 duration_ms: 0,
                 interval_ms: 1000,
             },
             Options {
+                include_sensitive: false,
                 duration_ms: 30000,
                 interval_ms: 100,
             },
             Options {
+                include_sensitive: false,
                 duration_ms: 30001,
                 interval_ms: 1000,
             },
