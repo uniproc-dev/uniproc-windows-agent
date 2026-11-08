@@ -2,6 +2,10 @@ use serde_json::{Value, json};
 
 use crate::{Columns, Process, ProcessEventBatch, ProcessState, Sample, SessionHealth};
 
+pub fn now_100ns() -> u64 {
+    crate::sample::now_100ns()
+}
+
 #[allow(dead_code)]
 #[derive(schemars::JsonSchema)]
 struct CoreModels {
