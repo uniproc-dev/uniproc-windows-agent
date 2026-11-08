@@ -18,8 +18,8 @@ pub fn read() -> Arc<CpuInventory> {
     cached().0.clone()
 }
 
-fn cached() -> &'static (Arc<CpuInventory>, Option<&'static str>) {
-    static INVENTORY: OnceLock<(Arc<CpuInventory>, Option<&'static str>)> = OnceLock::new();
+fn cached() -> &'static (Arc<CpuInventory>, serde_json::Value) {
+    static INVENTORY: OnceLock<(Arc<CpuInventory>, serde_json::Value)> = OnceLock::new();
     INVENTORY.get_or_init(|| {
         let (inventory, source) = load();
         (Arc::new(inventory), source)
@@ -27,15 +27,14 @@ fn cached() -> &'static (Arc<CpuInventory>, Option<&'static str>) {
 }
 
 pub fn context() -> serde_json::Value {
-    let (inventory, source) = cached();
-    serde_json::json!({"base_mhz": inventory.base_mhz, "base_mhz_source": source,
-        "frequency_semantics": "nominal base frequency exposed by Intel CPUID; not current or maximum frequency"})
+    cached().1.clone()
 }
 
 #[allow(unused_unsafe)]
-fn load() -> (CpuInventory, Option<&'static str>) {
+fn load() -> (CpuInventory, serde_json::Value) {
     let logical = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS as u16) };
     let caches = query(RelationCache).and_then(|bytes| cache_totals(&bytes));
+    let cores = query(RelationProcessorCore);
     let (supported, hypervisor) = capabilities();
     let (supported, firmware) = virtualization(supported, hypervisor, || unsafe {
         IsProcessorFeaturePresent(PF_VIRT_FIRMWARE_ENABLED as u32).as_bool()
@@ -56,8 +55,9 @@ fn load() -> (CpuInventory, Option<&'static str>) {
         CpuInventory {
             active_package_count: query(RelationProcessorPackage)
                 .and_then(|bytes| processor_count(&bytes, RelationProcessorPackage)),
-            physical_core_count: query(RelationProcessorCore)
-                .and_then(|bytes| processor_count(&bytes, RelationProcessorCore)),
+            physical_core_count: cores
+                .as_deref()
+                .and_then(|bytes| processor_count(bytes, RelationProcessorCore)),
             logical_processor_count: (logical > 0).then_some(logical),
             l1_cache_bytes: caches.and_then(|totals| totals[0]),
             l2_cache_bytes: caches.and_then(|totals| totals[1]),
@@ -67,7 +67,70 @@ fn load() -> (CpuInventory, Option<&'static str>) {
             virtualization_firmware_enabled: firmware,
             hypervisor_present: hypervisor,
         },
-        source,
+        serde_json::json!({"base_mhz": base_mhz, "base_mhz_source": source,
+            "frequency_semantics": "nominal base frequency exposed by Intel CPUID; not current or maximum frequency",
+            "cpuid": identity(|leaf| unsafe { std::arch::x86_64::__cpuid(leaf) }),
+            "processor_groups": cores.as_deref().and_then(processor_groups)}),
+    )
+}
+
+fn identity(mut cpuid: impl FnMut(u32) -> std::arch::x86_64::CpuidResult) -> serde_json::Value {
+    let basic = cpuid(0);
+    let mut vendor = Vec::with_capacity(12);
+    for register in [basic.ebx, basic.edx, basic.ecx] {
+        vendor.extend_from_slice(&register.to_le_bytes());
+    }
+    let vendor = String::from_utf8(vendor)
+        .ok()
+        .filter(|value| !value.trim_matches('\0').is_empty());
+    let signature = (basic.eax >= 1).then(|| cpuid(1).eax);
+    let family = signature.map(|signature| {
+        let family = (signature >> 8) & 0xf;
+        family
+            + if family == 0xf {
+                (signature >> 20) & 0xff
+            } else {
+                0
+            }
+    });
+    let model = signature.map(|signature| {
+        let family = (signature >> 8) & 0xf;
+        ((signature >> 4) & 0xf)
+            | if family == 6 || family == 0xf {
+                ((signature >> 16) & 0xf) << 4
+            } else {
+                0
+            }
+    });
+    let extended = cpuid(0x8000_0000).eax;
+    serde_json::json!({"vendor": vendor, "family": family, "model": model,
+        "stepping": signature.map(|signature| signature & 0xf), "signature_eax": signature,
+        "max_basic_leaf": basic.eax, "max_extended_leaf": (extended >= 0x8000_0000).then_some(extended)})
+}
+
+fn processor_groups(bytes: &[u8]) -> Option<Vec<serde_json::Value>> {
+    processor_count(bytes, RelationProcessorCore)?;
+    let mut groups = std::collections::BTreeMap::<u16, usize>::new();
+    for record in records(bytes, RelationProcessorCore)? {
+        let processor =
+            unsafe { std::ptr::read_unaligned(record.as_ptr().cast::<PROCESSOR_RELATIONSHIP>()) };
+        for index in 0..usize::from(processor.GroupCount) {
+            let at =
+                offset_of!(PROCESSOR_RELATIONSHIP, GroupMask) + index * size_of::<GROUP_AFFINITY>();
+            let affinity = unsafe {
+                std::ptr::read_unaligned(record.as_ptr().add(at).cast::<GROUP_AFFINITY>())
+            };
+            *groups.entry(affinity.Group).or_default() |= affinity.Mask.0;
+        }
+    }
+    Some(
+        groups
+            .into_iter()
+            .map(|(group, mask)| {
+                serde_json::json!({"group": group,
+        "affinity_mask": mask as u64, "active_logical_processor_count": mask.count_ones()})
+            })
+            .collect(),
     )
 }
 
@@ -286,6 +349,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cpuid_identity_decodes_extended_model_family_and_unavailable_leaf() {
+        use std::arch::x86_64::CpuidResult;
+        for (signature, family, model, stepping) in
+            [(0x000a_0653, 6, 165, 3), (0x0083_0f12, 23, 49, 2)]
+        {
+            let value = identity(|leaf| match leaf {
+                0 => CpuidResult {
+                    eax: 1,
+                    ebx: u32::from_le_bytes(*b"Genu"),
+                    edx: u32::from_le_bytes(*b"ineI"),
+                    ecx: u32::from_le_bytes(*b"ntel"),
+                },
+                1 => CpuidResult {
+                    eax: signature,
+                    ebx: 0,
+                    ecx: 0,
+                    edx: 0,
+                },
+                0x8000_0000 => CpuidResult {
+                    eax: 0x8000_0004,
+                    ebx: 0,
+                    ecx: 0,
+                    edx: 0,
+                },
+                _ => panic!("unexpected leaf"),
+            });
+            assert_eq!(value["vendor"], "GenuineIntel");
+            assert_eq!(value["family"], family);
+            assert_eq!(value["model"], model);
+            assert_eq!(value["stepping"], stepping);
+            assert_eq!(value["signature_eax"], signature);
+        }
+        let value = identity(|leaf| {
+            assert_ne!(leaf, 1);
+            CpuidResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            }
+        });
+        assert!(value["family"].is_null());
+        assert!(value["stepping"].is_null());
+    }
+
+    #[test]
+    fn processor_group_affinities_are_unioned_across_cores_without_double_counting() {
+        let mut first = record(
+            RelationProcessorCore,
+            PROCESSOR_RELATIONSHIP {
+                GroupCount: 2,
+                ..Default::default()
+            },
+            size_of::<GROUP_AFFINITY>(),
+        );
+        for (index, group, mask) in [(0, 0u16, 3usize), (1, 1u16, 16usize)] {
+            let at = HEADER
+                + offset_of!(PROCESSOR_RELATIONSHIP, GroupMask)
+                + index * size_of::<GROUP_AFFINITY>();
+            first[at..at + size_of::<usize>()].copy_from_slice(&mask.to_ne_bytes());
+            let at = at + offset_of!(GROUP_AFFINITY, Group);
+            first[at..at + 2].copy_from_slice(&group.to_ne_bytes());
+        }
+        let mut second = record(
+            RelationProcessorCore,
+            PROCESSOR_RELATIONSHIP {
+                GroupCount: 1,
+                ..Default::default()
+            },
+            0,
+        );
+        let at = HEADER + offset_of!(PROCESSOR_RELATIONSHIP, GroupMask);
+        second[at..at + size_of::<usize>()].copy_from_slice(&2usize.to_ne_bytes());
+        first.extend_from_slice(&second);
+        let groups = processor_groups(&first).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["affinity_mask"], 3);
+        assert_eq!(groups[0]["active_logical_processor_count"], 2);
+        assert_eq!(groups[1]["group"], 1);
+        assert_eq!(groups[1]["active_logical_processor_count"], 1);
+        assert!(processor_groups(&first[..5]).is_none());
+    }
+
+    #[test]
     fn current_machine_inventory_is_cached() {
         let first = read();
         let second = read();
@@ -305,6 +452,7 @@ mod tests {
             "cpu_inventory={}",
             serde_json::to_string(first.as_ref()).unwrap()
         );
+        println!("cpu_context={}", context());
     }
 
     #[test]
