@@ -146,6 +146,25 @@ fn field(raw: &Value, path: &str, columns: &Value) -> Field {
 }
 
 fn unit<'a>(path: &str, key: &str, raw: &Value) -> &'a str {
+    if path.contains("/security_services_running/")
+        || path.contains("/security_services_configured/")
+        || path.contains("/cpuid/") && key == "model"
+        || matches!(key, "ubr" | "bus_type")
+    {
+        return "native code";
+    }
+    if matches!(key, "parent_sequence_number" | "number") {
+        return "identifier";
+    }
+    if key == "cpu_cycles" {
+        return "cycles";
+    }
+    if key == "peak_commit" {
+        return "bytes";
+    }
+    if matches!(key, "handles" | "hard_faults") {
+        return "count";
+    }
     if path.contains("/header/pids/")
         || path.contains("/header/sequence_numbers/")
         || path.contains("/changes/passports/")
@@ -568,5 +587,61 @@ mod tests {
         validate(&mut fields, &value, "/samples/0");
         assert_eq!(fields[0].validation, "invalid");
         assert_eq!(fields[0].raw, json!(200));
+    }
+
+    #[test]
+    fn retained_exit_counters_and_system_codes_have_units() {
+        let events = json!({"kind":{"Exited":{"cpu_cycles":9007199254740993u64,"peak_commit":1048576,"handles":0,"hard_faults":3},"Started":{"parent_sequence_number":42}}});
+        let got = fields(&events, "/events/0/events/17", &json!([]));
+        assert!(got.iter().all(|f| f.validation == "valid"));
+        assert_eq!(
+            got.iter()
+                .find(|f| f.path.ends_with("peak_commit"))
+                .unwrap()
+                .formatted,
+            "1.00 MiB"
+        );
+        assert_eq!(
+            got.iter()
+                .find(|f| f.path.ends_with("cpu_cycles"))
+                .unwrap()
+                .raw,
+            json!(9007199254740993u64)
+        );
+        for (path, value) in [
+            ("/cpu_context/cpuid/model", 165),
+            ("/system/windows/data/0/ubr", 9711),
+            ("/system/security/data/0/security_services_running/0", 2),
+            ("/system/storage/data/0/bus_type", 17),
+        ] {
+            assert_eq!(field(&json!(value), path, &json!([])).unit, "native code");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires UNIPROC_DIAGNOSTIC_REPORT pointing to a saved native dump"]
+    fn saved_native_report_has_no_unclassified_fields() {
+        let path =
+            std::env::var_os("UNIPROC_DIAGNOSTIC_REPORT").expect("set the saved report path");
+        let report: Value = serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+        let catalog = &report["catalog"]["core"]["columns"];
+        let entries = report["fields"].as_array().unwrap();
+        assert!(!entries.is_empty());
+        let unknown: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| {
+                let path = entry["path"].as_str().unwrap();
+                let classified = field(&entry["raw"], path, catalog);
+                (classified.validation == "unclassified").then_some(path)
+            })
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "unclassified source fields: {unknown:?}"
+        );
+        println!(
+            "Audited {} native field observations using current unit metadata",
+            entries.len()
+        );
     }
 }
