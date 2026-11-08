@@ -52,6 +52,11 @@ $result.storage=Read-Source 'MSFT_Disk' {
     }
 }
 $result.driver_query=$driverSource
+$result.temperature_driver=Read-Source 'Win32_SystemDriver: PawnIO/WinRing0' {
+    Get-CimInstance Win32_SystemDriver -Filter "Name='PawnIO' OR Name LIKE 'WinRing0%'" | ForEach-Object {
+        @{name=$_.Name;state=$_.State;status=$_.Status;start_mode=$_.StartMode;path=$_.PathName;file_version=$(if(Test-Path -LiteralPath $_.PathName){(Get-Item -LiteralPath $_.PathName).VersionInfo.FileVersion}else{$null})}
+    }
+}
 $result.backend=Read-Source 'Deployed temperature backend files' {
     $root=Split-Path (Get-Process -Id $env:UNIPROC_DIAGNOSTIC_SERVICE_PID).Path
     foreach($file in @('uniproc-lhm.dll','PawnIO.dll','LibreHardwareMonitorLib.dll')) {
