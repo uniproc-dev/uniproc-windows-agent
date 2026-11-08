@@ -119,3 +119,24 @@ use Toggle unknown/off/on. Valid zero and false are preserved.
 approved update; `-- --allow-missing` also accepts older peers' absent groups.
 Read-only core tests can validate current-machine topology without starting or
 restarting the service, ETW sessions, or the UI.
+
+# Full diagnostic dump
+
+`uniproc-windows-agent dump --format json --output report.json` asks the running
+service's authenticated loopback diagnostics endpoint to collect every metric.
+The access record is administrator-only. `--format summary` is the default;
+`--format text` prints all field observations. `--input report.json` renders a
+saved report without collecting again or requiring elevation. See DIAGNOSTICS.md.
+
+All sampling and CIM inventory run inside the service. The command never starts
+another monitor. The core derives JSON Schema and generates column metadata from
+the sampling declaration. New raw fields are serialized automatically; numeric
+fields with unknown diagnostic units are explicitly unclassified. Unknown causes
+of null values and sentinels are not inferred. Current ETW health is distinct from
+unreported startup history and unavailable per-field error details.
+
+Raw samples, coherent process/service lists, process instances, retained process
+events, source context, field availability, validations and counter intervals are
+preserved. No new power-plan or battery source is collected. Existing monitoring
+model fields remain present. Only one bounded diagnostic collection runs at once;
+limits fail explicitly instead of returning an apparently complete truncated dump.

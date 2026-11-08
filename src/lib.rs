@@ -9,6 +9,7 @@ pub mod wire;
 
 pub use scm::own as agent_service;
 pub use uniproc_windows_core::{data, stop_leftover_sessions};
+pub use uniproc_windows_core::diagnostics as core_diagnostics;
 
 #[allow(dead_code, non_upper_case_globals, clippy::all)]
 mod bindings;

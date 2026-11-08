@@ -2,6 +2,7 @@
 mod bindings;
 mod logger;
 mod service;
+mod dump;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -24,6 +25,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Collect all service metrics, system context and diagnostic field checks")]
+    Dump(dump::Options),
     /// Install the Windows service
     Install,
     /// Uninstall the Windows service
@@ -43,6 +46,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Command::Dump(options)) => dump::run(options)?,
         Some(Command::Install) => {
             service::install(SERVICE_NAME, SERVICE_DISPLAY_NAME, SERVICE_DESC)
                 .context("Failed to install service")?;

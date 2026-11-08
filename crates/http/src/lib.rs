@@ -4,6 +4,7 @@
 //! capnp side but the feed.
 
 mod telemetry;
+pub mod diagnostics;
 
 pub use telemetry::{Cost, Spans, Telemetry};
 
@@ -377,6 +378,7 @@ pub fn serve(agent: Arc<Local>, telemetry: Telemetry) -> io::Result<Access> {
     let app = axum::Router::new()
         .route("/state", get(snapshot))
         .route("/health", get(health))
+        .route("/diagnostics", get(diagnostics::endpoint))
         .route("/log", get(log_filter).put(set_log_filter))
         .layer(axum::middleware::from_fn(move |request, next| {
             authorized(expected.clone(), request, next)

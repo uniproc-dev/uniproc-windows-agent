@@ -30,7 +30,7 @@ pub const STOP_STEPS: u32 = 2;
 pub type CommandResult = Result<(), u32>;
 
 /// How every process runs, for exactly the processes listed under `passport_etag`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProcessStates {
     pub passport_etag: u64,
     pub states: Arc<[ProcessState]>,
@@ -84,7 +84,7 @@ pub enum Command {
     ServiceRestart { name: String },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub enum ServiceState {
     #[default]
     Unknown,
@@ -98,7 +98,7 @@ pub enum ServiceState {
 }
 
 /// One service right now, as the SCM reports it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ServiceStatus {
     pub state: ServiceState,
     /// 0 while the service has no process.
@@ -122,7 +122,7 @@ impl ServiceState {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ServiceStats {
     pub name: String,
     pub display_name: String,
@@ -139,7 +139,7 @@ pub struct ServiceStats {
     pub accepted_controls: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub enum ServiceStartType {
     #[default]
     Unknown,
@@ -151,25 +151,30 @@ pub enum ServiceStartType {
 }
 
 /// What a process is. Fixed for its lifetime.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProcessInfo {
     pub pid: u32,
     pub parent_pid: u32,
     pub session_id: u32,
     /// Exactly what the OS reports; for matching and grouping.
+    #[schemars(with = "String")]
     pub name: SmolStr,
     /// Shared with the core's passport; cloning it copies no argument.
     pub cmdline: Arc<[String]>,
+    #[schemars(with = "String")]
     pub package_full_name: SmolStr,
+    #[schemars(with = "String")]
     pub package_relative_app_id: SmolStr,
 
     pub is_service: bool,
     pub is_kernel_process: bool,
     pub is_windows_process: bool,
     pub signature: SignatureStatus,
+    #[schemars(with = "String")]
     pub image_path: SmolStr,
 
     /// For display only; empty when nothing resolved, then show `name`.
+    #[schemars(with = "String")]
     pub display_name: SmolStr,
 
     /// Pid of the conhost serving the process's console, or 0.
@@ -181,6 +186,7 @@ pub struct ProcessInfo {
     /// only for the Idle process.
     pub sequence_number: u64,
     /// `DOMAIN\name` of the token's user.
+    #[schemars(with = "String")]
     pub user: SmolStr,
     pub architecture: Architecture,
     pub elevated: Option<bool>,
@@ -190,5 +196,6 @@ pub struct ProcessInfo {
     /// `None` when the process could not be queried.
     pub mitigations: Option<Mitigations>,
     /// A package's PublisherDisplayName, otherwise the signer's subject name.
+    #[schemars(with = "String")]
     pub publisher: SmolStr,
 }
