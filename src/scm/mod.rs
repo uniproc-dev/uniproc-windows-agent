@@ -79,6 +79,11 @@ impl Services {
 }
 
 impl ServiceControl {
+    pub fn status(&self, name: &str) -> Result<ServiceStatus, u32> {
+        let connection = self.scm.connection()?;
+        Service::open(connection.handle(), name, crate::bindings::SERVICE_QUERY_STATUS)
+            .and_then(|service|service.query_status()).map_err(|e|win32_code(&e))
+    }
     /// The service's status now, then every change until the stream is dropped.
     pub fn watch(&self, name: &str) -> ServiceWatch {
         self.watching.watch(name)
@@ -174,6 +179,10 @@ impl Drop for Service {
 
 impl Service {
     fn status(&self) -> Option<ServiceStatus> {
+        self.query_status().ok()
+    }
+
+    fn query_status(&self) -> windows_core::Result<ServiceStatus> {
         let mut raw = SERVICE_STATUS_PROCESS::default();
         let mut needed = 0;
         unsafe {
@@ -185,9 +194,8 @@ impl Service {
                 &mut needed,
             )
         }
-        .ok()
         .ok()?;
-        Some(status(&raw))
+        Ok(status(&raw))
     }
 }
 

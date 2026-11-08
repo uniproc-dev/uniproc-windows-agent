@@ -191,6 +191,10 @@ impl Local {
         self.services.watch(name)
     }
 
+    pub fn service_status(&self, name: &str) -> Result<crate::api::ServiceStatus,u32> {
+        self.services.status(name)
+    }
+
     /// The process starts and exits held, about the last hour, then each one
     /// as it happens. Ends when monitoring stops.
     pub fn watch_process_events(&self) -> LocalProcessEvents {

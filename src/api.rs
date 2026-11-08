@@ -56,7 +56,7 @@ pub struct Update {
 
 /// What moved in the lists since the update before, keyed by pid and
 /// sequence number, the join key of the sample.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Changes {
     /// No update came before, or the lists were fetched again: everything is new.
     pub full: bool,

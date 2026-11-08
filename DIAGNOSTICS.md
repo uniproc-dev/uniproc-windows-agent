@@ -23,7 +23,9 @@ Manager's frequency adjustment.
 The default requests all process and machine metrics for four observations at a
 one-second interval. Process passports, states, service lists, process event
 history, sparse GPU-engine counters and health accompany the samples. Frames
-preserve their original list tags, PIDs and sequence numbers. Rate joins use
+preserve their original list tags, PIDs and sequence numbers. Current SCM statuses are queried
+separately after sampling, retaining exit codes, checkpoints, wait hints and exact
+Win32 query errors. The snapshot lists and changes remain intact. Rate joins use
 process instances and adapter/engine identities. Rates preserve both integers,
 the actual sample interval and the integer delta. Decreasing counters produce a
 reset status unless their catalog explicitly declares wrapping.

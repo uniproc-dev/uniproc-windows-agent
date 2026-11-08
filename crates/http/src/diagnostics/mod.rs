@@ -162,12 +162,47 @@ async fn collect(app: &App, options: Options) -> Result<Value, String> {
         }
     }
     let system = inventory.await.map_err(|e| e.to_string())?;
+    let agent = app.agent.clone();
+    let service_statuses = tokio::task::spawn_blocking(move || {
+        agent
+            .services()
+            .value
+            .iter()
+            .map(|service| {
+                let value = match agent.service_status(&service.name) {
+                    Ok(status) => json!({"status":"available","value":status,"win32_error":null}),
+                    Err(error) => json!({"status":"error","value":null,"win32_error":error}),
+                };
+                (service.name.clone(), value)
+            })
+            .collect::<BTreeMap<_, _>>()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     let after = health(app);
     let cpu_context = core_diagnostics::cpu_context();
+    let completed_at = core_diagnostics::now_100ns();
+    let sample_ages_ms: Vec<_> = raw
+        .iter()
+        .map(|frame| {
+            frame["sample"]["sampled_at"]
+                .as_u64()
+                .filter(|&at| at > 0 && completed_at >= at)
+                .map(|at| (completed_at - at) / 10_000)
+        })
+        .collect();
     all_fields.extend(fields::fields(&cpu_context, "/cpu_context", columns));
     all_fields.extend(fields::fields(&system, "/system", columns));
     all_fields.extend(fields::fields(&after, "/health", columns));
+    all_fields.extend(fields::fields(
+        &json!(service_statuses),
+        "/service_statuses",
+        columns,
+    ));
     all_fields.extend(fields::fields(&json!(batches), "/events", columns));
+    if all_fields.len() > MAX_FIELDS {
+        return Err("dump exceeded 500000 field observations including context and history".into());
+    }
     let mut issues: Vec<_> = all_fields.iter().filter(|f| f.validation != "valid" || matches!(f.availability.as_str(),"error"|"unavailable")).map(|f| json!({"path":f.path,"raw":f.raw,"availability":f.availability,"validation":f.validation,"reason":f.reason})).collect();
     issues.sort_by_key(|issue| match issue["validation"].as_str() {
         Some("invalid") => 0,
@@ -178,10 +213,10 @@ async fn collect(app: &App, options: Options) -> Result<Value, String> {
     });
     Ok(json!({
         "schema_version":1,
-        "collection":{"started_unix_ms":started_unix_ms,"elapsed_ms":started.elapsed().as_millis() as u64,"requested_duration_ms":options.duration_ms,"requested_interval_ms":options.interval_ms,"samples":raw.len(),"raw_bytes":raw_bytes,"reconnections":0,"transport":"service-local diagnostic subscription","power_inventory":"excluded"},
+        "collection":{"started_unix_ms":started_unix_ms,"elapsed_ms":started.elapsed().as_millis() as u64,"requested_duration_ms":options.duration_ms,"requested_interval_ms":options.interval_ms,"samples":raw.len(),"sample_ages_ms_at_completion":sample_ages_ms,"raw_bytes":raw_bytes,"reconnections":0,"transport":"service-local diagnostic subscription","power_inventory":"excluded"},
         "service":{"version":env!("CARGO_PKG_VERSION"),"commit":env!("UNIPROC_BUILD_COMMIT"),"pid":std::process::id(),"protocol":format!("{}.{}.{}",uniproc_windows_agent::wire::PROTOCOL.version.major,uniproc_windows_agent::wire::PROTOCOL.version.minor,uniproc_windows_agent::wire::PROTOCOL.version.patch)},
-        "catalog":{"core":catalog,"process_info":schemars::schema_for!(ProcessInfo),"services":schemars::schema_for!(ServiceStats),"formatting":"diagnostic IEC bytes; GHz; native units; rates per second, independent of localized UI"},
-        "cpu_context":cpu_context,"system":system,"health_before":health_before,"health_after":after,
+        "catalog":{"core":catalog,"process_info":schemars::schema_for!(ProcessInfo),"services":schemars::schema_for!(ServiceStats),"service_status":schemars::schema_for!(uniproc_windows_agent::api::ServiceStatus),"formatting":"diagnostic IEC bytes; GHz; native units; rates per second, independent of localized UI"},
+        "cpu_context":cpu_context,"system":system,"health_before":health_before,"health_after":after,"service_statuses_after_samples":service_statuses,
         "raw_samples":raw,"events":batches,"fields":all_fields,"derived_cpu_percentages":derived,"coverage":observations,"issues":issues,
         "source_observability":{"support":"schema catalog lists implemented capabilities","startup":"ETW session running/pumping states are current observations; historical startup errors are not retained by this API","ingestion":"per-field availability, event history and cumulative loss counters; no events during an interval does not prove source failure","field_failure_reasons":"unknown when the underlying provider exposes only null or a sentinel","reconnections":"not applicable to the in-service collector; external client reconnect history is not exposed"}
     }))
@@ -193,13 +228,18 @@ fn health(app: &App) -> Value {
 }
 
 fn raw_frame(update: &Update) -> Result<Value, String> {
+    let Update {
+        snapshot,
+        sample,
+        changes,
+    } = update;
     let Snapshot {
         services,
         processes,
         states,
-    } = &update.snapshot;
+    } = snapshot;
     Ok(
-        json!({"sample":serde_json::to_value(&update.sample).map_err(|e|e.to_string())?,"snapshot":{"services":{"etag":services.etag,"value":services.value},"processes":{"etag":processes.etag,"value":processes.value},"states":{"etag":states.etag,"value":states.value}}}),
+        json!({"sample":serde_json::to_value(sample).map_err(|e|e.to_string())?,"changes":changes,"snapshot":{"services":{"etag":services.etag,"value":services.value},"processes":{"etag":processes.etag,"value":processes.value},"states":{"etag":states.etag,"value":states.value}}}),
     )
 }
 
@@ -274,25 +314,31 @@ fn normalize(update: &Update) -> Result<Value, String> {
         .iter()
         .map(|s| (s.name.clone(), s))
         .collect();
-    let sparse: BTreeMap<_, _> = sample
-        .gpu_engines
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .map(|engine| {
-            let row = engine.row as usize;
-            let key = format!(
-                "{}:{}:{}:{}",
-                sample.pids.get(row).copied().unwrap_or(0),
-                sample.sequence_numbers.get(row).copied().unwrap_or(0),
-                engine.adapter_luid,
-                engine.engine
-            );
-            (key, engine)
-        })
-        .collect();
+    let sparse: Option<BTreeMap<_, _>> = sample.gpu_engines.as_ref().map(|engines| {
+        engines
+            .iter()
+            .map(|engine| {
+                let row = engine.row as usize;
+                let key = format!(
+                    "{}:{}:{}:{}",
+                    sample.pids.get(row).copied().unwrap_or(0),
+                    sample.sequence_numbers.get(row).copied().unwrap_or(0),
+                    engine.adapter_luid,
+                    engine.engine
+                );
+                (key, engine)
+            })
+            .collect()
+    });
+    let mut header = serde_json::to_value(sample).map_err(|e| e.to_string())?;
+    for key in ["columns", "machine", "gpu_engines"] {
+        header
+            .as_object_mut()
+            .ok_or("sample is not an object")?
+            .remove(key);
+    }
     Ok(
-        json!({"sampled_at":sample.sampled_at,"header":{"snapshot":sample.snapshot,"passport_etag":sample.passport_etag,"period":sample.period,"wanted":sample.wanted},"machine":machine,"processes":processes,"services":services,"gpu_engines":sparse}),
+        json!({"sampled_at":sample.sampled_at,"header":header,"list_tags":{"services":update.snapshot.services.etag,"processes":update.snapshot.processes.etag,"states":update.snapshot.states.etag,"states_passport":update.snapshot.states.value.passport_etag},"changes":update.changes,"machine":machine,"processes":processes,"services":services,"gpu_engines":sparse}),
     )
 }
 
@@ -303,7 +349,7 @@ fn coverage(sample: &Value, columns: &Value) -> Value {
         let available = sample["processes"].as_object().into_iter().flat_map(|p|p.values()).filter(|p| !p["metrics"][name].is_null() && !(column["sentinel"].is_number() && column["sentinel"] == p["metrics"][name])).count();
         json!({"metric":column["metric"],"column":name,"requested":true,"rows":count,"available":available,"unavailable":count-available})
     }).collect();
-    json!({"process_metrics":metrics,"machine_groups":sample["machine"].as_object().map(|groups|groups.iter().map(|(name,value)|json!({"group":name,"requested":true,"availability":if value.is_null(){"unavailable"}else{"available"}})).collect::<Vec<_>>())})
+    json!({"process_metrics":metrics,"sparse_process_metrics":[{"metric":"GpuEngines","requested":true,"availability":if sample["gpu_engines"].is_null(){"unavailable"}else{"available"},"entries":sample["gpu_engines"].as_object().map(|v|v.len())}],"machine_groups":sample["machine"].as_object().map(|groups|groups.iter().map(|(name,value)|json!({"group":name,"requested":true,"availability":if value.is_null(){"unavailable"}else{"available"}})).collect::<Vec<_>>())})
 }
 
 pub fn render(report: &Value, full: bool) -> String {
@@ -443,8 +489,11 @@ mod tests {
             catalog["columns"].as_array().unwrap().len()
         );
         assert!(value["processes"]["7:99"]["metrics"]["handles"].is_null());
+        assert!(value["gpu_engines"].is_null());
+        assert_eq!(value["header"]["pids"], json!([7]));
         let raw = raw_frame(&update).unwrap();
         assert_eq!(raw["sample"]["columns"]["working_set"], json!([0]));
         assert_eq!(raw["snapshot"]["processes"]["etag"], 2);
+        assert_eq!(raw["changes"]["full"], false);
     }
 }

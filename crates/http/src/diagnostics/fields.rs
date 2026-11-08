@@ -146,6 +146,15 @@ fn field(raw: &Value, path: &str, columns: &Value) -> Field {
 }
 
 fn unit<'a>(path: &str, key: &str, raw: &Value) -> &'a str {
+    if path.contains("/header/pids/")
+        || path.contains("/header/sequence_numbers/")
+        || path.contains("/changes/passports/")
+        || path.contains("/changes/left/")
+        || path.contains("/changes/states/")
+        || path.contains("/list_tags/")
+    {
+        return "identifier";
+    }
     if raw.is_boolean() {
         return "boolean";
     }
@@ -256,6 +265,9 @@ fn unit<'a>(path: &str, key: &str, raw: &Value) -> &'a str {
     }
     if key == "group" {
         return "identifier";
+    }
+    if key == "win32_error" {
+        return "Win32 error code";
     }
     if matches!(
         key,
