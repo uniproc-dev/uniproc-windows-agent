@@ -19,6 +19,7 @@ pub fn read() -> Arc<CpuInventory> {
     INVENTORY.get_or_init(|| Arc::new(load())).clone()
 }
 
+#[allow(unused_unsafe)]
 fn load() -> CpuInventory {
     let logical = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS as u16) };
     let caches = query(RelationCache).and_then(|bytes| cache_totals(&bytes));
@@ -35,11 +36,79 @@ fn load() -> CpuInventory {
         l1_cache_bytes: caches.and_then(|totals| totals[0]),
         l2_cache_bytes: caches.and_then(|totals| totals[1]),
         l3_cache_bytes: caches.and_then(|totals| totals[2]),
-        base_mhz: None,
+        base_mhz: base_frequency(|leaf| unsafe { std::arch::x86_64::__cpuid(leaf) }),
         virtualization_hardware_supported: supported,
         virtualization_firmware_enabled: firmware,
         hypervisor_present: hypervisor,
     }
+}
+
+fn base_frequency(mut cpuid: impl FnMut(u32) -> std::arch::x86_64::CpuidResult) -> Option<u32> {
+    let basic = cpuid(0);
+    if basic.ebx != u32::from_le_bytes(*b"Genu")
+        || basic.edx != u32::from_le_bytes(*b"ineI")
+        || basic.ecx != u32::from_le_bytes(*b"ntel")
+    {
+        return None;
+    }
+    if basic.eax >= 0x16 {
+        let mhz = cpuid(0x16).eax & 0xffff;
+        if mhz > 0 {
+            return Some(mhz);
+        }
+    }
+    if cpuid(0x8000_0000).eax < 0x8000_0004 {
+        return None;
+    }
+    let mut brand = [0u8; 48];
+    for (index, chunk) in brand.chunks_exact_mut(16).enumerate() {
+        let value = cpuid(0x8000_0002 + index as u32);
+        for (bytes, register) in chunk
+            .chunks_exact_mut(4)
+            .zip([value.eax, value.ebx, value.ecx, value.edx])
+        {
+            bytes.copy_from_slice(&register.to_le_bytes());
+        }
+    }
+    brand_frequency(
+        std::str::from_utf8(&brand)
+            .ok()?
+            .trim_end_matches('\0')
+            .trim(),
+    )
+}
+
+fn brand_frequency(brand: &str) -> Option<u32> {
+    let frequency = brand.split_whitespace().last()?;
+    let mhz = if let Some(value) = frequency.strip_suffix("GHz") {
+        let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+        if whole.is_empty()
+            || value.ends_with('.')
+            || fraction.len() > 3
+            || !whole
+                .bytes()
+                .chain(fraction.bytes())
+                .all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        whole
+            .parse::<u32>()
+            .ok()?
+            .checked_mul(1000)?
+            .checked_add(if fraction.is_empty() {
+                0
+            } else {
+                fraction.parse::<u32>().ok()? * 10u32.pow(3 - fraction.len() as u32)
+            })?
+    } else {
+        let value = frequency.strip_suffix("MHz")?;
+        if !value.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        value.parse().ok()?
+    };
+    (mhz > 0).then_some(mhz)
 }
 
 fn virtualization(
@@ -189,7 +258,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_machine_inventory_is_cached_and_keeps_unknown_base_speed() {
+    fn current_machine_inventory_is_cached() {
         let first = read();
         let second = read();
         assert!(Arc::ptr_eq(&first, &second));
@@ -203,11 +272,137 @@ mod tests {
         {
             assert!(count > 0 && count <= logical);
         }
-        assert_eq!(first.base_mhz, None);
+        assert!(first.base_mhz.is_none_or(|mhz| mhz > 0));
         println!(
             "cpu_inventory={}",
             serde_json::to_string(first.as_ref()).unwrap()
         );
+    }
+
+    #[test]
+    fn base_frequency_uses_only_the_supported_intel_base_leaf_field() {
+        use std::arch::x86_64::CpuidResult;
+        let intel = CpuidResult {
+            eax: 0x16,
+            ebx: u32::from_le_bytes(*b"Genu"),
+            edx: u32::from_le_bytes(*b"ineI"),
+            ecx: u32::from_le_bytes(*b"ntel"),
+        };
+        assert_eq!(
+            base_frequency(|leaf| match leaf {
+                0 => intel,
+                0x16 => CpuidResult {
+                    eax: 0xffff_0b54,
+                    ebx: 4300,
+                    ecx: 100,
+                    edx: 0
+                },
+                _ => panic!("unexpected CPUID leaf"),
+            }),
+            Some(2900)
+        );
+        assert_eq!(
+            base_frequency(|leaf| if leaf == 0 {
+                intel
+            } else {
+                CpuidResult {
+                    eax: 0,
+                    ebx: 4300,
+                    ecx: 100,
+                    edx: 0,
+                }
+            }),
+            None
+        );
+        for basic in [CpuidResult { ebx: 0, ..intel }] {
+            assert_eq!(
+                base_frequency(|leaf| {
+                    assert_eq!(leaf, 0);
+                    basic
+                }),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn intel_brand_frequency_is_nominal_and_missing_or_malformed_stays_unknown() {
+        assert_eq!(
+            brand_frequency("Intel(R) Core(TM) i5-10400F CPU @ 2.90GHz"),
+            Some(2900)
+        );
+        assert_eq!(brand_frequency("Intel CPU 1500MHz"), Some(1500));
+        for brand in [
+            "Intel CPU",
+            "Intel CPU @ 0GHz",
+            "Intel CPU @ -2.90GHz",
+            "Intel CPU @ 2.9001GHz",
+            "Intel CPU @ 2.9e0GHz",
+            "Intel CPU @ 2.GHz",
+        ] {
+            assert_eq!(brand_frequency(brand), None);
+        }
+    }
+
+    #[test]
+    fn base_frequency_fallback_checks_extended_leaf_bounds_and_decodes_all_brand_registers() {
+        use std::arch::x86_64::CpuidResult;
+        let intel = CpuidResult {
+            eax: 0x15,
+            ebx: u32::from_le_bytes(*b"Genu"),
+            edx: u32::from_le_bytes(*b"ineI"),
+            ecx: u32::from_le_bytes(*b"ntel"),
+        };
+        let zero = CpuidResult {
+            eax: 0,
+            ebx: 0,
+            ecx: 0,
+            edx: 0,
+        };
+        assert_eq!(
+            base_frequency(|leaf| match leaf {
+                0 => intel,
+                0x8000_0000 => CpuidResult {
+                    eax: 0x8000_0003,
+                    ..zero
+                },
+                _ => panic!("unsupported leaf was queried"),
+            }),
+            None
+        );
+        let mut brand = [0u8; 48];
+        let text = b"Intel(R) Core(TM) i5-10400F CPU @ 2.90GHz";
+        brand[..text.len()].copy_from_slice(text);
+        for maximum in [0x15, 0x16] {
+            assert_eq!(
+                base_frequency(|leaf| match leaf {
+                    0 => CpuidResult {
+                        eax: maximum,
+                        ..intel
+                    },
+                    0x16 => zero,
+                    0x8000_0000 => CpuidResult {
+                        eax: 0x8000_0004,
+                        ..zero
+                    },
+                    0x8000_0002..=0x8000_0004 => {
+                        let at = (leaf - 0x8000_0002) as usize * 16;
+                        let words: Vec<u32> = brand[at..at + 16]
+                            .chunks_exact(4)
+                            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+                            .collect();
+                        CpuidResult {
+                            eax: words[0],
+                            ebx: words[1],
+                            ecx: words[2],
+                            edx: words[3],
+                        }
+                    }
+                    _ => panic!("unexpected leaf"),
+                }),
+                Some(2900)
+            );
+        }
     }
 
     #[test]
