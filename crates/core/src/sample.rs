@@ -465,6 +465,7 @@ pub struct MachineSystemStats {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct CpuInventory {
+    pub details: Option<Arc<CpuDetails>>,
     pub active_package_count: Option<u32>,
     pub physical_core_count: Option<u32>,
     pub logical_processor_count: Option<u32>,
@@ -475,6 +476,25 @@ pub struct CpuInventory {
     pub virtualization_hardware_supported: Option<bool>,
     pub virtualization_firmware_enabled: Option<bool>,
     pub hypervisor_present: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub enum CpuInstructionSetSemantics {
+    #[default]
+    Unknown,
+    OsUsable,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct CpuDetails {
+    pub vendor: Option<SmolStr>,
+    pub family: Option<u32>,
+    pub model: Option<u32>,
+    pub stepping: Option<u32>,
+    pub microcode_revision: Option<u64>,
+    pub instruction_sets: Option<Arc<[SmolStr]>>,
+    pub instruction_sets_semantics: CpuInstructionSetSemantics,
+    pub instruction_sets_scope: SmolStr,
 }
 
 /// A group is `None` when nobody asked for it or it could not be read.

@@ -51,8 +51,12 @@ fn load() -> (CpuInventory, serde_json::Value) {
             "cpuid_16h"
         }
     });
+    let (details, cpuid_context) =
+        identity_with_details(|leaf| unsafe { std::arch::x86_64::__cpuid(leaf) });
+    let details = super::cpu_details::complete(details);
     (
         CpuInventory {
+            details: Some(Arc::new(details)),
             active_package_count: query(RelationProcessorPackage)
                 .and_then(|bytes| processor_count(&bytes, RelationProcessorPackage)),
             physical_core_count: cores
@@ -69,45 +73,38 @@ fn load() -> (CpuInventory, serde_json::Value) {
         },
         serde_json::json!({"base_mhz": base_mhz, "base_mhz_source": source,
             "frequency_semantics": "nominal base frequency exposed by Intel CPUID; not current or maximum frequency",
-            "cpuid": identity(|leaf| unsafe { std::arch::x86_64::__cpuid(leaf) }),
+            "cpuid": cpuid_context,
             "processor_groups": cores.as_deref().and_then(processor_groups)}),
     )
 }
 
-fn identity(mut cpuid: impl FnMut(u32) -> std::arch::x86_64::CpuidResult) -> serde_json::Value {
-    let basic = cpuid(0);
-    let mut vendor = Vec::with_capacity(12);
-    for register in [basic.ebx, basic.edx, basic.ecx] {
-        vendor.extend_from_slice(&register.to_le_bytes());
-    }
-    let vendor = String::from_utf8(vendor)
-        .ok()
-        .filter(|value| !value.trim_matches('\0').is_empty());
-    let signature = (basic.eax >= 1).then(|| cpuid(1).eax);
-    let family = signature.map(|signature| {
-        let family = (signature >> 8) & 0xf;
-        family
-            + if family == 0xf {
-                (signature >> 20) & 0xff
-            } else {
-                0
-            }
-    });
-    let model = signature.map(|signature| {
-        let family = (signature >> 8) & 0xf;
-        ((signature >> 4) & 0xf)
-            | if family == 6 || family == 0xf {
-                ((signature >> 16) & 0xf) << 4
-            } else {
-                0
-            }
-    });
-    let extended = cpuid(0x8000_0000).eax;
-    serde_json::json!({"vendor": vendor, "family": family, "model": model,
-        "stepping": signature.map(|signature| signature & 0xf), "signature_eax": signature,
-        "max_basic_leaf": basic.eax, "max_extended_leaf": (extended >= 0x8000_0000).then_some(extended)})
+#[cfg(test)]
+fn identity(cpuid: impl FnMut(u32) -> std::arch::x86_64::CpuidResult) -> serde_json::Value {
+    identity_with_details(cpuid).1
 }
 
+fn identity_with_details(
+    cpuid: impl FnMut(u32) -> std::arch::x86_64::CpuidResult,
+) -> (crate::sample::CpuDetails, serde_json::Value) {
+    let reader = std::cell::RefCell::new(cpuid);
+    let basic = (reader.borrow_mut())(0);
+    let signature = (basic.eax >= 1).then(|| (reader.borrow_mut())(1).eax);
+    let extended = (reader.borrow_mut())(0x8000_0000).eax;
+    let raw = raw_cpuid::CpuId::with_cpuid_fn(|leaf, _| {
+        let value = (reader.borrow_mut())(leaf);
+        raw_cpuid::CpuIdResult {
+            eax: value.eax,
+            ebx: value.ebx,
+            ecx: value.ecx,
+            edx: value.edx,
+        }
+    });
+    let details = super::cpu_details::identity(&raw);
+    let context = serde_json::json!({"vendor": details.vendor, "family": details.family, "model": details.model,
+        "stepping": details.stepping, "signature_eax": signature,
+        "max_basic_leaf": basic.eax, "max_extended_leaf": (extended >= 0x8000_0000).then_some(extended)});
+    (details, context)
+}
 fn processor_groups(bytes: &[u8]) -> Option<Vec<serde_json::Value>> {
     processor_count(bytes, RelationProcessorCore)?;
     let mut groups = std::collections::BTreeMap::<u16, usize>::new();
@@ -448,6 +445,11 @@ mod tests {
             assert!(count > 0 && count <= logical);
         }
         assert!(first.base_mhz.is_none_or(|mhz| mhz > 0));
+        let details = serde_json::to_value(first.details.as_ref().unwrap()).unwrap();
+        let identity = context();
+        for field in ["vendor", "family", "model", "stepping"] {
+            assert_eq!(details[field], identity["cpuid"][field]);
+        }
         println!(
             "cpu_inventory={}",
             serde_json::to_string(first.as_ref()).unwrap()

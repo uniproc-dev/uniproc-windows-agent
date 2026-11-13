@@ -1,6 +1,7 @@
 mod adapters;
 mod cpu_name;
 mod cpu_inventory;
+mod cpu_details;
 mod system_stats;
 mod processor_times;
 mod sample;

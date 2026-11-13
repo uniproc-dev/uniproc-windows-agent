@@ -27,6 +27,7 @@ pub use model::{
 };
 pub use report::{Diff, Health, Process, SessionHealth, SignatureStatus};
 pub use sample::{
+    CpuDetails, CpuInstructionSetSemantics,
     CpuInventory, MachineSystemStats,
     MachineTemperatures, TemperatureCategory, TemperatureDevice, TemperatureSensor, TemperatureStatus,
     Columns, Demand, GpuAdapter, GpuEngine, GpuEngineKind, MAX_INTERVAL, MIN_INTERVAL, MachineCpu, MachineDisk,
