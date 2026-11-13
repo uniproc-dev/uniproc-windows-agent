@@ -5,6 +5,7 @@ use uniproc_windows_agent::api::{MachineMetric, MetricSpec};
 
 fn main() -> anyhow::Result<()> {
     let allow_missing = std::env::args().any(|arg| arg == "--allow-missing");
+    let require_details = std::env::args().any(|arg| arg == "--require-details");
     futures::executor::block_on(async {
         let agent = Agent::remote(Duration::from_secs(5)).await?;
         let mut sampler = agent
@@ -17,6 +18,13 @@ fn main() -> anyhow::Result<()> {
         for _ in 0..3 {
             let sample = sampler.next().await?;
             let machine = sample.machine;
+            if require_details {
+                let details = machine.cpu_inventory.as_ref().and_then(|v|v.details.as_ref()).ok_or_else(||anyhow::anyhow!("CPU details unavailable"))?;
+                anyhow::ensure!(details.vendor.is_some(),"CPU vendor unavailable");
+                anyhow::ensure!(details.family.is_some() && details.model.is_some() && details.stepping.is_some(),"CPU signature unavailable");
+                anyhow::ensure!(details.instruction_sets.is_some(),"CPU instruction set check unavailable");
+                anyhow::ensure!(details.instruction_sets_semantics == uniproc_windows_agent::api::CpuInstructionSetSemantics::OsUsable,"unexpected instruction set semantics");
+            }
             if !allow_missing {
                 anyhow::ensure!(machine.system_stats.is_some(), "system statistics unavailable");
                 anyhow::ensure!(machine.cpu_inventory.is_some(), "CPU inventory unavailable");

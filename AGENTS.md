@@ -122,6 +122,15 @@ restarting the service, ETW sessions, or the UI.
 
 # Full diagnostic dump
 
+CPU inventory additionally carries optional `details` in Windows protocol 2.16
+(uniproc-protocol v0.25.0). Vendor and decoded family/model/stepping come from
+raw-cpuid and share the cached diagnostic identity. Microcode revision remains
+unavailable without a verified source. Zero is distinct from unavailable.
+Instruction sets use the standard Rust OS-usable detector, not raw advertised
+CPUID flags. The scope is `selected_x86_features`, a sorted selection rather than
+an exhaustive ISA inventory. `None`, a known empty list and a populated list stay
+distinct. Older peers omit Details; no new metric request or peer filter exists.
+
 `uniproc-windows-agent dump --format json --output report.json` asks the running
 service's authenticated loopback diagnostics endpoint to collect every metric.
 The access record is administrator-only. `--format summary` is the default;

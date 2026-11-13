@@ -488,6 +488,12 @@ mod tests {
                     l2_cache_bytes: Some(1_572_864), l3_cache_bytes: None, base_mhz: None,
                     virtualization_hardware_supported: Some(false),
                     virtualization_firmware_enabled: None, hypervisor_present: Some(true),
+                    details: Some(Arc::new(crate::api::CpuDetails {
+                        vendor: Some("GenuineIntel".into()),family:Some(0),model:Some(165),stepping:Some(3),
+                        microcode_revision:Some(0),instruction_sets:Some(Arc::from(["AVX2".into(),"SSE2".into()])),
+                        instruction_sets_semantics:crate::api::CpuInstructionSetSemantics::OsUsable,
+                        instruction_sets_scope:"selected_x86_features".into(),
+                    })),
                 })),
                 cpu_name: Some("Intel® Core™ i5-10400F CPU @ 2.90GHz".into()),
                 temperatures: Some(Arc::new(crate::api::MachineTemperatures {
@@ -624,6 +630,21 @@ mod tests {
         let got = round_trip(&sent);
         assert_eq!(got.machine.cpu_inventory, sent.machine.cpu_inventory);
         assert!(got.machine.system_stats.is_none());
+    }
+
+    #[test]
+    fn cpu_details_preserve_absence_zero_and_empty_instruction_sets() {
+        let mut sent = full_sample();
+        for sets in [None,Some(Arc::from([])),Some(Arc::from(["SSE2".into()]))] {
+            Arc::make_mut(sent.machine.cpu_inventory.as_mut().unwrap()).details = Some(Arc::new(crate::api::CpuDetails {
+                family:Some(0),model:Some(0),stepping:Some(0),microcode_revision:Some(0),instruction_sets:sets,..Default::default()
+            }));
+            assert_eq!(round_trip(&sent).machine.cpu_inventory,sent.machine.cpu_inventory);
+        }
+        Arc::make_mut(sent.machine.cpu_inventory.as_mut().unwrap()).details = None;
+        assert_eq!(round_trip(&sent).machine.cpu_inventory,sent.machine.cpu_inventory);
+        Arc::make_mut(sent.machine.cpu_inventory.as_mut().unwrap()).details = Some(Arc::new(crate::api::CpuDetails::default()));
+        assert_eq!(round_trip(&sent).machine.cpu_inventory,sent.machine.cpu_inventory);
     }
 
     #[test]

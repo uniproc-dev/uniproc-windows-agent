@@ -662,6 +662,25 @@ fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample>
                 virtualization_hardware_supported: toggle(info.get_virtualization_hardware_supported()),
                 virtualization_firmware_enabled: toggle(info.get_virtualization_firmware_enabled()),
                 hypervisor_present: toggle(info.get_hypervisor_present()),
+                details: if info.has_details() {
+                    let details = info.get_details()?;
+                    let vendor: crate::api::SmolStr = text(details.get_vendor())?;
+                    Some(Arc::new(crate::api::CpuDetails {
+                        vendor: (!vendor.is_empty()).then_some(vendor),
+                        family: u32_value(details.get_family()),
+                        model: u32_value(details.get_model()),
+                        stepping: u32_value(details.get_stepping()),
+                        microcode_revision: u64_value(details.get_microcode_revision()),
+                        instruction_sets: if details.has_instruction_sets() {
+                            Some(details.get_instruction_sets()?.iter().map(|v|text::<crate::api::SmolStr>(v)).collect::<Result<Vec<_>,_>>()?.into())
+                        } else { None },
+                        instruction_sets_semantics: match details.get_instruction_sets_semantics() {
+                            Ok(uniproc_protocol::windows_capnp::CpuInstructionSetSemantics::OsUsable) => crate::api::CpuInstructionSetSemantics::OsUsable,
+                            _ => crate::api::CpuInstructionSetSemantics::Unknown,
+                        },
+                        instruction_sets_scope: text(details.get_instruction_sets_scope())?,
+                    }))
+                } else { None },
             }))
         } else { None },
         cpu_name: {

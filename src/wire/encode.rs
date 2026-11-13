@@ -566,6 +566,23 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         target.set_virtualization_hardware_supported(toggle(info.virtualization_hardware_supported));
         target.set_virtualization_firmware_enabled(toggle(info.virtualization_firmware_enabled));
         target.set_hypervisor_present(toggle(info.hypervisor_present));
+        if let Some(details) = &info.details {
+            let mut out = target.reborrow().init_details();
+            if let Some(vendor) = &details.vendor { out.set_vendor(vendor.as_str()); }
+            out.set_family(details.family.unwrap_or(crate::api::NO_DATA_U32));
+            out.set_model(details.model.unwrap_or(crate::api::NO_DATA_U32));
+            out.set_stepping(details.stepping.unwrap_or(crate::api::NO_DATA_U32));
+            out.set_microcode_revision(details.microcode_revision.unwrap_or(crate::api::NO_DATA_U64));
+            out.set_instruction_sets_scope(details.instruction_sets_scope.as_str());
+            out.set_instruction_sets_semantics(match details.instruction_sets_semantics {
+                crate::api::CpuInstructionSetSemantics::Unknown => uniproc_protocol::windows_capnp::CpuInstructionSetSemantics::Unknown,
+                crate::api::CpuInstructionSetSemantics::OsUsable => uniproc_protocol::windows_capnp::CpuInstructionSetSemantics::OsUsable,
+            });
+            if let Some(values) = &details.instruction_sets {
+                let mut list = out.init_instruction_sets(values.len() as u32);
+                for (index,value) in values.iter().enumerate() { list.set(index as u32,value.as_str()); }
+            }
+        }
     }
     if let Some(name) = cpu_name {
         out.reborrow().set_cpu_name(name);

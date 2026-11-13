@@ -148,11 +148,12 @@ fn field(raw: &Value, path: &str, columns: &Value) -> Field {
 fn unit<'a>(path: &str, key: &str, raw: &Value) -> &'a str {
     if path.contains("/security_services_running/")
         || path.contains("/security_services_configured/")
-        || path.contains("/cpuid/") && key == "model"
+        || (path.contains("/cpuid/") || path.contains("/cpu_inventory/details/")) && key == "model"
         || matches!(key, "ubr" | "bus_type")
     {
         return "native code";
     }
+    if key == "microcode_revision" { return "revision"; }
     if matches!(key, "parent_sequence_number" | "number") {
         return "identifier";
     }
@@ -343,6 +344,7 @@ pub fn format(raw: &Value, unit: &str) -> String {
         "ms" => format!("{:.3} s", value / 1000.0),
         "us" => format!("{:.6} s", value / 1_000_000.0),
         "MHz" => format!("{:.3} GHz", value / 1000.0),
+        "revision" => format!("0x{:X}",raw.as_u64().unwrap_or(0)),
         "Hz" => format!("{:.3} MHz", value / 1_000_000.0),
         "FILETIME 100ns" => time::OffsetDateTime::from_unix_timestamp_nanos(
             (raw.as_u64().unwrap_or(0) as i128 - 116444736000000000i128) * 100,
