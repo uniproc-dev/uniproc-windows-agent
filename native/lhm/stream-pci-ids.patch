@@ -1,0 +1,67 @@
+diff --git a/DiskInfoToolkit/PCI/PCIIDReader.cs b/DiskInfoToolkit/PCI/PCIIDReader.cs
+index 9bd4b14..a1a63c7 100644
+--- a/DiskInfoToolkit/PCI/PCIIDReader.cs
++++ b/DiskInfoToolkit/PCI/PCIIDReader.cs
+@@ -14,15 +14,6 @@ namespace DiskInfoToolkit.PCI
+ {
+     internal static class PCIIDReader
+     {
+-        #region Constructor
+-
+-        static PCIIDReader()
+-        {
+-            ReadPCIIDs();
+-        }
+-
+-        #endregion
+-
+         #region Fields
+ 
+         const string PCIIDFileName = "pci.ids.gz";
+@@ -46,28 +37,30 @@ namespace DiskInfoToolkit.PCI
+             vendorName = string.Empty;
+             deviceName = string.Empty;
+ 
+-            foreach (var vendor in _vendors)
++            string resourceName = $"{nameof(DiskInfoToolkit)}.Resources.{PCIIDFileName}";
++            using var stream = ResourceExtractor.GetResourceFileGZipStream(resourceName);
++            if (stream == null) return false;
++            using var reader = new StreamReader(stream);
++            bool selected = false;
++            string rawLine;
++            while ((rawLine = reader.ReadLine()) != null)
+             {
+-                if (vendor.ID != vendorId)
++                if (rawLine.Length == 0 || rawLine.StartsWith("#", StringComparison.Ordinal) || rawLine.StartsWith("\t\t", StringComparison.Ordinal) || (!selected && rawLine.StartsWith("\t", StringComparison.Ordinal))) continue;
++                var values = GetLineValues(rawLine.Trim());
++                if (values == null) continue;
++                if (!rawLine.StartsWith("\t", StringComparison.Ordinal))
+                 {
+-                    continue;
++                    if (selected) break;
++                    selected = values.Item1 == vendorId;
++                    if (selected) vendorName = values.Item3 ?? string.Empty;
+                 }
+-
+-                vendorName = vendor.Name ?? string.Empty;
+-
+-                foreach (var device in vendor.Devices)
++                else if (selected && values.Item1 == deviceId)
+                 {
+-                    if (device.ID == deviceId)
+-                    {
+-                        deviceName = device.Name ?? string.Empty;
+-                        break;
+-                    }
++                    deviceName = values.Item3 ?? string.Empty;
++                    break;
+                 }
+-
+-                return !string.IsNullOrWhiteSpace(vendorName) || !string.IsNullOrWhiteSpace(deviceName);
+             }
+-
+-            return false;
++            return !string.IsNullOrWhiteSpace(vendorName) || !string.IsNullOrWhiteSpace(deviceName);
+         }
+ 
+         #endregion

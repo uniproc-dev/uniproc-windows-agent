@@ -185,3 +185,23 @@ events, source context, field availability, validations and counter intervals ar
 preserved. No new power-plan or battery source is collected. Existing monitoring
 model fields remain present. Only one bounded diagnostic collection runs at once;
 limits fail explicitly instead of returning an apparently complete truncated dump.
+
+# Memory ownership
+
+Persistent signature verdicts use Store point reads/writes at the existing
+signatures/verdicts/path key. Do not construct a resident ReactiveMap for the
+entire historical catalog. The image worker already caches validated current
+verdicts. Stamp/resolver checks, old disk entries, five-second debounce and
+shutdown save_now remain part of the cache behavior.
+
+The native build additionally pins DiskInfoToolkit 2.2.2 source commit
+073a31312b9f5147340488e551e06df5f3ab9715 in native/lhm/.diskinfo-source.
+It applies diskinfo-project.patch to LHM and stream-pci-ids.patch to that
+project, then reverses all applied patches in finally. PCI names are resolved
+from the original embedded catalog for the requested IDs without retaining
+its entire object graph. PciLookupTests compares names and missing results
+with the original NuGet assembly on a distributed set of IDs. The build runs
+this test and ships both projects' source links, patches and licenses.
+Private resident pages and logical live allocation sizes are different
+measurements. Physical totals must be taken from one VMMap/page snapshot;
+do not add live allocation categories to working-set categories.

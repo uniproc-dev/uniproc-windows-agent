@@ -1,14 +1,22 @@
 Uniproc builds LibreHardwareMonitor commit
-2808d80564b6761e1b01f42fabfd966ed695fcbc with skip-unused-nvml.patch.
+2808d80564b6761e1b01f42fabfd966ed695fcbc and DiskInfoToolkit commit
+073a31312b9f5147340488e551e06df5f3ab9715 with the distributed patches.
 
-The patch adds an opt-out switch to NvidiaML.Initialize. Uniproc enables it
-because this bridge exports temperatures and CPU package watts. NVIDIA
-temperatures retain the existing NVAPI implementation. NVML-only GPU power,
-memory and PCIe metrics are not exported by this bridge.
+skip-unused-nvml.patch adds an opt-out switch to NvidiaML.Initialize.
+Uniproc enables it because this bridge exports temperatures and CPU package
+watts. NVIDIA temperatures retain NVAPI; NVML-only GPU power, memory and
+PCIe metrics are not exported.
 
-Original source:
+diskinfo-project.patch selects the pinned DiskInfoToolkit project when its
+source root is provided. stream-pci-ids.patch replaces the resident whole
+PCI catalog with a streaming lookup of the requested vendor/device. It
+retains the same embedded catalog, parser, names and missing-ID behavior.
+It does not omit controller identity or temperature readings.
+
+Original sources:
 https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/tree/2808d80564b6761e1b01f42fabfd966ed695fcbc
+https://github.com/Blacktempel/DiskInfoToolkit/tree/073a31312b9f5147340488e551e06df5f3ab9715
 Modification source:
 https://github.com/uniproc-dev/uniproc-windows-agent/tree/master/native/lhm
-The patch is distributed beside this notice. Original license and notices
-remain in LICENSE and THIRD-PARTY-NOTICES.txt.
+Patches are distributed beside this notice. Original licenses and notices
+remain in LICENSE, THIRD-PARTY-NOTICES.txt and DiskInfoToolkit-LICENSE.

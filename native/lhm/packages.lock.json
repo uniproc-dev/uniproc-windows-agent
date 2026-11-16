@@ -19,14 +19,6 @@
         "resolved": "1.2.5",
         "contentHash": "XONW0tG2Z1tB8YQ1d4/8362wGDwVo56qJgpCYUL/g0ybj5yW0hi34Uhiux9PoOGFlbEDVXD6DX//1crHLAVbfQ=="
       },
-      "DiskInfoToolkit": {
-        "type": "Transitive",
-        "resolved": "2.2.2",
-        "contentHash": "lWp9PPrC3c9Laj500DudPui9OSmzVfRnd5CL7FJ5vxYH4W7IivX1i+IgSsg7N6A1Hk5HvrZida0HLzz9QxHRgQ==",
-        "dependencies": {
-          "BlackSharp.Core": "1.2.5"
-        }
-      },
       "HidSharp": {
         "type": "Transitive",
         "resolved": "2.6.4",
@@ -173,6 +165,12 @@
         "contentHash": "ywAltakc72Oe7liNatclpyq8oiLYx0VMSjQvphlsbPbiQ9glrV3JKvn5M2xFbsOzzh8sV3QAiUdmu2AV/ffN7Q==",
         "dependencies": {
           "System.CodeDom": "10.0.14"
+        }
+      },
+      "diskinfotoolkit": {
+        "type": "Project",
+        "dependencies": {
+          "BlackSharp.Core": "[1.2.5, )"
         }
       },
       "librehardwaremonitorlib": {

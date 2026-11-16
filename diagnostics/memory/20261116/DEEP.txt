@@ -1,0 +1,102 @@
+Windows service remaining-memory investigation, 2026-11-16
+
+Units and accounting
+  MiB = 1,048,576 bytes. Private resident pages, private commit and requested
+  live allocation sizes are different measurements. A heap page may contain
+  several allocation owners and allocator bookkeeping/free space. Do not add
+  the allocation table below to a working-set table, or subtract process totals
+  from different runs as a controlled savings measurement.
+
+Ordinary 0.32.2, PID 2072, VMMap snapshot 134393219968865470
+  No measurement DLL or heap tracing enabled.
+  category                       private resident       private bytes
+  Windows heaps                    23,842,816             34,181,120
+  other private regions             9,551,872             10,522,624
+  executable/DLL copy-on-write       1,097,728              2,056,192
+  thread stacks                       323,584              1,163,264
+  total                            34,816,000             47,923,200
+  Total private resident is exactly 33.203125 MiB in this one snapshot.
+  Shared pages and file mappings are not counted as private resident.
+
+Full-startup heap capture, PID 10656, stock allocation behavior plus temporary
+GC/HeapSummary reporting. Heap snapshots enabled by image name before startup,
+then disabled and prior settings restored. Unlike the earlier per-PID trace,
+this includes early service allocations. The WPR stack database adds memory;
+its instrumented working set is not the ordinary-service baseline above.
+
+Requested live allocations exported at the heap snapshot, bytes:
+  process-event history/assembly       4,787,147
+  PDH/Perflib counter metadata         3,672,898
+  persisted signature projection      3,054,187
+  process snapshot and rows           2,430,009
+  NVIDIA/NVAPI native allocations      1,650,994
+  current process state/reports       1,574,187
+  LHM/NativeAOT native allocations     1,119,858
+  remaining Rust allocations          1,046,536
+  Windows signature/crypto caches       532,803
+  process-event input ring              394,527
+  current image-worker cache            283,132
+  other Windows native allocations      279,002
+  TDH schema/metadata                   248,716
+  state-change input ring               197,424
+  RPC                                    88,291
+  other persistence                       2,464
+  These categories partition the exported allocation sizes, not physical pages.
+  Full local owners.csv retains every allocation stack and size.
+  At the later native sample: heap allocated 21,556,685 bytes, heap committed
+  28,037,120 bytes. These counters are a nearby observation, not an atomic
+  snapshot with the ETW export. The committed-minus-allocated amount includes
+  heap overhead and free/cached blocks; it is not additional application data.
+
+Snapshot buffer
+  buffer 2,097,152 bytes; actual filled samples approximately 1.66-1.69 MB;
+  530-558 rows, capacity 1024 at 288 bytes/row. Most of the 2 MiB is needed.
+  An adaptive floor would save only a few hundred KiB on this machine.
+  In-buffer Windows string pointers prohibit moving a completed native buffer.
+
+GC owner, and reduction
+  A matching CoreCLR diagnostic host exposed the retained object types:
+  DiskInfoToolkit.PCI kept 2523 vendors, 21074 devices, 17860 subdevices and
+  tens of thousands of strings/list nodes for its entire embedded pci.ids.gz.
+  Even closing LHM left most of the catalog rooted. This is a catalog for name
+  lookup, not current sensor samples or historical temperature readings.
+  CoreCLR GC sizes are diagnostic evidence, not NativeAOT memory totals.
+
+  A streaming lookup now reads only the requested vendor/device from the same
+  compressed resource with the same parser. It does not skip controller names.
+  141 distributed lookup cases compare found/not-found, vendor and device names
+  against the original 2.2.2 NuGet assembly. All device/sensor identities matched.
+
+  The reduction was independently verified in the NativeAOT service:
+  old aggressive-GC sample: heap 6,953,240; committed 6,971,392 bytes;
+  streaming sample:        heap   641,800; committed   659,456 bytes.
+  Temporary GC instrumentation overhead exists in both observations.
+  The streaming run retained all 15 actual temperature readings and CPU watts.
+
+Signature projection reduction
+  Core commit 38f49ff uses existing amethystate Store point get/set under the
+  same signatures/verdicts/path layout. It does not construct the whole resident
+  ReactiveMap. Existing disk records, file stamp/resolver checks, write debounce
+  and shutdown save_now remain. The current image worker is already a hot cache.
+  Tests write using the legacy map, read/update via point access, reopen through
+  the legacy map and verify Unicode/dotted keys, unrelated entries, stale/missing
+  records, malformed-record fallback and flushed updates. No data-file migration
+  or new Rust dependency is needed.
+
+Kept intentionally
+  Existing process-event retention and VM working-set estimation semantics.
+  The event payload budget is approximate; Arc/string sharing, VecDeque capacity
+  and structure overhead make it distinct from a strict physical 4 MiB limit.
+  QueryWorkingSet scratch is transient and dropped after a probe. Reusing it
+  would reduce churn but retain the large allocation, not save steady RAM.
+  Periodic HeapOptimizeResources is not shipped: in these trials it returned
+  only roughly 1.1-1.3 MiB of private commit, and active allocations cannot be
+  freed by heap purging. Working-set trimming is not used to mask ownership.
+
+Build and checks
+  LHM commit 2808d80564b6761e1b01f42fabfd966ed695fcbc.
+  DiskInfoToolkit commit 073a31312b9f5147340488e551e06df5f3ab9715.
+  Versioned patches are validated, applied for the build and reversed in finally.
+  Source links, both projects' licenses and patches accompany the native DLL.
+  Raw dumps, ETL, object addresses, paths and instrumented binaries remain local
+  under experiments/memory-v0322-deep and are not published.

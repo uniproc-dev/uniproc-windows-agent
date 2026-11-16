@@ -2,31 +2,48 @@ param([string]$Destination)
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $source = Join-Path $PSScriptRoot '.source'
-$commit = '2808d80564b6761e1b01f42fabfd966ed695fcbc'
-if (-not (Test-Path -LiteralPath (Join-Path $source '.git'))) {
-    git clone --no-checkout https://github.com/LibreHardwareMonitor/LibreHardwareMonitor.git $source
-    if ($LASTEXITCODE -ne 0) { throw 'LHM clone failed' }
+$diskSource = Join-Path $PSScriptRoot '.diskinfo-source'
+function PinnedSource([string]$Path, [string]$Url, [string]$Commit) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) {
+        git clone --no-checkout $Url $Path
+        if ($LASTEXITCODE -ne 0) { throw 'Source clone failed' }
+    }
+    $dirty = git -C $Path status --porcelain --untracked-files=no
+    if ($dirty) { throw 'Cached source has tracked modifications' }
+    git -C $Path checkout --detach $Commit
+    if ($LASTEXITCODE -ne 0 -or (git -C $Path rev-parse HEAD) -ne $Commit) { throw 'Pinned source checkout failed' }
 }
-git -C $source checkout --detach $commit
-if ($LASTEXITCODE -ne 0) { throw 'Pinned LHM checkout failed' }
-$actual = git -C $source rev-parse HEAD
-if ($actual -ne $commit) { throw 'Unexpected LHM revision' }
-$dirty = git -C $source status --porcelain --untracked-files=no
-if ($dirty) { throw 'LHM source has tracked modifications' }
+PinnedSource $source 'https://github.com/LibreHardwareMonitor/LibreHardwareMonitor.git' '2808d80564b6761e1b01f42fabfd966ed695fcbc'
+PinnedSource $diskSource 'https://github.com/Blacktempel/DiskInfoToolkit.git' '073a31312b9f5147340488e551e06df5f3ab9715'
 $output = Join-Path $root 'target/lhm-native-aot'
-$patch = Join-Path $PSScriptRoot 'skip-unused-nvml.patch'
-git -C $source apply --check $patch
-if ($LASTEXITCODE -ne 0) { throw 'LHM NVML patch does not match pinned source' }
-git -C $source apply $patch
-if ($LASTEXITCODE -ne 0) { throw 'LHM NVML patch failed' }
+$patches = @(
+    @{ Source = $source; Path = (Join-Path $PSScriptRoot 'skip-unused-nvml.patch') },
+    @{ Source = $source; Path = (Join-Path $PSScriptRoot 'diskinfo-project.patch') },
+    @{ Source = $diskSource; Path = (Join-Path $PSScriptRoot 'stream-pci-ids.patch') }
+)
+$applied = [Collections.Generic.List[object]]::new()
 Push-Location $PSScriptRoot
 try {
-    dotnet publish Uniproc.Lhm.csproj -c Release -f net10.0 -r win-x64 -o $output "-p:LhmSourceRoot=$source" -p:TargetFrameworks=net10.0 -p:GeneratePackageOnBuild=false -p:RestoreLockedMode=true
+    foreach ($patch in $patches) {
+        git -C $patch.Source apply --check $patch.Path
+        if ($LASTEXITCODE -ne 0) { throw 'Patch does not match pinned source' }
+        git -C $patch.Source apply $patch.Path
+        if ($LASTEXITCODE -ne 0) { throw 'Source patch failed' }
+        $applied.Add($patch)
+    }
+    dotnet publish Uniproc.Lhm.csproj -c Release -f net10.0 -r win-x64 -o $output "-p:LhmSourceRoot=$source" "-p:DiskInfoToolkitSourceRoot=$diskSource" -p:TargetFrameworks=net10.0 -p:GeneratePackageOnBuild=false -p:RestoreLockedMode=true
     if ($LASTEXITCODE -ne 0) { throw 'NativeAOT publication failed' }
+    dotnet run --project ../lhm-tests/PciLookupTests.csproj -c Release -p:TargetFrameworks=net10.0 -p:GeneratePackageOnBuild=false -p:RestoreLockedMode=true
+    if ($LASTEXITCODE -ne 0) { throw 'PCI lookup compatibility tests failed' }
 } finally {
     Pop-Location
-    git -C $source apply --reverse $patch
-    if ($LASTEXITCODE -ne 0) { throw 'LHM source patch could not be reverted' }
+    $restoreFailed = $false
+    for ($index = $applied.Count - 1; $index -ge 0; $index--) {
+        $patch = $applied[$index]
+        git -C $patch.Source apply --reverse $patch.Path
+        if ($LASTEXITCODE -ne 0) { $restoreFailed = $true }
+    }
+    if ($restoreFailed) { throw 'Cached source patches could not be reverted' }
 }
 if ($Destination) {
     $target = [IO.Path]::GetFullPath($Destination)
@@ -39,7 +56,8 @@ if ($Destination) {
     foreach ($name in @('LICENSE', 'THIRD-PARTY-NOTICES.txt')) {
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination $licenses
     }
-    foreach ($name in @('skip-unused-nvml.patch', 'UNIPROC-MODIFICATIONS.txt')) {
+    Copy-Item -LiteralPath (Join-Path $diskSource 'LICENSE') -Destination (Join-Path $licenses 'DiskInfoToolkit-LICENSE')
+    foreach ($name in @('skip-unused-nvml.patch', 'diskinfo-project.patch', 'stream-pci-ids.patch', 'UNIPROC-MODIFICATIONS.txt')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $licenses
     }
 }
