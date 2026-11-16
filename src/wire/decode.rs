@@ -692,6 +692,12 @@ fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample>
         } else {
             None
         },
+        cpu_package_power_watts: if m.has_cpu_package_power_watts() {
+            let watts = m.get_cpu_package_power_watts()?.get_watts();
+            (watts.is_finite() && watts >= 0.0).then_some(watts)
+        } else {
+            None
+        },
         cpu: if m.has_cpu() {
             let c = m.get_cpu()?;
             Some(MachineCpu {

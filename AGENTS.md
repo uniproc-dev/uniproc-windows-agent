@@ -8,7 +8,7 @@
 # Temperature backend
 
 `cargo run -p xtask -- lhm --release` builds the Windows service and deploys the
-NativeAOT backend next to its executable. The build requires .NET SDK 10.0.114
+NativeAOT backend next to its executable. The build requires .NET SDK 10.0.115
 and the Windows C++ NativeAOT toolchain. It checks out pristine LibreHardwareMonitor
 commit `2808d80564b6761e1b01f42fabfd966ed695fcbc` into `native/lhm/.source` and uses
 the committed NuGet lock file. Native output lives in `target/lhm-native-aot`;
@@ -57,6 +57,17 @@ Use `cargo run --example vm_working_set -- <pid>` against the service for a
 30-second comparison of raw, private, and corrected working sets.
 
 # CPU name
+
+`MachineSample.cpu_package_power_watts: Option<f64>` is projected under the existing
+`MachineMetric::Temperatures` demand. It shares the LHM temperature worker's coherent
+one-second snapshots and five-second stale cutoff. Missing, failed or stale readings
+remain None; finite nonnegative readings, including zero, are valid watts.
+The native bridge selects only CPU Power sensors named CPU Package (Intel) or Package
+(AMD). On multiple CPU hardware devices the value is the sum only when every device
+has exactly one valid package reading. Cores, Graphics, Memory, Platform and TDP are
+not substitutes. ABI 1 is unchanged; older bridge JSON and older peers omit power.
+`cargo run --example cpu_power -- --require-reading` validates ten live IPC samples.
+`dotnet run --project native/lhm-tests/PowerTests.csproj -c Release` checks native selection.
 
 `MachineSample.cpu_name: Option<SmolStr>` is static metadata included with
 `MachineMetric::Cpu`, independently of counter or temperature availability.

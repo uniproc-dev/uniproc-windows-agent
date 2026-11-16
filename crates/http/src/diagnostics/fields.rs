@@ -187,6 +187,9 @@ fn unit<'a>(path: &str, key: &str, raw: &Value) -> &'a str {
     if key == "celsius" {
         return "celsius";
     }
+    if key == "cpu_package_power_watts" {
+        return "watts";
+    }
     if key == "temperature" && path.contains("/gpus/") {
         return "0.1 celsius";
     }
@@ -357,6 +360,7 @@ pub fn format(raw: &Value, unit: &str) -> String {
         .unwrap_or_else(|| format!("{raw} FILETIME 100ns")),
         "0.1 celsius" => format!("{:.1} °C", value / 10.0),
         "celsius" => format!("{value:.1} °C"),
+        "watts" => format!("{value:.2} W"),
         "0.1 percent" => format!("{:.1}%", value / 10.0),
         "count" | "identifier" | "text" | "boolean" | "collection" => raw.to_string(),
         _ => format!("{raw} {unit}"),
@@ -530,6 +534,14 @@ fn identity(path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_watts_have_units_and_zero_is_available() {
+        let values = fields(&json!({"cpu_package_power_watts":0.0}), "", &json!([]));
+        assert_eq!(values[0].unit, "watts");
+        assert_eq!(values[0].formatted, "0.00 W");
+        assert_eq!(values[0].availability, "available");
+    }
 
     #[test]
     fn zero_missing_and_a_sentinel_have_different_meanings() {

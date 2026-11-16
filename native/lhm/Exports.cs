@@ -1,5 +1,7 @@
 using System;
 using System.Buffers;
+using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using LibreHardwareMonitor.Hardware;
@@ -59,8 +61,11 @@ public static unsafe class Exports
                     json.WriteString("status", "available");
                     json.WriteString("error", "");
                     json.WriteStartArray("devices");
-                    foreach (IHardware hardware in Computer.Hardware) Collect(json, hardware, "unknown");
+                    var packages = new List<double?>();
+                    foreach (IHardware hardware in Computer.Hardware) Collect(json, hardware, "unknown", packages);
                     json.WriteEndArray();
+                    if (CpuPackagePower.Total(packages) is double watts) json.WriteNumber("cpu_package_power_watts", watts);
+                    else json.WriteNull("cpu_package_power_watts");
                     json.WriteEndObject();
                 }
                 Snapshot = buffer.WrittenSpan.ToArray();
@@ -74,7 +79,7 @@ public static unsafe class Exports
         }
     }
 
-    private static void Collect(Utf8JsonWriter json, IHardware hardware, string parentCategory)
+    private static void Collect(Utf8JsonWriter json, IHardware hardware, string parentCategory, List<double?> packages)
     {
         string category = hardware.HardwareType switch
         {
@@ -91,6 +96,9 @@ public static unsafe class Exports
             hardware.Update();
         }
         catch (Exception failure) { error = failure.Message; }
+        if (hardware.HardwareType == HardwareType.Cpu)
+            packages.Add(CpuPackagePower.Read(hardware.Sensors.Select(sensor =>
+                (sensor.SensorType == SensorType.Power, sensor.Name, sensor.Value)), error.Length != 0));
         int temperatures = 0;
         foreach (ISensor sensor in hardware.Sensors)
         {
@@ -117,7 +125,7 @@ public static unsafe class Exports
         }
         json.WriteEndArray();
         json.WriteEndObject();
-        foreach (IHardware child in hardware.SubHardware) Collect(json, child, category);
+        foreach (IHardware child in hardware.SubHardware) Collect(json, child, category, packages);
     }
 
     [UnmanagedCallersOnly(EntryPoint = "lhm_read")]
@@ -157,6 +165,7 @@ public static unsafe class Exports
             json.WriteStartObject();
             json.WriteString("status", status);
             json.WriteString("error", error);
+            json.WriteNull("cpu_package_power_watts");
             json.WriteStartArray("devices");
             json.WriteEndArray();
             json.WriteEndObject();

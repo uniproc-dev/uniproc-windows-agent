@@ -496,6 +496,7 @@ mod tests {
                     })),
                 })),
                 cpu_name: Some("Intel® Core™ i5-10400F CPU @ 2.90GHz".into()),
+                cpu_package_power_watts: Some(12.5),
                 temperatures: Some(Arc::new(crate::api::MachineTemperatures {
                     status: crate::api::TemperatureStatus::Available,
                     error: String::new(),
@@ -610,6 +611,33 @@ mod tests {
         encode::sample(sent, message.init_root::<sampler::sample_results::Builder>()).unwrap();
         let reader = message.get_root_as_reader::<sampler::sample_results::Reader>().unwrap();
         decode::sample(reader.get_processes().unwrap(), reader.get_machine().unwrap(), sent.wanted).unwrap()
+    }
+
+    #[test]
+    fn cpu_package_power_preserves_absence_and_zero() {
+        let mut sent = full_sample();
+        for watts in [None, Some(0.0), Some(12.5)] {
+            sent.machine.cpu_package_power_watts = watts;
+            assert_eq!(round_trip(&sent).machine.cpu_package_power_watts, watts);
+        }
+        for watts in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            sent.machine.cpu_package_power_watts = Some(watts);
+            assert_eq!(round_trip(&sent).machine.cpu_package_power_watts, None);
+        }
+    }
+
+    #[test]
+    fn invalid_cpu_power_from_a_peer_is_unavailable() {
+        let sent = full_sample();
+        for watts in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut message = capnp::message::Builder::new_default();
+            let mut target = message.init_root::<sampler::sample_results::Builder>();
+            encode::sample(&sent, target.reborrow()).unwrap();
+            target.get_machine().unwrap().init_cpu_package_power_watts().set_watts(watts);
+            let reader = message.get_root_as_reader::<sampler::sample_results::Reader>().unwrap();
+            let got = decode::sample(reader.get_processes().unwrap(), reader.get_machine().unwrap(), sent.wanted).unwrap();
+            assert_eq!(got.machine.cpu_package_power_watts, None);
+        }
     }
 
     #[test]

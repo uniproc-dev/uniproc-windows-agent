@@ -546,7 +546,11 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         gpus,
         network_adapters,
         temperatures,
+        cpu_package_power_watts,
     } = &sample.machine;
+    if let Some(watts) = cpu_package_power_watts.filter(|value| value.is_finite() && *value >= 0.0) {
+        out.reborrow().init_cpu_package_power_watts().set_watts(watts);
+    }
     if let Some(stats) = system_stats {
         let mut target = out.reborrow().init_system_stats();
         target.set_process_count(stats.process_count);
