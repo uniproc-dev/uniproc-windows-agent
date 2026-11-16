@@ -18,7 +18,6 @@ use crate::providers::process::passport::SidNames;
 use crate::providers::process::{self, Images};
 use crate::providers::provider::Provider;
 use crate::providers::vm_host::VmHosts;
-use crate::providers::vm_memory::VmMemory;
 use crate::report::{Diff, Health};
 use crate::sample::{
     Columns, Demand, Extras, MAX_INTERVAL, MachineMetric, MachineSample, MetricSpec, NO_DATA_U32, ProcessMetric,
@@ -88,7 +87,6 @@ struct Reader {
     gpu: Gpu,
     mapped: Mapped,
     vm_hosts: VmHosts,
-    vm_memory: VmMemory,
     snapshots: u64,
     session: Option<u32>,
     fresh: Option<Arc<Sample>>,
@@ -163,7 +161,6 @@ impl Supervisor {
             gpu: Gpu::default(),
             mapped: Mapped::start()?,
             vm_hosts: VmHosts::start()?,
-            vm_memory: VmMemory::start()?,
             snapshots: 0,
             session: probes::own_session(),
             fresh: None,
@@ -377,9 +374,6 @@ impl Reader {
         if reads_processes && spec.processes.contains(ProcessMetric::ExclusiveMapped) {
             self.mapped.read(rows);
         }
-        if reads_processes && spec.processes.contains(ProcessMetric::VmWorkingSet) {
-            self.vm_memory.read(rows, &self.vm_hosts);
-        }
         let gpu = if wanted.any() {
             self.gpu.read(wanted, rows, &self.handles)
         } else {
@@ -395,8 +389,6 @@ impl Reader {
                 state: &self.state,
                 gpu: &self.gpu,
                 mapped: &self.mapped,
-                vm_memory: &self.vm_memory,
-                vm_hosts: &self.vm_hosts,
             },
         );
         let mut machine = if spec.machine.is_empty() {
@@ -461,8 +453,6 @@ struct Beside<'a> {
     state: &'a SystemState,
     gpu: &'a Gpu,
     mapped: &'a Mapped,
-    vm_memory: &'a VmMemory,
-    vm_hosts: &'a VmHosts,
 }
 
 impl Beside<'_> {
@@ -501,10 +491,6 @@ impl Extras for Beside<'_> {
 
     fn exclusive_mapped(&self, row: &Row) -> u64 {
         self.mapped.get(row)
-    }
-
-    fn vm_working_set(&self, row: &Row) -> u64 {
-        self.vm_memory.get(row, self.vm_hosts.get(row) == Some(true))
     }
 }
 
