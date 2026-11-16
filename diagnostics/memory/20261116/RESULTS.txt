@@ -63,3 +63,63 @@ https://learn.microsoft.com/en-us/dotnet/api/system.gc.collect
 https://learn.microsoft.com/en-us/dotnet/core/runtime-config/garbage-collector
 https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapsummary
 https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapsetinformation
+
+Follow-up: ordinary page map, NVML, and native Windows heaps
+
+An ordinary service (PID 42980, no DHAT or measurement DLL) had 58.48 MiB
+private resident memory. Of this, nvml.dll alone accounted for 18.43 MiB
+private resident image pages. Its writable PE section is approximately
+18.8 MiB. This is actual page attribution, not the DLL file size.
+
+The bridge exports no NVML-only PCIe, GPU power or memory metrics. LHM's
+NVIDIA temperatures use NVAPI. A minimal versioned patch adds a process-local
+AppContext opt-out in NvidiaML.Initialize. The bridge enables it before Open.
+The build checks the pinned source, applies the patch, publishes NativeAOT,
+and reverses it in finally. Original license files, the patch and a modification
+notice are deployed together. The cached upstream source remains pristine.
+
+Separate four-minute native-instrumented trials, ordinary service EXE:
+  original at ~57 s: private commit 64.95 MiB, writable images 20.75 MiB;
+  opt-out at ~55 s: private commit 46.20 MiB, writable images 1.98 MiB.
+  No NVML regions in the opt-out run; all 15 available temperature IDs/names
+  matched the original, including NVIDIA Core and Hot Spot.
+These are separate runs, not a controlled total-process savings measurement.
+Native heap growth still occurred during workload, motivating stack capture.
+
+WPR per-PID heap snapshots, stock 0.32.1, workload synchronized after enable:
+  captured category          ~30 s MiB       ~180 s MiB
+  DbgHelp/backtrace symbols     0.000           22.982
+  Rust/service                 2.391            4.503
+  PDH/Perflib                  3.497            3.497
+  NVIDIA native allocations    3.632            1.676
+  LHM/NativeAOT native          1.076            1.096
+  TDH metadata                 0.208            0.208
+  other Windows                0.094            0.103
+  signature/crypto             0.002            0.003
+The per-PID setting captures only future allocation stacks. These figures are
+a captured subset, not a census of all process allocations, GC or PE pages.
+The earlier unsynchronized trace captured ~0.457 MiB signature/crypto caches.
+PDH includes ~1.970 MiB BuildNameTable and Perflib counter metadata. TDH's
+allocations include event metadata. These are stable caches in this interval.
+
+The large growth is resolved by the allocation stacks:
+  rpc::serve -> logging session.wait error with Debug -> error_stack Debug
+  -> std::Backtrace symbol resolution -> dbghelp DIA/PDB caches.
+Service logger previously defaulted RUST_BACKTRACE=1; this also enabled
+library Backtrace::capture. One RPC error could therefore initialize a large
+persistent symbol cache. This is not attributed to a process-event leak.
+
+0.32.2 defaults process-local RUST_LIB_BACKTRACE=0 only when unset, retaining
+RUST_BACKTRACE=1 for panic diagnostics and explicit library backtrace opt-in.
+A subprocess test checks real capture status with default and explicit opt-in.
+It does not change machine/user environment settings or discard error text.
+
+Core change 1b55df7 boxes OwnedEvent payloads in the bounded ProcessEvents ring.
+Capacity remains 16384. A crossbeam slot changes from 200 to 24 bytes, saving
+2.75 MiB of fixed ring storage. Each queued event now needs one box allocation;
+this is not a claim of lower memory at arbitrary full-queue occupancy.
+The existing VM working-set scratch buffer, signature cache, current snapshot
+and bounded event history retain their existing semantics and limits.
+
+Raw ETL, snapshots, page maps, temporary helpers and instrumented binaries
+remain local under experiments; none are included in this diagnostic summary.

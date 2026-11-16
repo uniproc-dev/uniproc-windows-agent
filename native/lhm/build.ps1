@@ -14,11 +14,20 @@ if ($actual -ne $commit) { throw 'Unexpected LHM revision' }
 $dirty = git -C $source status --porcelain --untracked-files=no
 if ($dirty) { throw 'LHM source has tracked modifications' }
 $output = Join-Path $root 'target/lhm-native-aot'
+$patch = Join-Path $PSScriptRoot 'skip-unused-nvml.patch'
+git -C $source apply --check $patch
+if ($LASTEXITCODE -ne 0) { throw 'LHM NVML patch does not match pinned source' }
+git -C $source apply $patch
+if ($LASTEXITCODE -ne 0) { throw 'LHM NVML patch failed' }
 Push-Location $PSScriptRoot
 try {
     dotnet publish Uniproc.Lhm.csproj -c Release -f net10.0 -r win-x64 -o $output "-p:LhmSourceRoot=$source" -p:TargetFrameworks=net10.0 -p:GeneratePackageOnBuild=false -p:RestoreLockedMode=true
     if ($LASTEXITCODE -ne 0) { throw 'NativeAOT publication failed' }
-} finally { Pop-Location }
+} finally {
+    Pop-Location
+    git -C $source apply --reverse $patch
+    if ($LASTEXITCODE -ne 0) { throw 'LHM source patch could not be reverted' }
+}
 if ($Destination) {
     $target = [IO.Path]::GetFullPath($Destination)
     if (-not (Test-Path -LiteralPath $target -PathType Container)) { throw 'Deployment destination does not exist' }
@@ -29,5 +38,8 @@ if ($Destination) {
     New-Item -ItemType Directory -Path $licenses -Force | Out-Null
     foreach ($name in @('LICENSE', 'THIRD-PARTY-NOTICES.txt')) {
         Copy-Item -LiteralPath (Join-Path $source $name) -Destination $licenses
+    }
+    foreach ($name in @('skip-unused-nvml.patch', 'UNIPROC-MODIFICATIONS.txt')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $licenses
     }
 }

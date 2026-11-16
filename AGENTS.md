@@ -9,11 +9,19 @@
 
 `cargo run -p xtask -- lhm --release` builds the Windows service and deploys the
 NativeAOT backend next to its executable. The build requires .NET SDK 10.0.115
-and the Windows C++ NativeAOT toolchain. It checks out pristine LibreHardwareMonitor
+and the Windows C++ NativeAOT toolchain. It checks out LibreHardwareMonitor
 commit `2808d80564b6761e1b01f42fabfd966ed695fcbc` into `native/lhm/.source` and uses
 the committed NuGet lock file. Native output lives in `target/lhm-native-aot`;
 `CARGO_TARGET_DIR` selects the Rust output directory. Deploy the generated DLLs
 and `lhm-licenses` directory together with the service executable.
+
+The build validates and applies `native/lhm/skip-unused-nvml.patch`, then reverses
+it in finally so the cached upstream source is pristine again. The patch adds an
+opt-out switch to NvidiaML.Initialize. This bridge enables it before Computer.Open:
+NVIDIA temperatures retain LHM's NVAPI path, while NVML-only PCIe, GPU power and
+memory sensors are not exported by this bridge. CPU package watts are unaffected.
+The patch and modification notice are deployed with the original LHM licenses.
+Do not restore NVML just to populate readings the service never publishes.
 
 The optional `uniproc-lhm.dll` exports ABI version 1: `lhm_abi_version`, `lhm_open`,
 `lhm_update`, `lhm_read`, and `lhm_close`. `lhm_read` returns the required UTF-8 JSON
@@ -88,8 +96,11 @@ older peers; no new metric or peer filtering is required.
 
 Service stderr shares the live log file handle, so Rust allocation failures and
 panics reach `agent.log`, rotated to `agent.previous.log` on the next start.
-The service defaults its own RUST_BACKTRACE to 1 only when it was unset; this
-changes no machine or user environment setting. Release diagnostics can use an
+The service defaults its own RUST_BACKTRACE to 1 and RUST_LIB_BACKTRACE to 0
+only when each was unset: panic stacks remain enabled, ordinary error reports
+do not initialize the persistent DbgHelp symbol cache. Explicit diagnostic values
+remain supported. This changes no machine or user environment setting.
+Release diagnostics can use an
 explicit linker MAP artifact without enabling PDBs or changing build profiles.
 
 A service with no configured failure actions is initialized at startup with

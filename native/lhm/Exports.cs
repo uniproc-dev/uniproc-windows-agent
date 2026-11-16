@@ -26,6 +26,7 @@ public static unsafe class Exports
             if (Computer is not null) return 0;
             try
             {
+                AppContext.SetSwitch("Uniproc.Lhm.SkipUnusedNvml", true);
                 var computer = new Computer
                 {
                     IsCpuEnabled = true,

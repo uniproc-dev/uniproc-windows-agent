@@ -1,0 +1,13 @@
+diff --git a/LibreHardwareMonitorLib/Interop/NvidiaML.cs b/LibreHardwareMonitorLib/Interop/NvidiaML.cs
+--- a/LibreHardwareMonitorLib/Interop/NvidiaML.cs
++++ b/LibreHardwareMonitorLib/Interop/NvidiaML.cs
+@@ -142,6 +142,9 @@
+ 
+     public static bool Initialize()
+     {
++        if (AppContext.TryGetSwitch("Uniproc.Lhm.SkipUnusedNvml", out bool skip) && skip)
++            return false;
++
+         lock (_syncRoot)
+         {
+             if (IsAvailable)

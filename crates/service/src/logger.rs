@@ -24,9 +24,7 @@ pub fn init_service() -> Telemetry {
     match log_file() {
         Ok(file) => {
             let redirected = redirect_stderr(&file);
-            if std::env::var_os("RUST_BACKTRACE").is_none() {
-                unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
-            }
+            service_backtraces();
             let telemetry = with_writer(BoxMakeWriter::new(Mutex::new(file)), false);
             if let Err(error) = redirected {
                 tracing::warn!(%error, "fatal diagnostics could not be redirected to the service log");
@@ -34,6 +32,15 @@ pub fn init_service() -> Telemetry {
             telemetry
         }
         Err(_) => with_writer(BoxMakeWriter::new(std::io::sink), false),
+    }
+}
+
+fn service_backtraces() {
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+    }
+    if std::env::var_os("RUST_LIB_BACKTRACE").is_none() {
+        unsafe { std::env::set_var("RUST_LIB_BACKTRACE", "0") };
     }
 }
 
@@ -87,6 +94,36 @@ mod tests {
     use super::*;
     use std::os::windows::process::CommandExt;
     use std::process::Command;
+
+    #[test]
+    fn routine_errors_skip_backtraces_unless_explicitly_enabled() {
+        const CHILD: &str = "UNIPROC_BACKTRACE_PROBE";
+        if let Ok(mode) = std::env::var(CHILD) {
+            service_backtraces();
+            assert_eq!(std::env::var("RUST_BACKTRACE").unwrap(), "1");
+            let expected = if mode == "enabled" {
+                std::backtrace::BacktraceStatus::Captured
+            } else {
+                std::backtrace::BacktraceStatus::Disabled
+            };
+            assert_eq!(std::backtrace::Backtrace::capture().status(), expected);
+            return;
+        }
+        for mode in ["default", "enabled"] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", "logger::tests::routine_errors_skip_backtraces_unless_explicitly_enabled", "--nocapture"])
+                .env(CHILD, mode)
+                .env_remove("RUST_BACKTRACE")
+                .env_remove("RUST_LIB_BACKTRACE")
+                .creation_flags(crate::bindings::CREATE_NO_WINDOW as u32);
+            if mode == "enabled" {
+                child.env("RUST_LIB_BACKTRACE", "1");
+            }
+            let output = child.output().unwrap();
+            assert!(output.status.success(), "{mode}: {output:?}");
+        }
+    }
 
     #[test]
     fn service_stderr_is_written_to_its_log() {

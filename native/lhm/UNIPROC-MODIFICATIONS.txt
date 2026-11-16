@@ -1,0 +1,14 @@
+Uniproc builds LibreHardwareMonitor commit
+2808d80564b6761e1b01f42fabfd966ed695fcbc with skip-unused-nvml.patch.
+
+The patch adds an opt-out switch to NvidiaML.Initialize. Uniproc enables it
+because this bridge exports temperatures and CPU package watts. NVIDIA
+temperatures retain the existing NVAPI implementation. NVML-only GPU power,
+memory and PCIe metrics are not exported by this bridge.
+
+Original source:
+https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/tree/2808d80564b6761e1b01f42fabfd966ed695fcbc
+Modification source:
+https://github.com/uniproc-dev/uniproc-windows-agent/tree/master/native/lhm
+The patch is distributed beside this notice. Original license and notices
+remain in LICENSE and THIRD-PARTY-NOTICES.txt.
