@@ -514,6 +514,7 @@ pub struct MachineSample {
     pub gpus: Option<Arc<[GpuAdapter]>>,
     pub network_adapters: Option<Arc<[NetworkAdapter]>>,
     pub temperatures: Option<Arc<MachineTemperatures>>,
+    pub cpu_package_power_watts: Option<f64>,
 }
 
 impl MachineSample {
@@ -524,6 +525,7 @@ impl MachineSample {
             system_stats: self.system_stats.filter(|_| wanted.contains(MachineMetric::Cpu)),
             cpu_inventory: self.cpu_inventory.clone().filter(|_| wanted.contains(MachineMetric::Cpu)),
             temperatures: self.temperatures.clone().filter(|_| wanted.contains(MachineMetric::Temperatures)),
+            cpu_package_power_watts: self.cpu_package_power_watts.filter(|_| wanted.contains(MachineMetric::Temperatures)),
             memory: self.memory.filter(|_| wanted.contains(MachineMetric::Memory)),
             disk: self.disk.filter(|_| wanted.contains(MachineMetric::Disk)),
             network: self.network.filter(|_| wanted.contains(MachineMetric::Network)),

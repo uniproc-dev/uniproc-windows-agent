@@ -25,10 +25,18 @@ impl Drop for WorkerClaim {
     }
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct BackendSample {
+    #[serde(flatten)]
+    pub(super) temperatures: Arc<MachineTemperatures>,
+    #[serde(default)]
+    pub(super) cpu_package_power_watts: Option<f64>,
+}
+
 struct Shared {
     wanted: AtomicBool,
     stopped: AtomicBool,
-    latest: Mutex<(Instant, Arc<MachineTemperatures>)>,
+    latest: Mutex<(Instant, Arc<BackendSample>)>,
 }
 
 pub struct Temperatures {
@@ -102,7 +110,7 @@ impl Temperatures {
         }
     }
 
-    pub fn latest(&self) -> Arc<MachineTemperatures> {
+    pub(super) fn latest(&self) -> Arc<BackendSample> {
         let (at, sample) = &*self.shared.latest.lock();
         if at.elapsed() > STALE_AFTER {
             Arc::new(failed(
@@ -126,23 +134,29 @@ impl Drop for Temperatures {
     }
 }
 
-fn unavailable(error: &str) -> MachineTemperatures {
-    MachineTemperatures {
-        status: TemperatureStatus::Unavailable,
-        error: error.into(),
-        devices: Vec::new(),
+fn unavailable(error: &str) -> BackendSample {
+    BackendSample {
+        temperatures: Arc::new(MachineTemperatures {
+            status: TemperatureStatus::Unavailable,
+            error: error.into(),
+            devices: Vec::new(),
+        }),
+        cpu_package_power_watts: None,
     }
 }
 
-fn failed(error: String) -> MachineTemperatures {
-    MachineTemperatures {
-        status: TemperatureStatus::Error,
-        error,
-        devices: Vec::new(),
+fn failed(error: String) -> BackendSample {
+    BackendSample {
+        temperatures: Arc::new(MachineTemperatures {
+            status: TemperatureStatus::Error,
+            error: error.into(),
+            devices: Vec::new(),
+        }),
+        cpu_package_power_watts: None,
     }
 }
 
-fn publish(shared: &Shared, sample: MachineTemperatures) {
+fn publish(shared: &Shared, sample: BackendSample) {
     *shared.latest.lock() = (Instant::now(), Arc::new(sample));
 }
 
@@ -205,12 +219,12 @@ impl Bridge {
         }
     }
 
-    fn sample(&mut self) -> Result<MachineTemperatures> {
+    fn sample(&mut self) -> Result<BackendSample> {
         let updated = self.opened && unsafe { (self.update)() } == 0;
         let bytes = read_cached(|buffer, cap| unsafe { (self.read)(buffer, cap) })?;
         let sample = decode(&bytes)?;
         ensure!(
-            updated || sample.status != TemperatureStatus::Available,
+            updated || sample.temperatures.status != TemperatureStatus::Available,
             "LHM failed but returned an available snapshot"
         );
         Ok(sample)
@@ -256,12 +270,26 @@ fn read_cached(mut read: impl FnMut(*mut u8, i32) -> i32) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn decode(bytes: &[u8]) -> Result<MachineTemperatures> {
-    let sample: MachineTemperatures = serde_json::from_slice(bytes)?;
-    for sensor in sample.devices.iter().flat_map(|device| &device.sensors) {
+fn decode(bytes: &[u8]) -> Result<BackendSample> {
+    let mut sample: BackendSample = serde_json::from_slice(bytes)?;
+    for sensor in sample
+        .temperatures
+        .devices
+        .iter()
+        .flat_map(|device| &device.sensors)
+    {
         if sensor.celsius.is_some_and(|value| !value.is_finite()) {
             bail!("non-finite temperature for {}", sensor.id);
         }
+    }
+    ensure!(
+        sample
+            .cpu_package_power_watts
+            .is_none_or(|value| value.is_finite() && value >= 0.0),
+        "invalid CPU package power"
+    );
+    if sample.temperatures.status != TemperatureStatus::Available {
+        sample.cpu_package_power_watts = None;
     }
     Ok(sample)
 }
@@ -269,6 +297,51 @@ fn decode(bytes: &[u8]) -> Result<MachineTemperatures> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn power_is_optional_validated_and_cleared_with_backend_failure() {
+        for power in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(0.0.into()),
+            Some(42.5.into()),
+        ] {
+            let mut json = serde_json::json!({"status":"available", "error":"", "devices":[]});
+            if let Some(value) = power.clone() {
+                json["cpu_package_power_watts"] = value;
+            }
+            let sample = decode(&serde_json::to_vec(&json).unwrap()).unwrap();
+            assert_eq!(
+                sample.cpu_package_power_watts,
+                power.and_then(|value| value.as_f64())
+            );
+        }
+        for status in ["error", "unavailable"] {
+            let json = serde_json::json!({"status":status, "error":"failure", "devices":[], "cpu_package_power_watts":42.5});
+            let sample = decode(&serde_json::to_vec(&json).unwrap()).unwrap();
+            assert_eq!(sample.cpu_package_power_watts, None);
+        }
+        for value in ["-0.1", "1e999", "\"NaN\""] {
+            let json = format!(
+                r#"{{"status":"available","error":"","devices":[],"cpu_package_power_watts":{value}}}"#
+            );
+            assert!(decode(json.as_bytes()).is_err());
+        }
+        let reader = Temperatures::default();
+        publish(
+            &reader.shared,
+            decode(
+                br#"{"status":"available","error":"","devices":[],"cpu_package_power_watts":42.5}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(reader.latest().cpu_package_power_watts, Some(42.5));
+        publish(&reader.shared, failed("update failed".into()));
+        let sample = reader.latest();
+        assert_eq!(sample.cpu_package_power_watts, None);
+        assert_eq!(sample.temperatures.status, TemperatureStatus::Error);
+        assert!(sample.temperatures.devices.is_empty());
+    }
 
     #[test]
     fn stuck_worker_has_bounded_shutdown_and_keeps_the_process_claim() {
@@ -293,7 +366,10 @@ mod tests {
             panic!("a second worker started while the first was stuck")
         });
         assert!(second.worker.is_none());
-        assert_eq!(second.latest().status, TemperatureStatus::Error);
+        assert_eq!(
+            second.latest().temperatures.status,
+            TemperatureStatus::Error
+        );
         release.send(()).unwrap();
         completion.recv_timeout(wait).unwrap();
         assert!(!CLAIM.load(Ordering::SeqCst));
@@ -310,20 +386,23 @@ mod tests {
         let path = std::env::current_exe().unwrap().join("uniproc-lhm.dll");
         let error = load_library(&path).err().unwrap();
         let sample = unavailable(&format!("{error:#}"));
-        assert_eq!(sample.status, TemperatureStatus::Unavailable);
-        assert!(!sample.error.is_empty());
-        assert!(sample.devices.is_empty());
+        assert_eq!(sample.temperatures.status, TemperatureStatus::Unavailable);
+        assert!(!sample.temperatures.error.is_empty());
+        assert!(sample.temperatures.devices.is_empty());
     }
 
     #[test]
     fn readings_preserve_hardware_ids_and_missing_values() {
         let sample = decode(br#"{"status":"available","error":"","devices":[{"id":"/gpu-nvidia/0","name":"GPU","category":"gpu","status":"available","error":"","sensors":[{"id":"/gpu-nvidia/0/temperature/2","name":"VRAM","celsius":61.5},{"id":"/gpu-nvidia/0/temperature/3","name":"Hot spot","celsius":null}]}]}"#).unwrap();
         assert_eq!(
-            sample.devices[0].sensors[0].id,
+            sample.temperatures.devices[0].sensors[0].id,
             "/gpu-nvidia/0/temperature/2"
         );
-        assert_eq!(sample.devices[0].sensors[0].celsius, Some(61.5));
-        assert_eq!(sample.devices[0].sensors[1].celsius, None);
+        assert_eq!(
+            sample.temperatures.devices[0].sensors[0].celsius,
+            Some(61.5)
+        );
+        assert_eq!(sample.temperatures.devices[0].sensors[1].celsius, None);
     }
 
     #[test]
@@ -348,7 +427,7 @@ mod tests {
         .unwrap();
         assert_eq!(calls, 2);
         assert_eq!(
-            decode(&bytes).unwrap().status,
+            decode(&bytes).unwrap().temperatures.status,
             TemperatureStatus::Unavailable
         );
         assert!(read_cached(|buffer, _| if buffer.is_null() { 10 } else { 11 }).is_err());
@@ -359,6 +438,7 @@ mod tests {
         use crate::sample::{MachineMetric, MachineSample};
         let sample = MachineSample {
             temperatures: Some(Arc::new(MachineTemperatures::default())),
+            cpu_package_power_watts: Some(0.0),
             ..Default::default()
         };
         assert!(
@@ -366,6 +446,18 @@ mod tests {
                 .project(MachineMetric::Cpu.into())
                 .temperatures
                 .is_none()
+        );
+        assert_eq!(
+            sample
+                .project(MachineMetric::Cpu.into())
+                .cpu_package_power_watts,
+            None
+        );
+        assert_eq!(
+            sample
+                .project(MachineMetric::Temperatures.into())
+                .cpu_package_power_watts,
+            Some(0.0)
         );
         assert!(Arc::ptr_eq(
             sample.temperatures.as_ref().unwrap(),
@@ -382,13 +474,17 @@ mod tests {
         let reader = Temperatures::default();
         *reader.shared.latest.lock() = (
             Instant::now() - STALE_AFTER - PERIOD,
-            Arc::new(MachineTemperatures {
-                status: TemperatureStatus::Available,
-                ..Default::default()
+            Arc::new(BackendSample {
+                temperatures: Arc::new(MachineTemperatures {
+                    status: TemperatureStatus::Available,
+                    ..Default::default()
+                }),
+                cpu_package_power_watts: Some(42.0),
             }),
         );
         let sample = reader.latest();
-        assert_eq!(sample.status, TemperatureStatus::Error);
-        assert!(sample.devices.is_empty());
+        assert_eq!(sample.cpu_package_power_watts, None);
+        assert_eq!(sample.temperatures.status, TemperatureStatus::Error);
+        assert!(sample.temperatures.devices.is_empty());
     }
 }

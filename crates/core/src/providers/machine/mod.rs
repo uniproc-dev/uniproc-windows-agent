@@ -67,7 +67,9 @@ impl MachineProbe {
             sample.cpu_inventory = Some(cpu_inventory::read());
         }
         if wanted.contains(MachineMetric::Temperatures) {
-            sample.temperatures = Some(self.temperatures.latest());
+            let latest = self.temperatures.latest();
+            sample.temperatures = Some(latest.temperatures.clone());
+            sample.cpu_package_power_watts = latest.cpu_package_power_watts;
         }
         if wanted.contains(MachineMetric::Cpu) || wanted.contains(MachineMetric::Processors) {
             match self.times.read() {
