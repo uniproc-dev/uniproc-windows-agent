@@ -38,7 +38,7 @@ backend and per-device errors retain diagnostic strings. Missing readings are
 None; zero is a valid reading. DIMM/NVMe limits and CPU distance-to-TjMax are excluded.
 
 While polling, the LHM bridge requests a blocking compacting aggressive full GC
-at most once per minute and after closing its Computer. This returns unused
+at most once per fifteen seconds and after closing its Computer. This returns unused
 managed heap pages without trimming the process working set. Collection runs on
 the existing worker; it can delay that snapshot and has no hard pause-time bound.
 The five-second stale cutoff remains unchanged. Measurements and limits are in
@@ -205,3 +205,10 @@ this test and ships both projects' source links, patches and licenses.
 Private resident pages and logical live allocation sizes are different
 measurements. Physical totals must be taken from one VMMap/page snapshot;
 do not add live allocation categories to working-set categories.
+
+Signature verdicts expire 24 hours from saved_at_ms, without renewal on reads.
+The existing image worker removes expired direct entries at startup and hourly;
+lookup expiry also deletes immediately through the existing buffered writer.
+Old records without timestamps expire; future timestamps miss but are not
+mass-deleted as old. Hot verdicts retain the disk write timestamp. Cleanup
+holds only a temporary keys list, not a resident projection of all values.

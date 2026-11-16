@@ -76,7 +76,7 @@ GC owner, and reduction
 Signature projection reduction
   Core commit 38f49ff uses existing amethystate Store point get/set under the
   same signatures/verdicts/path layout. It does not construct the whole resident
-  ReactiveMap. Existing disk records, file stamp/resolver checks, write debounce
+  ReactiveMap. The disk layout, file stamp/resolver checks, write debounce
   and shutdown save_now remain. The current image worker is already a hot cache.
   Tests write using the legacy map, read/update via point access, reopen through
   the legacy map and verify Unicode/dotted keys, unrelated entries, stale/missing
@@ -100,3 +100,36 @@ Build and checks
   Source links, both projects' licenses and patches accompany the native DLL.
   Raw dumps, ETL, object addresses, paths and instrumented binaries remain local
   under experiments/memory-v0322-deep and are not published.
+
+After removing the catalog, the interval between explicit collections is
+fifteen seconds. The preceding one-minute interval allowed approximately
+4.6 MB of dead managed allocations to accumulate in a measured 31-second
+span (GC.GetTotalMemory 5,310,440 before versus 661,464 after collection).
+The old smaller gcCommitted number described the previous collection, not
+the current allocation state. The same-process private-commit reduction
+from that collection was 4,669,440 bytes. Collection still runs on the
+existing sensor worker, without working-set trimming or a new timer.
+There is no hard pause-time guarantee; latency is checked on the live feed.
+
+Ordinary-service follow-up with fifteen-second GC (before TTL change):
+  PID 12576, four VMMap captures, no measurement DLL/WPR/working-set trimming.
+  private resident: 28,012,544; 22,179,840; 23,674,880; 22,654,976 bytes.
+  NativeAOT large-reservation private resident pages: 614,400; 1,441,792;
+  2,347,008; 1,257,472 bytes. This classification uses the large private
+  reservation in the ordinary NativeAOT process, not a profiled WPR process.
+  The matched earlier minute-GC control observed 1,187,840-9,261,056 bytes
+  resident in that region. Different total-process histories are not a matched
+  total-memory delta. Fifteen-second live probe: 76.76 s, all 15 actual readings
+  and CPU watts, max delivery gap 1.485 s. Minute-GC control max gap 1.507 s.
+
+Signature cache TTL requested by the user on 2026-11-16:
+  Entries expire 24 hours after saved_at_ms; reads do not renew the age.
+  Hot verdicts carry the original disk timestamp and cannot bypass expiry.
+  Expired lookups delete the entry; the existing image worker also cleans at
+  startup and hourly, including while requests keep arriving. Disk writes
+  retain the existing five-second debounce and shutdown flush behavior.
+  Missing old timestamps are expired. Future timestamps miss without unsigned
+  subtraction and are not mass-deleted as old. Decode errors are not TTL.
+  Cleanup uses a temporary list of keys and point reads, never a resident
+  ReactiveMap of all values. Only direct entries under the correct StorePath
+  prefix are removed; deep children and neighboring prefixes are preserved.

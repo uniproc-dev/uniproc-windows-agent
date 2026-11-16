@@ -4,12 +4,15 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $source = Join-Path $PSScriptRoot '.source'
 $diskSource = Join-Path $PSScriptRoot '.diskinfo-source'
 function PinnedSource([string]$Path, [string]$Url, [string]$Commit) {
-    if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) {
+    $fresh = -not (Test-Path -LiteralPath (Join-Path $Path '.git'))
+    if ($fresh) {
         git clone --no-checkout $Url $Path
         if ($LASTEXITCODE -ne 0) { throw 'Source clone failed' }
     }
-    $dirty = git -C $Path status --porcelain --untracked-files=no
-    if ($dirty) { throw 'Cached source has tracked modifications' }
+    if (-not $fresh) {
+        $dirty = git -C $Path status --porcelain --untracked-files=no
+        if ($dirty) { throw 'Cached source has tracked modifications' }
+    }
     git -C $Path checkout --detach $Commit
     if ($LASTEXITCODE -ne 0 -or (git -C $Path rev-parse HEAD) -ne $Commit) { throw 'Pinned source checkout failed' }
 }

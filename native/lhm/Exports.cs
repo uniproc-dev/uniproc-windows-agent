@@ -72,7 +72,7 @@ public static unsafe class Exports
                     json.WriteEndObject();
                 }
                 Snapshot = buffer.WrittenSpan.ToArray();
-                if (Environment.TickCount64 - LastCollection >= 60_000)
+                if (Environment.TickCount64 - LastCollection >= 15_000)
                 {
                     GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, true, true);
                     LastCollection = Environment.TickCount64;
