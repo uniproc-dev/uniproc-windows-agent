@@ -4,7 +4,7 @@ mod signature_cache;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
@@ -99,7 +99,28 @@ impl Images {
             .name("image-judge".into())
             .spawn(move || {
                 let mut judged_before = Judged::default();
-                for request in asked.iter().take_while(|_| !stopped.load(Ordering::Relaxed)) {
+                let cleanup_interval = Duration::from_secs(60 * 60);
+                if let Some(cache) = &persisted {
+                    cache.cleanup();
+                }
+                let mut last_cleanup = Instant::now();
+                while !stopped.load(Ordering::Relaxed) {
+                    if last_cleanup.elapsed() >= cleanup_interval {
+                        if let Some(cache) = &persisted {
+                            cache.cleanup();
+                        }
+                        let now = signature_cache::now_ms();
+                        judged_before.retain(|_, (_, _, saved)| signature_cache::fresh(*saved, now));
+                        last_cleanup = Instant::now();
+                    }
+                    let request = match asked.recv_timeout(cleanup_interval.saturating_sub(last_cleanup.elapsed())) {
+                        Ok(request) => request,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    };
+                    if stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let verdict = judge(&request, persisted.as_ref(), &mut judged_before);
                     if judged.send(Image { path: request.path, verdict }).is_err() {
                         break;
@@ -142,7 +163,7 @@ impl Drop for Images {
 
 /// The verdicts this run worked out, each with the stamp of the file it
 /// describes.
-type Judged = std::collections::HashMap<SmolStr, (signature_cache::Stamp, ImageVerdict)>;
+type Judged = std::collections::HashMap<SmolStr, (signature_cache::Stamp, ImageVerdict, u64)>;
 
 #[tracing::instrument(level = "debug", skip_all, fields(path = %request.path))]
 fn judge(
@@ -156,14 +177,15 @@ fn judge(
     }
     let stamp = signature_cache::file_stamp(path);
     if let Some(stamp) = stamp
-        && let Some((before, verdict)) = judged_before.get(path)
+        && let Some((before, verdict, saved_at_ms)) = judged_before.get(path)
         && *before == stamp
+        && signature_cache::fresh(*saved_at_ms, signature_cache::now_ms())
     {
         return verdict.clone();
     }
-    let verdict = judge_afresh(request, stamp, persisted);
+    let (verdict, saved_at_ms) = judge_afresh(request, stamp, persisted);
     if let Some(stamp) = stamp {
-        judged_before.insert(path.clone(), (stamp, verdict.clone()));
+        judged_before.insert(path.clone(), (stamp, verdict.clone(), saved_at_ms));
     }
     verdict
 }
@@ -172,19 +194,20 @@ fn judge_afresh(
     request: &ImageRequest,
     stamp: Option<signature_cache::Stamp>,
     persisted: Option<&signature_cache::PersistentSignatures>,
-) -> ImageVerdict {
+) -> (ImageVerdict, u64) {
     let path = &request.path;
     let cache = persisted;
     let hit = match (stamp, cache) {
         (Some(stamp), Some(cache)) => cache.lookup(path, stamp),
         _ => None,
     };
-    let (signature, is_windows, display_name, signer) = match hit {
+    let (signature, is_windows, display_name, signer, saved_at_ms) = match hit {
         Some(hit) => (
             signature_cache::signature_from_code(hit.signature),
             hit.is_windows_process,
             hit.display_name,
             hit.signer,
+            hit.saved_at_ms,
         ),
         None => {
             let (signature, signer) = signature_of(path, &request.package_full_name);
@@ -193,10 +216,12 @@ fn judge_afresh(
                 display_name::resolve(path, &request.package_full_name, &request.package_relative_app_id)
                     .unwrap_or_default();
             let signer = signer.unwrap_or_default();
+            let saved_at_ms = signature_cache::now_ms();
             if let (Some(stamp), Some(cache)) = (stamp, cache) {
                 cache.remember(
                     path,
                     signature_cache::CachedVerdict {
+                        saved_at_ms,
                         signature: signature_cache::signature_to_code(signature),
                         is_windows_process: is_windows,
                         display_name: display_name.clone(),
@@ -209,7 +234,7 @@ fn judge_afresh(
                     },
                 );
             }
-            (signature, is_windows, display_name, signer)
+            (signature, is_windows, display_name, signer, saved_at_ms)
         }
     };
     let publisher = if request.package_full_name.is_empty() {
@@ -217,12 +242,12 @@ fn judge_afresh(
     } else {
         display_name::package_publisher_display_name(&request.package_full_name).unwrap_or_default()
     };
-    ImageVerdict {
+    (ImageVerdict {
         signature,
         is_windows_process: is_windows,
         display_name: display_name.into(),
         publisher: publisher.into(),
-    }
+    }, saved_at_ms)
 }
 
 /// Whether `path` names a file on another machine. The service would open it
@@ -305,6 +330,23 @@ mod tests {
             &mut Judged::default(),
         );
         assert_eq!(verdict.signature, ProcessSignature::Unknown);
+    }
+
+    #[test]
+    fn a_hot_verdict_expires_without_refreshing_its_write_time() {
+        let executable = std::env::current_exe().unwrap();
+        let path = executable.to_str().unwrap();
+        let stamp = signature_cache::file_stamp(path).unwrap();
+        let request = ImageRequest { path: path.into(), ..Default::default() };
+        let sentinel = ImageVerdict { display_name: "uniproc-ttl-test-sentinel".into(), ..Default::default() };
+        let saved = signature_cache::now_ms() - signature_cache::TTL.as_millis() as u64 + 60_000;
+        let mut hot = Judged::default();
+        hot.insert(path.into(), (stamp, sentinel.clone(), saved));
+        assert_eq!(judge(&request, None, &mut hot), sentinel);
+        assert_eq!(hot.get(path).unwrap().2, saved);
+        hot.get_mut(path).unwrap().2 -= 60_000;
+        assert_ne!(judge(&request, None, &mut hot), sentinel);
+        assert!(hot.get(path).unwrap().2 > saved);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::bindings::{
 };
 
 use amethystate::store::builder::Backend;
-use amethystate::store::{OnUnreadable, UnreadableEntries, WillNotOpen};
+use amethystate::store::{OnUnreadable, StorePath, UnreadableEntries, WillNotOpen};
 use amethystate::{Store, StoreBuilder};
 #[cfg(test)]
 use amethystate::{ReactiveMap, amethystate};
@@ -21,8 +21,29 @@ use crate::state::events::ProcessSignature;
 /// of served - the file they describe has not changed, the answer has.
 pub const RESOLVER: u32 = 7;
 
+pub(super) const TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+pub(super) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+pub(super) fn fresh(saved_at_ms: u64, now: u64) -> bool {
+    saved_at_ms != 0 && now.checked_sub(saved_at_ms).is_some_and(|age| age < TTL.as_millis() as u64)
+}
+
+fn expired(saved_at_ms: u64, now: u64) -> bool {
+    saved_at_ms == 0 || now.checked_sub(saved_at_ms).is_some_and(|age| age >= TTL.as_millis() as u64)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CachedVerdict {
+    #[serde(default)]
+    pub saved_at_ms: u64,
     pub signature: u8,
     pub is_windows_process: bool,
     pub display_name: String,
@@ -206,8 +227,18 @@ impl CachedVerdict {
 
 impl PersistentSignatures {
     pub fn lookup(&self, path: &str, stamp: Stamp) -> Option<CachedVerdict> {
+        self.lookup_at(path, stamp, now_ms())
+    }
+
+    fn lookup_at(&self, path: &str, stamp: Stamp, now: u64) -> Option<CachedVerdict> {
         match self.store.get::<CachedVerdict>(["signatures", "verdicts", path]) {
-            Ok(cached) => cached.filter(|cached| cached.describes(stamp)),
+            Ok(Some(cached)) if expired(cached.saved_at_ms, now) => {
+                if let Err(error) = self.store.delete(["signatures", "verdicts", path]) {
+                    tracing::warn!(%error, path, "could not remove an expired signature verdict");
+                }
+                None
+            }
+            Ok(cached) => cached.filter(|cached| cached.describes(stamp) && fresh(cached.saved_at_ms, now)),
             Err(error) => {
                 tracing::warn!(%error, path, "could not read a signature verdict");
                 None
@@ -220,11 +251,119 @@ impl PersistentSignatures {
             tracing::warn!(%err, path, "could not persist a signature verdict");
         }
     }
+
+    pub(super) fn cleanup(&self) {
+        self.cleanup_at(now_ms());
+    }
+
+    fn cleanup_at(&self, now: u64) -> usize {
+        let prefix = StorePath::from_segments(["signatures", "verdicts"]);
+        let keys = match self.store.scan_keys(&prefix) {
+            Ok(keys) => keys,
+            Err(error) => {
+                tracing::warn!(%error, "could not list signature verdicts for expiry");
+                return 0;
+            }
+        };
+        let mut removed = 0;
+        for key in keys {
+            if key.len() != prefix.len() + 1 || prefix.entry_name(&key).is_none() {
+                continue;
+            }
+            match self.store.get::<CachedVerdict>(&key) {
+                Ok(Some(cached)) if expired(cached.saved_at_ms, now) => {
+                    match self.store.delete(&key) {
+                        Ok(()) => removed += 1,
+                        Err(error) => tracing::warn!(%error, "could not remove an expired signature verdict"),
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not read a signature verdict for expiry"),
+            }
+        }
+        removed
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verdict_lifetime_is_one_day_from_write_time() {
+        let saved = 1_000;
+        let day = TTL.as_millis() as u64;
+        assert!(fresh(saved, saved));
+        assert!(fresh(saved, saved + day - 1));
+        assert!(!fresh(saved, saved + day));
+        assert!(!fresh(saved, saved + day + 1));
+        assert!(!fresh(0, saved));
+        assert!(!fresh(saved + 1, saved));
+        let mut legacy = serde_json::to_value(verdict(stamp())).unwrap();
+        legacy.as_object_mut().unwrap().remove("saved_at_ms");
+        let legacy: CachedVerdict = serde_json::from_value(legacy).unwrap();
+        assert!(!fresh(legacy.saved_at_ms, now_ms()));
+    }
+
+    #[test]
+    fn expired_reads_delete_persisted_entries_without_renewing_hits() {
+        let directory = std::env::temp_dir().join(format!("uniproc-signature-expiry-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("cache");
+        let saved = 1_000;
+        let day = TTL.as_millis() as u64;
+        {
+            let cache = PersistentSignatures { store: builder(path.clone()).build().unwrap() };
+            let entry = CachedVerdict { saved_at_ms: saved, ..verdict(stamp()) };
+            cache.remember("old.exe", entry.clone());
+            assert_eq!(cache.lookup_at("old.exe", stamp(), saved + day - 1), Some(entry.clone()));
+            assert_eq!(cache.store.get::<CachedVerdict>(["signatures", "verdicts", "old.exe"]).unwrap(), Some(entry));
+            assert_eq!(cache.lookup_at("old.exe", stamp(), saved + day), None);
+            assert_eq!(cache.store.get::<CachedVerdict>(["signatures", "verdicts", "old.exe"]).unwrap(), None);
+        }
+        {
+            let store = builder(path).build().unwrap();
+            assert_eq!(store.get::<CachedVerdict>(["signatures", "verdicts", "old.exe"]).unwrap(), None);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_only_expired_direct_entries_and_persists_deletions() {
+        let directory = std::env::temp_dir().join(format!("uniproc-signature-cleanup-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("cache");
+        let day = TTL.as_millis() as u64;
+        let now = day * 2;
+        {
+            let cache = PersistentSignatures { store: builder(path.clone()).build().unwrap() };
+            for (name, saved) in [("expired", day), ("fresh", day + 1), ("future", now + 1), ("missing", 0)] {
+                cache.remember(name, CachedVerdict { saved_at_ms: saved, ..verdict(stamp()) });
+            }
+            let expired = CachedVerdict { saved_at_ms: day, ..verdict(stamp()) };
+            cache.store.set(["signatures", "verdicts", "deep", "entry"], &expired).unwrap();
+            cache.store.set(["signatures", "verdicts-neighbor", "entry"], &expired).unwrap();
+            cache.store.set(["signatures", "verdicts", "corrupt"], &42u32).unwrap();
+            cache.store.save_now().unwrap();
+            assert_eq!(cache.cleanup_at(now), 2);
+            assert_eq!(cache.cleanup_at(now), 0);
+            assert_eq!(cache.lookup_at("future", stamp(), now), None);
+            assert!(cache.store.get::<CachedVerdict>(["signatures", "verdicts", "future"]).unwrap().is_some());
+        }
+        {
+            let store = builder(path).build().unwrap();
+            for name in ["expired", "missing"] {
+                assert_eq!(store.get::<CachedVerdict>(["signatures", "verdicts", name]).unwrap(), None);
+            }
+            for name in ["fresh", "future"] {
+                assert!(store.get::<CachedVerdict>(["signatures", "verdicts", name]).unwrap().is_some());
+            }
+            assert!(store.get::<CachedVerdict>(["signatures", "verdicts", "deep", "entry"]).unwrap().is_some());
+            assert!(store.get::<CachedVerdict>(["signatures", "verdicts-neighbor", "entry"]).unwrap().is_some());
+            assert_eq!(store.get::<u32>(["signatures", "verdicts", "corrupt"]).unwrap(), Some(42));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn the_cache_can_be_shared_between_threads() {
@@ -243,6 +382,7 @@ mod tests {
 
     fn verdict(stamp: Stamp) -> CachedVerdict {
         CachedVerdict {
+            saved_at_ms: now_ms(),
             signature: 3,
             is_windows_process: false,
             display_name: "probe".to_string(),
