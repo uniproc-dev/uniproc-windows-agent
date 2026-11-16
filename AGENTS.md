@@ -29,6 +29,13 @@ Worker shutdown waits at most two seconds. Missing DLLs report Unavailable;
 backend and per-device errors retain diagnostic strings. Missing readings are
 None; zero is a valid reading. DIMM/NVMe limits and CPU distance-to-TjMax are excluded.
 
+While polling, the LHM bridge requests a blocking compacting aggressive full GC
+at most once per minute and after closing its Computer. This returns unused
+managed heap pages without trimming the process working set. Collection runs on
+the existing worker; it can delay that snapshot and has no hard pause-time bound.
+The five-second stale cutoff remains unchanged. Measurements and limits are in
+`diagnostics/memory/20261116/RESULTS.txt`.
+
 Hardware coverage depends on LHM, installed drivers (including PawnIO for some
 CPU/RAM access), and the machine. NativeAOT warnings from System.Management and
 other dependencies are not proof of support. Run `cargo run --example temperatures`

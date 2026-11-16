@@ -1,0 +1,65 @@
+Windows service memory investigation, 2026-11-16
+
+These are separate runs. Do not subtract their totals from one another.
+MiB means 1,048,576 bytes. Private commit is not private resident memory.
+
+Existing service PID 42412, read-only page metadata:
+  resident: 77.10 MiB; private resident: 43.92 MiB; shared: 33.18 MiB.
+  MEM_PRIVATE resident: 41.09 MiB.
+  LHM image resident: 4.90 MiB, including 0.14 MiB private image pages.
+  This image figure excludes its GC heap and native allocations.
+
+Temporary release DHAT run, approximately 63 seconds, snapshot before teardown:
+  Rust live: 21,042,030 bytes (20.067 MiB).
+  Rust peak: 21,451,934 bytes (20.458 MiB).
+  vm_memory::working_set: 8.882 MiB live; 504.384 MiB allocated across the run.
+  ProcessEvents::start queue: 3.126 MiB live.
+  Signature-cache call stacks: 2.911 MiB live.
+  AlignedBuf::zeroed: 2.003 MiB live.
+  Process-event history: 0.239 MiB live.
+  DHAT excludes NativeAOT GC, native allocations, stacks and allocator free pages.
+  The UI was minimized; an unrelated build ran concurrently. This is not an idle
+  benchmark, and profiling overhead is not a release memory baseline.
+
+Ordinary release plus temporary native instrumentation, no DHAT:
+  stage             private commit MiB   GC committed MiB
+  before            64.28                15.14
+  aggressive GC     54.13                 6.65
+  native heap purge 53.57                 6.65
+  30 seconds later  58.61                 6.65
+  GC.Collect(MaxGeneration, Aggressive, blocking:true, compacting:true) took
+  14.30 ms in this observation. This is not a worst-case pause bound.
+  HeapSetInformation(HeapOptimizeResources) took 0.26 ms and saved only
+  another 0.56 MiB of private commit. All seven heaps supported HeapSummary.
+
+System.GC.ConserveMemory=7 was compiled into NativeAOT and confirmed through
+AppContext.GetData. No manual collection/purge was performed in this run:
+  at 60 seconds: private commit 64.93 MiB, GC committed 15.08 MiB, gen2 count 0.
+  at 90 seconds: private commit 65.46 MiB, GC committed 15.08 MiB, gen2 count 0.
+  No useful reduction was observed in this short run; the knob was removed.
+
+Candidate: aggressive full GC at most once per minute on the existing worker:
+  at 60 seconds: private commit 55.84 MiB, GC committed 6.66 MiB, gen2 count 1.
+  at 90 seconds: private commit 68.19 MiB, GC committed 6.66 MiB, gen2 count 1.
+  Across those last two observations, native heap allocated bytes grew from
+  18.36 to 27.84 MiB. The total-process increase cannot be attributed to the
+  GC heap alone. The separate DHAT run establishes the large transient VM
+  working-set buffer, but does not prove its ownership in this second run.
+
+Change:
+  Request aggressive compacting full GC once per minute while polling and
+  after Computer.Close. Keep the existing worker and coherent snapshots.
+  Do not trim the process working set, purge all native heaps periodically,
+  change global runtime settings, or replace measured data with estimates.
+  No fixed upper bound on process RAM or collection pause time is claimed.
+
+Raw local artifacts remain under experiments/service-heap-20261116-c,
+experiments/service-memory-release-20261116,
+experiments/service-memory-conserve7-20261116 and
+experiments/service-memory-periodic-gc-20261116. They are not published.
+
+API references:
+https://learn.microsoft.com/en-us/dotnet/api/system.gc.collect
+https://learn.microsoft.com/en-us/dotnet/core/runtime-config/garbage-collector
+https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapsummary
+https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapsetinformation

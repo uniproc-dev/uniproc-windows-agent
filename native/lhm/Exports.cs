@@ -12,6 +12,7 @@ public static unsafe class Exports
 {
     private static readonly object Gate = new();
     private static Computer? Computer;
+    private static long LastCollection = Environment.TickCount64;
     private static byte[] Snapshot = Failure("unavailable", "Backend has not been opened");
 
     [UnmanagedCallersOnly(EntryPoint = "lhm_abi_version")]
@@ -34,6 +35,7 @@ public static unsafe class Exports
                 };
                 Computer = computer;
                 computer.Open();
+                LastCollection = Environment.TickCount64;
                 return 0;
             }
             catch (Exception error)
@@ -69,6 +71,11 @@ public static unsafe class Exports
                     json.WriteEndObject();
                 }
                 Snapshot = buffer.WrittenSpan.ToArray();
+                if (Environment.TickCount64 - LastCollection >= 60_000)
+                {
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, true, true);
+                    LastCollection = Environment.TickCount64;
+                }
                 return 0;
             }
             catch (Exception error)
@@ -154,6 +161,7 @@ public static unsafe class Exports
             try { Computer?.Close(); } catch { }
             Computer = null;
             Snapshot = Failure("unavailable", "Backend is closed");
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, true, true);
         }
     }
 
