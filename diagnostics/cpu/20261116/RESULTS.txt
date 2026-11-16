@@ -1,0 +1,35 @@
+CPU investigation and removal of VM memory correction, 2026-11-16
+
+Ordinary service v0.32.3, existing clients left running, no CPU profiler:
+  12 logical processors, 60.2080126 s wall, 16.125 s process CPU.
+  Average 26.7821% of one logical processor, or 2.23185% machine capacity.
+  Largest approximately one-second interval: 3.58599% machine capacity.
+  User CPU 0.46875 s; kernel CPU 15.65625 s.
+
+Windows per-thread CPU accounting in that same interval:
+  vm-working-set                       13.921875 s (86.34% of process CPU)
+  temperatures                          0.953125 s
+  core                                  0.593750 s
+  WindowsStorageIoControl.OpenDeviceWorker 0.203125 s
+  exclusive-mapped                      0.171875 s
+  Other / counter rounding              0.281250 s
+
+This is a measurement under the existing workload, not an idle/no-client claim.
+The accounting uses processor time without frequency adjustment. Thread lifetime
+and counter quantization prevent treating every small delta as exact attribution.
+
+The user requested removal of VM memory correction rather than maintaining it.
+Removed the VmMemory worker, mappings/working-set scan, public metric/column,
+SDK capability and standalone live example. VM-host classification remains.
+VM hosts use ordinary working set in the UI; other processes retain private WS.
+
+Protocol 0.26.1 / Windows 2.17.1 reserves the old metric ordinal 39 and column 44,
+preserving ordinal/type layout. A retired request is ignored; a new response does
+not populate the retired column. This is not a background fallback collector.
+
+Private measurement records and ETL files remain local. The first WPR recording
+ran out of disk space and lost 755 events / 38 buffers; it is not used for exact
+CPU attribution. Independent process/thread counters above are complete.
+A second short CPU trace recorded on C: had zero lost events/buffers, but its
+stack export includes waits and is not a substitute for CPU-time accounting.
+No working-set trimming, UI control or global profiler configuration was used.

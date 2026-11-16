@@ -51,25 +51,12 @@ against the deployed LocalSystem service to inspect actual availability and valu
 `Remote::can_temperatures()` reports peer support; requests to Windows protocol
 versions older than 2.11 omit this metric. Per-device error text uses protocol 2.12.
 
-# VM working set
+# VM memory
 
-`ProcessMetric::VmWorkingSet` requests a heuristic correction of working set for
-confirmed VM-host processes. `Columns.vm_working_set` is optional; a row holding
-`NO_DATA_U64` is unavailable. `working_set` remains the original Windows counter.
-The correction is not a count of unique physical pages.
-
-The service probes off the sampling thread. It keeps the first complete local
-`.vmem` file view in ascending allocation-address order and excludes resident
-pages of subsequent complete views of the same file identity and length. Partial
-views and different files are not collapsed. Matching full views are assumed to
-start at file offset zero; the algorithm does not obtain PFNs or prove physical
-page identity. Missing access, metadata, stale results, and exceeded scan limits
-return unavailable. Consumers keep a fallback to raw working set.
-
-`Remote::can_vm_working_set()` requires Windows protocol 2.13. Older peers are
-not sent the new metric, including in requests built with `ProcessMetrics::all()`.
-Use `cargo run --example vm_working_set -- <pid>` against the service for a
-30-second comparison of raw, private, and corrected working sets.
+VM hosts use the ordinary Windows working-set measurement. The service does not
+walk VM memory maps, read VM working-set pages or deduplicate .vmem views.
+VmHost classification remains independent of memory measurement.
+The former wire metric/column slots are reserved and are never collected.
 
 # CPU name
 

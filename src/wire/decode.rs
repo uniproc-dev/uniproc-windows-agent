@@ -147,8 +147,8 @@ fn io_priority(p: Wire<WireIoPriority>) -> IoPriority {
     }
 }
 
-fn process_metric(m: WireProcessMetric) -> ProcessMetric {
-    match m {
+fn process_metric(m: WireProcessMetric) -> Option<ProcessMetric> {
+    Some(match m {
         WireProcessMetric::CpuUserTime => ProcessMetric::CpuUserTime,
         WireProcessMetric::CpuKernelTime => ProcessMetric::CpuKernelTime,
         WireProcessMetric::CpuCycles => ProcessMetric::CpuCycles,
@@ -188,8 +188,8 @@ fn process_metric(m: WireProcessMetric) -> ProcessMetric {
         WireProcessMetric::GpuShared => ProcessMetric::GpuShared,
         WireProcessMetric::GpuEngines => ProcessMetric::GpuEngines,
         WireProcessMetric::ExclusiveMapped => ProcessMetric::ExclusiveMapped,
-        WireProcessMetric::VmWorkingSet => ProcessMetric::VmWorkingSet,
-    }
+        WireProcessMetric::ReservedVmWorkingSet => return None,
+    })
 }
 
 fn machine_metric(m: WireMachineMetric) -> MachineMetric {
@@ -490,7 +490,7 @@ pub fn metric_spec(spec: metric_spec::Reader<'_>) -> capnp::Result<MetricSpec> {
             .get_processes()?
             .iter()
             .filter_map(Result::ok)
-            .map(process_metric)
+            .filter_map(process_metric)
             .collect(),
         machine: spec
             .get_machine()?
@@ -567,7 +567,6 @@ pub fn sample(
             gpu_dedicated => (has_gpu_dedicated, get_gpu_dedicated),
             gpu_shared => (has_gpu_shared, get_gpu_shared),
             exclusive_mapped => (has_exclusive_mapped, get_exclusive_mapped),
-            vm_working_set => (has_vm_working_set, get_vm_working_set),
         ),
         gpu_engines: if p.has_gpu_engines() {
             Some(

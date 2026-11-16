@@ -35,16 +35,9 @@ pub fn takes_temperatures(agent: Version) -> bool {
     (agent.major, agent.minor) >= (2, 11)
 }
 
-pub fn takes_vm_working_set(agent: Version) -> bool {
-    (agent.major, agent.minor) >= (2, 13)
-}
-
 /// `spec` without the metrics `agent` has no name for: an agent older than
 /// windows 2.6 refuses a spec that asks for exclusiveMapped.
 pub fn known_to(agent: Version, mut spec: MetricSpec) -> MetricSpec {
-    if !takes_vm_working_set(agent) {
-        spec.processes.remove(ProcessMetric::VmWorkingSet);
-    }
     if !takes_temperatures(agent) {
         spec.machine.remove(MachineMetric::Temperatures);
     }
@@ -427,7 +420,6 @@ mod tests {
                 cpu_kernel_time: rows(20),
                 cpu_cycles: rows(30),
                 working_set: rows(40),
-                vm_working_set: Some(Arc::from([0, crate::api::NO_DATA_U64])),
                 peak_working_set: rows(50),
                 private_working_set: rows(60),
                 commit: rows(70),
@@ -700,7 +692,6 @@ mod tests {
             spec(ProcessMetrics::only(ProcessMetric::GpuEngines), MachineMetric::Gpu),
             spec(ProcessMetric::GpuDedicated | ProcessMetric::GpuShared, MachineMetrics::empty()),
             spec(ProcessMetrics::only(ProcessMetric::ExclusiveMapped), MachineMetrics::empty()),
-            spec(ProcessMetrics::only(ProcessMetric::VmWorkingSet), MachineMetrics::empty()),
             spec(ProcessMetrics::empty(), MachineMetric::NetworkAdapters | MachineMetric::Network),
             spec(ProcessMetrics::empty(), MachineMetrics::empty()),
         ] {
@@ -721,15 +712,23 @@ mod tests {
     }
 
     #[test]
-    fn vm_working_set_is_requested_only_from_a_peer_that_knows_it() {
-        let asked = spec(ProcessMetrics::all(), MachineMetrics::empty());
-        let version = |minor| ogurpchik::auth::handshake::Version { major: 2, minor, patch: 0 };
-        let old = super::known_to(version(12), asked);
-        assert!(!old.processes.contains(ProcessMetric::VmWorkingSet));
-        assert!(old.processes.contains(ProcessMetric::WorkingSet));
-        assert_eq!(super::known_to(version(13), asked), asked);
-        assert!(!super::takes_vm_working_set(version(12)));
-        assert!(super::takes_vm_working_set(version(13)));
+    fn a_retired_vm_metric_is_ignored_without_losing_supported_metrics() {
+        use uniproc_protocol::windows_capnp::ProcessMetric as WireMetric;
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let mut out = message.init_root::<metric_spec::Builder>();
+            out.set_interval_ms(1000);
+            let mut processes = out.init_processes(2);
+            processes.set(0, WireMetric::ReservedVmWorkingSet);
+            processes.set(1, WireMetric::WorkingSet);
+        }
+        let reader = message.get_root_as_reader::<metric_spec::Reader>().unwrap();
+        let decoded = decode::metric_spec(reader).unwrap();
+        assert_eq!(decoded.processes, ProcessMetrics::only(ProcessMetric::WorkingSet));
+        let mut reply = capnp::message::Builder::new_default();
+        encode::sample(&full_sample(), reply.init_root::<sampler::sample_results::Builder>()).unwrap();
+        let reader = reply.get_root_as_reader::<sampler::sample_results::Reader>().unwrap();
+        assert!(!reader.get_processes().unwrap().has_reserved_vm_working_set());
     }
 
     #[test]
