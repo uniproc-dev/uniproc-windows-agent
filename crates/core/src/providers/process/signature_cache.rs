@@ -10,7 +10,9 @@ use crate::bindings::{
 
 use amethystate::store::builder::Backend;
 use amethystate::store::{OnUnreadable, UnreadableEntries, WillNotOpen};
-use amethystate::{ReactiveMap, Store, StoreBuilder, amethystate};
+use amethystate::{Store, StoreBuilder};
+#[cfg(test)]
+use amethystate::{ReactiveMap, amethystate};
 
 use crate::state::events::ProcessSignature;
 
@@ -48,6 +50,7 @@ pub struct Stamp {
     pub usn: i64,
 }
 
+#[cfg(test)]
 #[amethystate(prefix = "signatures")]
 pub struct SignatureCache {
     #[amestate(default = {})]
@@ -157,22 +160,13 @@ fn builder(path: PathBuf) -> StoreBuilder {
 }
 
 pub struct PersistentSignatures {
-    _store: Store,
-    cache: SignatureCache,
-}
-
-impl PersistentSignatures {
-    pub fn cache(&self) -> &SignatureCache {
-        &self.cache
-    }
+    store: Store,
 }
 
 impl Drop for PersistentSignatures {
     fn drop(&mut self) {
-        let entries = self.cache.verdicts().len();
-        match self._store.save_now() {
-            Ok(()) => tracing::warn!(entries, "drop probe: final save ok"),
-            Err(err) => tracing::warn!(%err, entries, "drop probe: final save FAILED"),
+        if let Err(error) = self.store.save_now() {
+            tracing::warn!(%error, "could not flush the signature cache");
         }
     }
 }
@@ -194,23 +188,7 @@ pub fn open(name: &str) -> Option<PersistentSignatures> {
         }
     };
 
-    let cache = match SignatureCache::try_new_with(&store) {
-        Ok(cache) => cache,
-        Err(err) => {
-            tracing::warn!(%err, "could not open the signature cache");
-            return None;
-        }
-    };
-
-    tracing::warn!(
-        loaded = cache.verdicts().len(),
-        "signature cache opened"
-    );
-
-    Some(PersistentSignatures {
-        _store: store,
-        cache,
-    })
+    Some(PersistentSignatures { store })
 }
 
 impl CachedVerdict {
@@ -226,13 +204,19 @@ impl CachedVerdict {
     }
 }
 
-impl SignatureCache {
+impl PersistentSignatures {
     pub fn lookup(&self, path: &str, stamp: Stamp) -> Option<CachedVerdict> {
-        self.verdicts().get(path).filter(|cached| cached.describes(stamp))
+        match self.store.get::<CachedVerdict>(["signatures", "verdicts", path]) {
+            Ok(cached) => cached.filter(|cached| cached.describes(stamp)),
+            Err(error) => {
+                tracing::warn!(%error, path, "could not read a signature verdict");
+                None
+            }
+        }
     }
 
     pub fn remember(&self, path: &str, verdict: CachedVerdict) {
-        if let Err(err) = self.verdicts().insert(path.to_string(), &verdict) {
+        if let Err(err) = self.store.set(["signatures", "verdicts", path], &verdict) {
             tracing::warn!(%err, path, "could not persist a signature verdict");
         }
     }
@@ -269,6 +253,41 @@ mod tests {
             file_id: stamp.file_id,
             usn: stamp.usn,
         }
+    }
+
+    #[test]
+    fn point_access_preserves_legacy_entries_and_flushes_updates() {
+        let directory = std::env::temp_dir().join(format!("uniproc-lazy-signatures-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("cache");
+        let original = r"C:\Программы\app.v1\old.exe";
+        let added = r"D:\other.app\new.exe";
+        let cached = verdict(stamp());
+        {
+            let store = builder(path.clone()).build().unwrap();
+            let legacy = SignatureCache::try_new_with(&store).unwrap();
+            legacy.verdicts().insert(original.to_string(), &cached).unwrap();
+            store.set(["unrelated", "entry"], &42u32).unwrap();
+            store.save_now().unwrap();
+        }
+        {
+            let cache = PersistentSignatures { store: builder(path.clone()).build().unwrap() };
+            assert_eq!(cache.lookup(original, stamp()), Some(cached.clone()));
+            assert_eq!(cache.lookup(original, Stamp { usn: 901, ..stamp() }), None);
+            assert_eq!(cache.lookup(added, stamp()), None);
+            cache.remember(added, cached.clone());
+            assert_eq!(cache.lookup(added, stamp()), Some(cached.clone()));
+            cache.store.set(["signatures", "verdicts", "malformed"], &42u32).unwrap();
+            assert_eq!(cache.lookup("malformed", stamp()), None);
+        }
+        {
+            let store = builder(path).build().unwrap();
+            let legacy = SignatureCache::try_new_with(&store).unwrap();
+            assert_eq!(legacy.verdicts().get(original), Some(cached.clone()));
+            assert_eq!(legacy.verdicts().get(added), Some(cached));
+            assert_eq!(store.get::<u32>(["unrelated", "entry"]).unwrap(), Some(42));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

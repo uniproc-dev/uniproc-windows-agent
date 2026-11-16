@@ -174,7 +174,7 @@ fn judge_afresh(
     persisted: Option<&signature_cache::PersistentSignatures>,
 ) -> ImageVerdict {
     let path = &request.path;
-    let cache = persisted.map(|p| p.cache());
+    let cache = persisted;
     let hit = match (stamp, cache) {
         (Some(stamp), Some(cache)) => cache.lookup(path, stamp),
         _ => None,
