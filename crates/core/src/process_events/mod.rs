@@ -131,7 +131,7 @@ pub struct ProcessEventsProvider {
 }
 
 enum Input {
-    Record(OwnedEvent),
+    Record(Box<OwnedEvent>),
     KernelLost(u64),
 }
 
@@ -150,7 +150,7 @@ impl Provider for ProcessEventsProvider {
             )
             .manifest(TASK_SCHEDULER, EVERY_KEYWORD)
             .on(&PROVIDERS, move |event| {
-                if decode::wanted(event) && input.try_send(Input::Record(event.to_owned())).is_err() {
+                if decode::wanted(event) && input.try_send(Input::Record(Box::new(event.to_owned()))).is_err() {
                     dropped.fetch_add(1, Ordering::Relaxed);
                 }
                 None
@@ -237,6 +237,12 @@ mod tests {
     use std::time::Instant;
 
     const T: u64 = 134_000_000_000_000_000;
+
+    #[test]
+    fn an_empty_queue_does_not_reserve_inline_event_payloads() {
+        assert!(std::mem::size_of::<Input>() <= 2 * std::mem::size_of::<usize>());
+        assert!(std::mem::size_of::<Input>() < std::mem::size_of::<OwnedEvent>());
+    }
 
     fn exit(pid: u32, time: u64, exit_code: u32) -> ProcessEvent {
         ProcessEvent {
