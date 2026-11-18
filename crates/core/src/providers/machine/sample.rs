@@ -125,6 +125,7 @@ pub fn physical_memory() -> Option<MachineMemory> {
         available_physical: mem.ullAvailPhys.0,
         commit_limit: mem.ullTotalPageFile.0,
         committed: mem.ullTotalPageFile.0.saturating_sub(mem.ullAvailPageFile.0),
+        ..Default::default()
     })
 }
 

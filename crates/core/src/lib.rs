@@ -31,7 +31,7 @@ pub use sample::{
     CpuInventory, MachineSystemStats,
     MachineTemperatures, TemperatureCategory, TemperatureDevice, TemperatureSensor, TemperatureStatus,
     Columns, Demand, GpuAdapter, GpuEngine, GpuEngineKind, MAX_INTERVAL, MIN_INTERVAL, MachineCpu, MachineDisk,
-    MachineMemory, NetworkAdapter, ProcessGpuEngine,
+    MachineMemory, MemoryDetails, MemoryInventory, NetworkAdapter, ProcessGpuEngine,
     MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample, MetricSpec, NO_DATA_U32,
     NO_DATA_U64, ProcessMetric, ProcessMetrics, Sample,
 };

@@ -653,6 +653,26 @@ fn machine_sample(sample: &Sample, mut out: machine_sample::Builder) {
         m.set_available_physical(memory.available_physical);
         m.set_commit_limit(memory.commit_limit);
         m.set_committed(memory.committed);
+        if let Some(details) = memory.details {
+            let mut d = m.reborrow().init_details();
+            d.set_compressed(details.compressed.unwrap_or(crate::api::NO_DATA_U64));
+            d.set_cached(details.cached.unwrap_or(crate::api::NO_DATA_U64));
+            d.set_paged_pool(details.paged_pool.unwrap_or(crate::api::NO_DATA_U64));
+            d.set_non_paged_pool(details.non_paged_pool.unwrap_or(crate::api::NO_DATA_U64));
+            d.set_standby(details.standby.unwrap_or(crate::api::NO_DATA_U64));
+            d.set_modified(details.modified.unwrap_or(crate::api::NO_DATA_U64));
+            d.set_free(details.free.unwrap_or(crate::api::NO_DATA_U64));
+            d.set_installed(details.installed.unwrap_or(crate::api::NO_DATA_U64));
+        }
+        if let Some(info) = &memory.inventory {
+            let mut i = m.reborrow().init_inventory();
+            i.set_memory_type(info.memory_type.map(u32::from).unwrap_or(crate::api::NO_DATA_U32));
+            i.set_form_factor(info.form_factor.map(u32::from).unwrap_or(crate::api::NO_DATA_U32));
+            i.set_speed_mt_s(info.speed_mt_s.unwrap_or(crate::api::NO_DATA_U32));
+            i.set_slots_used(info.slots_used.unwrap_or(crate::api::NO_DATA_U32));
+            i.set_slots_total(info.slots_total.unwrap_or(crate::api::NO_DATA_U32));
+            i.set_hardware_reserved(info.hardware_reserved.unwrap_or(crate::api::NO_DATA_U64));
+        }
     }
     if let Some(disk) = disk {
         let mut d = out.reborrow().init_disk();

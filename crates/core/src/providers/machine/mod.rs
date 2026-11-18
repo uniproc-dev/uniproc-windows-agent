@@ -7,6 +7,8 @@ mod processor_times;
 mod sample;
 mod vars;
 mod temperatures;
+mod memory;
+mod memory_inventory;
 
 pub use cpu_inventory::context as cpu_context;
 
@@ -16,7 +18,7 @@ use ntapi::ntpoapi::PROCESSOR_POWER_INFORMATION;
 
 use crate::providers::machine::adapters::NetworkAdapters;
 use crate::providers::machine::processor_times::{ProcessorTimes, total};
-use crate::providers::machine::sample::{PdhProcessorPerformance, cpu_frequency_mhz, physical_memory};
+use crate::providers::machine::sample::{PdhProcessorPerformance, cpu_frequency_mhz};
 use crate::sample::{
     MachineCpu, MachineDisk, MachineMetric, MachineMetrics, MachineNetwork, MachineProcessor, MachineSample,
 };
@@ -86,7 +88,7 @@ impl MachineProbe {
             }
         }
         if wanted.contains(MachineMetric::Memory) {
-            sample.memory = physical_memory();
+            sample.memory = memory::read();
         }
         if wanted.contains(MachineMetric::Disk) {
             sample.disk = Some(MachineDisk {

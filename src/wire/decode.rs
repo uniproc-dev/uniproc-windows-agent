@@ -718,6 +718,32 @@ fn machine_groups(m: machine_sample::Reader<'_>) -> capnp::Result<MachineSample>
                 available_physical: mem.get_available_physical(),
                 commit_limit: mem.get_commit_limit(),
                 committed: mem.get_committed(),
+                details: if mem.has_details() {
+                    let d = mem.get_details()?;
+                    let optional = |v| (v != crate::api::NO_DATA_U64).then_some(v);
+                    Some(crate::api::MemoryDetails {
+                        compressed: optional(d.get_compressed()),
+                        cached: optional(d.get_cached()),
+                        paged_pool: optional(d.get_paged_pool()),
+                        non_paged_pool: optional(d.get_non_paged_pool()),
+                        standby: optional(d.get_standby()),
+                        modified: optional(d.get_modified()),
+                        free: optional(d.get_free()),
+                        installed: optional(d.get_installed()),
+                    })
+                } else { None },
+                inventory: if mem.has_inventory() {
+                    let i = mem.get_inventory()?;
+                    let optional = |v| (v != crate::api::NO_DATA_U32).then_some(v);
+                    Some(Arc::new(crate::api::MemoryInventory {
+                        memory_type: u8::try_from(i.get_memory_type()).ok(),
+                        form_factor: u8::try_from(i.get_form_factor()).ok(),
+                        speed_mt_s: optional(i.get_speed_mt_s()),
+                        slots_used: optional(i.get_slots_used()),
+                        slots_total: optional(i.get_slots_total()),
+                        hardware_reserved: (i.get_hardware_reserved() != crate::api::NO_DATA_U64).then_some(i.get_hardware_reserved()),
+                    }))
+                } else { None },
             })
         } else {
             None

@@ -298,12 +298,36 @@ pub struct MachineProcessor {
 }
 
 /// Bytes, current. The commit limit is RAM plus the page files.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct MachineMemory {
     pub total_physical: u64,
     pub available_physical: u64,
     pub commit_limit: u64,
     pub committed: u64,
+    pub details: Option<MemoryDetails>,
+    pub inventory: Option<Arc<MemoryInventory>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct MemoryDetails {
+    pub compressed: Option<u64>,
+    pub cached: Option<u64>,
+    pub paged_pool: Option<u64>,
+    pub non_paged_pool: Option<u64>,
+    pub standby: Option<u64>,
+    pub modified: Option<u64>,
+    pub free: Option<u64>,
+    pub installed: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct MemoryInventory {
+    pub memory_type: Option<u8>,
+    pub speed_mt_s: Option<u32>,
+    pub slots_used: Option<u32>,
+    pub slots_total: Option<u32>,
+    pub form_factor: Option<u8>,
+    pub hardware_reserved: Option<u64>,
 }
 
 /// All physical disks together, cumulative since the agent started.
@@ -523,7 +547,7 @@ impl MachineSample {
             cpu_inventory: self.cpu_inventory.clone().filter(|_| wanted.contains(MachineMetric::Cpu)),
             temperatures: self.temperatures.clone().filter(|_| wanted.contains(MachineMetric::Temperatures)),
             cpu_package_power_watts: self.cpu_package_power_watts.filter(|_| wanted.contains(MachineMetric::Temperatures)),
-            memory: self.memory.filter(|_| wanted.contains(MachineMetric::Memory)),
+            memory: self.memory.clone().filter(|_| wanted.contains(MachineMetric::Memory)),
             disk: self.disk.filter(|_| wanted.contains(MachineMetric::Disk)),
             network: self.network.filter(|_| wanted.contains(MachineMetric::Network)),
             processors: self.processors.clone().filter(|_| wanted.contains(MachineMetric::Processors)),

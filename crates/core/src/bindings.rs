@@ -596,6 +596,13 @@ pub unsafe fn GetPerformanceInfo(
     unsafe { GetPerformanceInfo(pperformanceinformation as _, cb) }
 }
 #[inline]
+pub unsafe fn GetPhysicallyInstalledSystemMemory(
+    totalmemoryinkilobytes: *mut u64,
+) -> windows_core::BOOL {
+    windows_core::link!("kernel32.dll" "system" fn GetPhysicallyInstalledSystemMemory(totalmemoryinkilobytes : *mut u64) -> windows_core::BOOL);
+    unsafe { GetPhysicallyInstalledSystemMemory(totalmemoryinkilobytes as _) }
+}
+#[inline]
 pub unsafe fn GetProcAddress<P1>(hmodule: HMODULE, lpprocname: P1) -> FARPROC
 where
     P1: windows_core::Param<windows_core::PCSTR>,
@@ -619,6 +626,15 @@ pub unsafe fn GetProcessInformation(
             processinformationsize,
         )
     }
+}
+#[inline]
+pub unsafe fn GetProcessMemoryInfo(
+    process: HANDLE,
+    ppsmemcounters: *mut PROCESS_MEMORY_COUNTERS,
+    cb: u32,
+) -> windows_core::BOOL {
+    windows_core::link!("kernel32.dll" "system" "K32GetProcessMemoryInfo" fn GetProcessMemoryInfo(process : HANDLE, ppsmemcounters : *mut PROCESS_MEMORY_COUNTERS, cb : u32) -> windows_core::BOOL);
+    unsafe { GetProcessMemoryInfo(process, ppsmemcounters as _, cb) }
 }
 #[inline]
 pub unsafe fn GetProcessMitigationPolicy(
@@ -3457,6 +3473,20 @@ impl Default for PROCESSOR_RELATIONSHIP {
 }
 pub const PROCESS_DUP_HANDLE: i32 = 64;
 pub type PROCESS_INFORMATION_CLASS = i32;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PROCESS_MEMORY_COUNTERS {
+    pub cb: u32,
+    pub PageFaultCount: u32,
+    pub PeakWorkingSetSize: usize,
+    pub WorkingSetSize: usize,
+    pub QuotaPeakPagedPoolUsage: usize,
+    pub QuotaPagedPoolUsage: usize,
+    pub QuotaPeakNonPagedPoolUsage: usize,
+    pub QuotaNonPagedPoolUsage: usize,
+    pub PagefileUsage: usize,
+    pub PeakPagefileUsage: usize,
+}
 pub type PROCESS_MITIGATION_POLICY = i32;
 pub const PROCESS_QUERY_INFORMATION: i32 = 1024;
 pub const PROCESS_QUERY_LIMITED_INFORMATION: i32 = 4096;

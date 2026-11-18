@@ -246,3 +246,6 @@ Windows::Win32::CacheInstruction
 Windows::Win32::CacheData
 Windows::Win32::IsProcessorFeaturePresent
 Windows::Win32::PF_VIRT_FIRMWARE_ENABLED
+Windows::Win32::GetPhysicallyInstalledSystemMemory
+Windows::Win32::GetProcessMemoryInfo
+Windows::Win32::PROCESS_MEMORY_COUNTERS

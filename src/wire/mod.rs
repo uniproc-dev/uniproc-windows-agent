@@ -526,6 +526,7 @@ mod tests {
                     available_physical: 9,
                     commit_limit: 16,
                     committed: 17,
+                    ..Default::default()
                 }),
                 disk: Some(MachineDisk {
                     read_ops: 10,
@@ -636,6 +637,26 @@ mod tests {
     fn a_sample_survives_the_wire() {
         let sent = full_sample();
         assert_eq!(round_trip(&sent), sent);
+    }
+
+    #[test]
+    fn memory_details_and_inventory_preserve_absence_zero_and_values() {
+        let mut sent = full_sample();
+        assert_eq!(round_trip(&sent).machine.memory, sent.machine.memory);
+        for value in [None, Some(0), Some(8_589_934_592)] {
+            let memory = sent.machine.memory.as_mut().unwrap();
+            memory.details = Some(crate::api::MemoryDetails {
+                compressed: value, cached: value, paged_pool: value, non_paged_pool: value,
+                standby: value, modified: value, free: value, installed: value,
+            });
+            memory.inventory = Some(Arc::new(crate::api::MemoryInventory {
+                memory_type: Some(255), form_factor: Some(0), speed_mt_s: Some(6400),
+                slots_used: Some(0), slots_total: None, hardware_reserved: value,
+            }));
+            assert_eq!(round_trip(&sent).machine.memory, sent.machine.memory);
+        }
+        sent.machine.memory.as_mut().unwrap().inventory = Some(Arc::new(Default::default()));
+        assert_eq!(round_trip(&sent).machine.memory, sent.machine.memory);
     }
 
     #[test]

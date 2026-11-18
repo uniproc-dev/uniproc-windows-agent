@@ -654,6 +654,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "core-foundation"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
+name = "core-foundation-sys"
+version = "0.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
 name = "core_affinity"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1189,6 +1205,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "getopts"
+version = "0.2.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1386,6 +1411,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-kit-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06d3a048d09fbb6597dbf7c69f40d14df4a49487db1487191618c893fc3b1c26"
+dependencies = [
+ "core-foundation-sys",
+ "mach2 0.5.0",
+]
+
+[[package]]
 name = "io-uring"
 version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1500,6 +1535,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "mach2"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a1b95cd5421ec55b445b5ae102f5ea0e768de1f82bd3001e11f426c269c3aea"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "mach2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "matchers"
@@ -2176,6 +2226,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "smbios-lib"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e739c9b449374b4e9435857e0084895a59ef79b46d1c2b0f976c1c564ae7e4bc"
+dependencies = [
+ "core-foundation",
+ "core-foundation-sys",
+ "getopts",
+ "io-kit-sys",
+ "libc",
+ "mach2 0.6.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "smol_str"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2534,6 +2600,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+
+[[package]]
 name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2561,8 +2633,8 @@ dependencies = [
 
 [[package]]
 name = "uniproc-protocol"
-version = "0.26.1"
-source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.26.1#c50b8db47a725881b5b5458d29bebf94e5557fa2"
+version = "0.27.0"
+source = "git+https://github.com/uniproc-dev/uniproc-protocol?tag=v0.27.0#a352d3ceeb04e44a6b324efd60f2b76be6335b6d"
 dependencies = [
  "capnp",
  "capnp-rpc",
@@ -2571,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-agent"
-version = "0.32.4"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2595,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-core"
-version = "0.32.4"
+version = "0.33.0"
 dependencies = [
  "amethystate",
  "anyhow",
@@ -2612,6 +2684,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "smbios-lib",
  "smol_str",
  "tracing",
  "tracing-subscriber",
@@ -2623,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-http"
-version = "0.32.4"
+version = "0.33.0"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -2639,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-rpc"
-version = "0.32.4"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "capnp",
@@ -2654,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "uniproc-windows-service"
-version = "0.32.4"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "clap",
