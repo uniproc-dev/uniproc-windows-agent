@@ -23,12 +23,12 @@ ntapi = "0.4.3"
 
 ogurpchik = { git = "https://github.com/uniproc-dev/oguRPChik", tag = "v0.7.2" }
 uniproc-protocol = { git = "https://github.com/uniproc-dev/uniproc-protocol", tag = "v0.27.0" }
-capnp = "0.27"
-capnp-rpc = "0.27"
+capnp = "0.28"
+capnp-rpc = "0.28"
 
 tracing = "0.1"
 anyhow = "1"
-parking_lot = "0.12"
+parking_lot = "0.13"
 crossbeam-channel = "0.5"
 arc-swap = "1.7"
 
